@@ -1482,93 +1482,155 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
 }
 
 /**
- * Whether a schema admits `null`, as the type builder types it — the one
- * reading every reader settles an `allOf`'s `null` by: the vote of each
- * member of an `allOf` merged into one model (`allOfAdmitsNull`, for the
- * type builder, `declaresNull` and a component's model alike) and of each
- * declaration two `allOf` members give one property
+ * What a schema says of `null`, as the vote it casts as a member of an
+ * `allOf` (`nullVote`): it admits `null`, it rejects it, or it abstains —
+ * it says nothing of what an instance is, so it only annotates or limits
+ * the schema it is a member of and has no vote.
+ */
+export type NullVote = 'admits' | 'rejects' | 'abstains';
+
+/**
+ * Whether a schema admits `null`, as the type builder types it
+ * (`nullVote`: `'admits'`) — the one reading every reader settles an
+ * `allOf`'s `null` by: an `allOf` merged into one model (`allOfAdmitsNull`,
+ * for the type builder, `declaresNull` and a component's model alike) and
+ * each declaration two `allOf` members give one property
  * (`conjoinTypedDeclarations`), so the property written by hand as the
  * `allOf` of both and the one the parser conjoins from two members admit
- * `null` alike (#676).
+ * `null` alike (#676). A schema that rejects `null` and one that says
+ * nothing of it (`'abstains'`) both admit none; a reader that must tell
+ * the two apart asks `nullVote`.
+ */
+export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  return nullVote(schema, path) === 'admits';
+}
+
+/**
+ * What a schema says of `null`, as the type builder types it: the vote it
+ * casts as a member of an `allOf` (`allOfNullVote`), and the one reading
+ * of "does this schema say what an instance is" every reader of an
+ * `allOf`'s `null` asks.
  *
- * A `$ref` admits what the schema it names admits (`componentSchemaOf`: a
+ * A `$ref` says what the schema it names says (`componentSchemaOf`: a
  * component, or the schema a pointer into one lands on), read by this
- * same rule, and nothing the keywords beside it say: the type builder
- * gives a `$ref` precedence over every
+ * same rule at every hop of a chain of aliases, and nothing the keywords
+ * beside it say: the type builder gives a `$ref` precedence over every
  * sibling, so `{ $ref: Plain, type: ['object', 'null'] }` over a `Plain`
- * that admits none admits none. Any other schema admits `null` when it
- * writes it (`writesNull`): a type list naming `null`, OAS 3.0 `nullable:
- * true` beside a `type`, a schema of nothing but `null` (`isNullSchema`),
- * a `const` of `null`, an `enum:` list naming it, or a `oneOf`/`anyOf`
- * with a `null` variant or the flag that stands for one
- * (`unionFlaggedNullable`), whatever else the union holds — and whatever
- * the schema composes: `{ type: ['object', 'null'], allOf: [{ $ref: A }]
- * }` over an `A` that admits none admits `null`, the schema's own word,
- * as the type builder types it `nullable<A>` and as the same `type`
- * beside a merge wraps the merge. JSON Schema, applying `A` as well, would
- * reject `null` there; the parser has always read a nullable `type` beside
- * an `allOf` as the nullable wrapper around what the `allOf` describes,
- * and two such wrappers conjoin to the same `type` beside both members
- * (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }] }`),
- * which is nullable by that reading. Else it admits
- * `null` through an `allOf` whose every member that types it does
- * (`allOfAdmitsNull`), as JSON Schema applies them all — and a `type` of
- * its own that names no `null` rejects it, whatever the schema composes:
- * `{ type: 'object', allOf: [{ $ref: Owner }] }` over a nullable `Owner`
- * admits none. Everything else admits none: an inline object with no
- * `type` is the object the type builder reads it as, and a schema that
- * declares no type says nothing.
+ * that admits none rejects `null`. So a `$ref` to a component that says
+ * nothing of what an instance is — `Described: { description: 'Any
+ * owner.' }`, `{ required: ['name'] }`, `{ minProperties: 1 }`, `{}`, an
+ * alias of one (`{ $ref: Described }`, `{ allOf: [{ $ref: Described }] }`)
+ * — abstains, as the same keywords written in its place do and as the type
+ * builder types the `$ref` alone (`unknown`), and `{ allOf: [{ $ref: Owner
+ * }, { $ref: Tag }, { $ref: Described }] }` over two nullable components
+ * admits `null` (#715: any `$ref` had a vote, and one to such a component
+ * rejected `null`, since the component writes none, so the `allOf` was the
+ * bare model where `{ description: 'Any owner.' }` written inline left it
+ * nullable). A `$ref` no schema answers is the reference the type builder
+ * types it as, a model that admits none, and rejects `null`.
+ *
+ * A member that is no Schema Object abstains (`isSchemaObject`): a JSON
+ * Schema boolean — `true`, which admits every instance as `{}` does, and
+ * `false`, which the readers of an `allOf` read as they read `true`, a
+ * member that gives the merged model no field and no limit, the parser
+ * having no type for a schema that admits nothing — and anything else a
+ * document writes where a schema goes (`null`, a number, a string, a
+ * list). So does a `$ref` to a component that is one (`Anything: true`).
+ * It is answered before anything is asked of it or remembered for it: it
+ * has no keyword to read, and only an object can key the memo (#715
+ * review: every member reached the memo, so `{ allOf: [{ $ref: Owner }, {
+ * $ref: Tag }, true] }` failed the parse where the readers before, which
+ * asked who votes first, read it as nullable).
+ *
+ * Any other schema admits `null` when it writes it (`writesNull`): a type
+ * list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a schema
+ * of nothing but `null` (`isNullSchema`), a `const` of `null`, an `enum:`
+ * list naming it, or a `oneOf`/`anyOf` with a `null` variant or the flag
+ * that stands for one (`unionFlaggedNullable`), whatever else the union
+ * holds — and whatever the schema composes: `{ type: ['object', 'null'],
+ * allOf: [{ $ref: A }] }` over an `A` that admits none admits `null`, the
+ * schema's own word, as the type builder types it `nullable<A>` and as the
+ * same `type` beside a merge wraps the merge. JSON Schema, applying `A` as
+ * well, would reject `null` there; the parser has always read a nullable
+ * `type` beside an `allOf` as the nullable wrapper around what the `allOf`
+ * describes, and two such wrappers conjoin to the same `type` beside both
+ * members (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }]
+ * }`), which is nullable by that reading. Else it says what its `type`
+ * and its `allOf` say (`allOfNullVote`): a `type` of its own that names no
+ * `null` rejects it, whatever the schema composes — `{ type: 'object',
+ * allOf: [{ $ref: Owner }] }` over a nullable `Owner` admits none — and
+ * with no `type` the members of its `allOf` vote, as JSON Schema applies
+ * them all. A schema none of this settles rejects `null` when a keyword of
+ * its own says what an instance is (`typesItself`: an inline object with
+ * no `type` is the object the type builder reads it as) and abstains when
+ * none does: `{ description }`, `{ required }`, `{ minProperties: 1 }`,
+ * `{}`.
  *
  * A schema met again on the path being read (`path`: the schemas above
- * it, not every schema read so far) admits none, which ends a component
+ * it, not every schema read so far) rejects `null`, which ends a component
  * that names itself, through a hop or outright, while a component two
  * members name is read for each — `{ allOf: [{ $ref: A }, { $ref: A }] }`
  * over a nullable `A` admits `null` (the #653 review's round 4: the second
  * `$ref` met `A` in a shared seen set and read it as a cycle).
  *
- * Each schema is read once per document (`nullAdmissions`): what a schema
- * admits does not depend on the path it was reached by. A schema admits
- * `null` only when every schema under it was read to the end and admitted
- * it, so none of them was on the path; and one that does not, because a
- * schema under it was met again on the path, sits on that loop itself and
- * admits none from wherever it is read. So a component many members name
- * is read for the first of them and answered for the rest (#676 review:
- * each reading forgot its answer, so `A1: { allOf: [{ $ref: A0 }, { $ref:
- * A0 }] }`, `A2` the same over `A1`, and so on read `A0` twice per level,
- * a billion times for the thirtieth component).
+ * Each schema is read once per document (`nullVotes`): what a schema says
+ * does not depend on the path it was reached by. The only schemas read
+ * under a schema are the one its `$ref` names and the members of its
+ * `allOf`, and a rejection among them is the schema's own (`allOfNullVote`),
+ * so a schema that reaches itself rejects `null` from wherever it is read,
+ * and no other schema's vote turns on a schema met on the path. So a
+ * component many members name is read for the first of them and answered
+ * for the rest (#676 review: each reading forgot its answer, so `A1: {
+ * allOf: [{ $ref: A0 }, { $ref: A0 }] }`, `A2` the same over `A1`, and so
+ * on read `A0` twice per level, a billion times for the thirtieth
+ * component).
  */
-export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
-  const settled = nullAdmissions.get(schema);
+export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set()): NullVote {
+  if (!isSchemaObject(schema)) return 'abstains';
+  const settled = nullVotes.get(schema);
   if (settled !== undefined) return settled;
-  if (path.has(schema)) return false;
+  if (path.has(schema)) return 'rejects';
   path.add(schema);
-  let admits: boolean;
+  let vote: NullVote;
   try {
     if (schema.$ref !== undefined) {
       const target = componentSchemaOf(schema.$ref);
-      admits = target !== undefined && schemaAdmitsNull(target, path);
+      vote = target === undefined ? 'rejects' : nullVote(target, path);
     } else {
-      admits = writesNull(schema) || allOfAdmitsNull(schema, path);
+      vote = writesNull(schema) ? 'admits' : allOfNullVote(schema, path);
     }
   } finally {
     path.delete(schema);
   }
-  nullAdmissions.set(schema, admits);
-  return admits;
+  nullVotes.set(schema, vote);
+  return vote;
 }
 
 /**
- * Whether each schema read so far admits `null` (`schemaAdmitsNull`), by
- * the schema, which the document owns. The answer follows a `$ref` to the
- * document's components (`componentSchemaOf`), so it is forgotten where
- * they are set or released (`resetNullAdmissions`), as the folded schemas
- * are (`resetFoldedSchemas`).
+ * Whether a value written where a schema goes is a Schema Object: a plain
+ * object, the only value with keywords for a reader to ask and the only
+ * one a memo can be keyed by. A JSON Schema boolean (`true`, `false`; OAS
+ * 3.1) is none, and neither is anything else a document may hold there
+ * (`null`, a number, a string, a list). `nullVote` asks it of every schema
+ * it is handed, since the members of an `allOf` and the component a `$ref`
+ * names are whatever the document wrote.
  */
-let nullAdmissions = new WeakMap<SchemaObject, boolean>();
+function isSchemaObject(value: unknown): value is SchemaObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
-/** Forget what every schema admits: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
-function resetNullAdmissions(): void {
-  nullAdmissions = new WeakMap();
+/**
+ * What each schema read so far says of `null` (`nullVote`), by the schema,
+ * which the document owns. The answer follows a `$ref` to the document's
+ * components (`componentSchemaOf`), so it is forgotten where they are set
+ * or released (`resetNullVotes`), as the folded schemas are
+ * (`resetFoldedSchemas`).
+ */
+let nullVotes = new WeakMap<SchemaObject, NullVote>();
+
+/** Forget what every schema says of `null`: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+function resetNullVotes(): void {
+  nullVotes = new WeakMap();
 }
 
 /**
@@ -1605,62 +1667,100 @@ function writesNull(schema: SchemaObject): boolean {
 
 /**
  * Whether a schema that writes no `null` of its own (`writesNull`) admits
- * it through its `allOf` — the one definition of "this `allOf` admits
- * `null`": the schema writes no `type` (one that names no `null` rejects
- * it) and every member that types it admits `null` (`schemaAdmitsNull`), at
- * least one of them, as JSON Schema applies them all. A member that
- * says nothing of what an instance is (`saysType`: `{ description }`, `{
- * required }`, `{ minProperties: 1 }`, and a wrapper around nothing but
- * such members, `{ allOf: [{ description }] }`) only annotates or limits
- * the schema and has no vote, so the nested spelling votes as the flat one
- * does. The members are the schema's as written, with what it writes
- * beside the `allOf` that the readers read as members of it
- * (`foldBesideAllOf`): its own `properties`, an inline object typed
- * `object` that admits none, and a typing `oneOf`/`anyOf`, which votes as a
- * union does. A member that is itself an `allOf` votes through its own
- * members by this same rule and is not spliced open first
- * (`unsplicedAllOf`): spliced, `{ type: 'object', allOf: [{ $ref: Owner }]
- * }` would lose the `type` that rejects `null` (#675 opens it, since no
- * other reader asks its `type`).
+ * it through its `allOf` (`allOfNullVote`: `'admits'`) — the one
+ * definition of "this `allOf` admits `null`": the schema writes no `type`
+ * (one that names no `null` rejects it), no member rejects `null` and at
+ * least one admits it, as JSON Schema applies them all.
  *
  * So `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
- * components admits `null`, `{ allOf: [{ $ref: Owner }, { type: 'object',
- * properties: { extra } }] }` does not, and neither does `{ allOf: [{
- * $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits none. Read
- * for an `allOf` merged into one model by the type builder
+ * components admits `null`, and so does the same beside a member with no
+ * vote — `{ description }`, or `{ $ref: Described }` to a component that
+ * writes nothing else (#715) — while `{ allOf: [{ $ref: Owner }, { type:
+ * 'object', properties: { extra } }] }` does not, and neither does `{
+ * allOf: [{ $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits
+ * none. Read for an `allOf` merged into one model by the type builder
  * (`buildTypeRef`), by `declaresNull`, and through it for a component
  * (`isNullableModelComponentEntry`) and the response path (`nullableIf`),
- * and for any `allOf` by `schemaAdmitsNull`. `path` is `schemaAdmitsNull`'s: the
- * schemas above the members.
+ * and for any `allOf` by `nullVote`. `path` is `nullVote`'s: the schemas
+ * above the members.
  */
 function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set([schema])): boolean {
-  if (schema.type !== undefined) return false;
-  const voting = (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).filter(saysType);
-  return voting.length > 0 && voting.every((member) => schemaAdmitsNull(member, path));
+  return allOfNullVote(schema, path) === 'admits';
 }
 
 /**
- * Whether an `allOf` member says what an instance is, and so has a vote on
- * `null` (`allOfAdmitsNull`): it declares a type by a keyword of its own
- * (`declaresType`), by a `oneOf`/`anyOf` that types it (`unionTypesSchema`),
- * or through a member of its own `allOf` that does, at any depth. A member
- * that is an `allOf` of nothing but annotations and limits — `{ allOf: [{
- * description }] }`, `{ allOf: [] }`, `{ description, allOf: [{
- * minProperties: 1 }] }` — or a union of bare limits (`{ anyOf: [{
- * required: ['a'] }, { maxProperties: 1 }] }`) declares none: every
- * instance it admits, `null` among them, it admits whatever the type, as
- * the members it would be spliced open into do (`spliceNestedAllOf`; #675),
- * which have no vote either. Read on the members as written, where
+ * What a schema that is no `$ref` and writes no `null` of its own
+ * (`writesNull`) says of it (`nullVote`), in this order. A `type` of its
+ * own, which then names no `null`, rejects it. With none, the members of
+ * its `allOf` vote (`membersNullVote`): one rejection rejects, else one
+ * admission admits. With no member that votes, the schema rejects `null`
+ * when a keyword of its own says what an instance is (`typesItself`) and
+ * abstains when none does — `{ description }`, `{ required }`, `{
+ * minProperties: 1 }`, and a wrapper around nothing but members that
+ * abstain (`{ allOf: [{ description }] }`, `{ allOf: [] }`, `{
+ * description, allOf: [{ minProperties: 1 }] }`, `{ allOf: [{ $ref:
+ * Described }] }` over a component that says nothing; #715), which admits
+ * every instance, `null` among them, whatever the type, as the members it
+ * would be spliced open into do (`spliceNestedAllOf`; #675). `path` is
+ * `nullVote`'s: the schemas above the members.
+ */
+function allOfNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote {
+  if (schema.type !== undefined) return 'rejects';
+  const cast = membersNullVote(schema, path);
+  return cast === 'abstains' && typesItself(schema) ? 'rejects' : cast;
+}
+
+/**
+ * The votes of the members of a schema's `allOf` on `null` (`nullVote`),
+ * conjoined as JSON Schema applies them all: `'rejects'` when any member
+ * rejects it, else `'admits'` when any admits it, else `'abstains'` — every
+ * member abstained, or the schema has no `allOf`. A member that abstains
+ * only annotates or limits the schema and changes nothing, so the nested
+ * spelling votes as the flat one does, and a member that is a `$ref` votes
+ * as the schema it names would in its place (#715).
+ *
+ * The members are the schema's as written, with what it writes beside the
+ * `allOf` that the readers read as members of it (`foldBesideAllOf`): its
+ * own `properties`, an inline object typed `object` that rejects `null`,
+ * and a typing `oneOf`/`anyOf`, which votes as a union does. A member that
+ * is itself an `allOf` votes through its own members by this same rule and
+ * is not spliced open first (`unsplicedAllOf`): spliced, `{ type:
+ * 'object', allOf: [{ $ref: Owner }] }` would lose the `type` that rejects
+ * `null` (#675 opens it, since no other reader asks its `type`).
+ */
+function membersNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote {
+  let vote: NullVote = 'abstains';
+  for (const member of foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []) {
+    const cast = nullVote(member, path);
+    if (cast === 'rejects') return 'rejects';
+    if (cast === 'admits') vote = 'admits';
+  }
+  return vote;
+}
+
+/**
+ * Whether a schema that is no `$ref` says what an instance is by a keyword
+ * of its own, its `allOf` apart (`allOfNullVote` asks the members): it
+ * declares a type (`declaresType`: `properties`, an `enum`, a `const`,
+ * `items` that say so themselves, an `additionalProperties` or
+ * `patternProperties` map), or writes a `oneOf`/`anyOf` that types it
+ * (`unionTypesSchema`). A schema of nothing but annotations and limits, or
+ * a union of bare limits (`{ anyOf: [{ required: ['a'] }, { maxProperties:
+ * 1 }] }`), declares none. These are the tests every reader of the schema
+ * asks, so a `$ref` its `items` or a variant of its union hold is a type
+ * to them whatever it names, and the schema votes as the array or the
+ * union the type builder types it as: only a member's own `$ref` is
+ * answered by the schema it names (`nullVote`). Read on the schema as
+ * written, where
  * `declaresType` alone counts any `allOf` or union as a type (#676 review:
  * `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { allOf: [{ description }] }]
  * }` over two nullable components was the bare model for the wrapper's
  * sake, where the same members written flat were nullable).
  */
-function saysType(member: SchemaObject): boolean {
-  const { allOf, oneOf, anyOf, ...own } = member;
+function typesItself(schema: SchemaObject): boolean {
+  const { allOf: _allOf, oneOf, anyOf, ...own } = schema;
   if (declaresType(own)) return true;
-  if ([oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants))) return true;
-  return (allOf ?? []).some(saysType);
+  return [oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants));
 }
 
 /**
@@ -2041,7 +2141,7 @@ export function extractSchemas(
   resetInheritedModelRefs();
   resetCombinedDeclarations();
   resetFoldedSchemas();
-  resetNullAdmissions();
+  resetNullVotes();
   resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
@@ -2365,7 +2465,7 @@ export function clearSchemaNameTransform(): void {
   activeDispatcherVariantPlans = new Map();
   resetCombinedDeclarations();
   resetFoldedSchemas();
-  resetNullAdmissions();
+  resetNullVotes();
   markContestedTitles(undefined);
 }
 
