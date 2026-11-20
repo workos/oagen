@@ -10,7 +10,8 @@ import {
   rehearse,
   resolveSchemaName,
 } from './schemas.js';
-import { attachSharedRefs, extractOperations, type OperationExtractionResult } from './operations.js';
+import { attachSharedRefs, extractOperations, ownBodyNamesOf, type OperationExtractionResult } from './operations.js';
+import type { OwnBodyNames } from './contested-body-names.js';
 import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks, type SharedMinting } from './webhooks.js';
 import { extractCallbacks } from './callbacks.js';
@@ -263,7 +264,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
   };
   /** What a reading of the operations hands the webhooks and the callbacks: the names they step past, and the callbacks the operations declare. */
-  type OperationsReading = Pick<OperationExtractionResult, 'services' | 'inlineModels' | 'declaredCallbacks'>;
+  type OperationsReading = Pick<OperationExtractionResult, 'services' | 'inlineModels' | 'declaredCallbacks'> & {
+    /** What the reading's operations hold under a name one of them mints from its stem (`ownBodyNamesOf`). */
+    ownBodyNames?: OwnBodyNames;
+  };
   /**
    * The webhooks, read beside a reading of the operations: their models are
    * named against every model and enum decided so far — components, the
@@ -284,6 +288,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
       spec.paths,
       mintings,
+      // A name an operation mints from its stem is that operation's against
+      // a payload's too (#712).
+      operations.ownBodyNames,
     );
   /** The callbacks the operations and the webhooks declare, read after both and named against every name either holds. */
   const readCallbacks = (
@@ -310,9 +317,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       spec.paths,
       spec.webhooks,
       mintings,
+      operations.ownBodyNames,
     );
 
-  const { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks } = extractOperations(
+  const operations = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
@@ -341,20 +349,26 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     // numbered past the ones they mint beside the operations: read here
     // silently, off the very readings below, into nothing that is kept.
     {
-      mintedAfter: (operations) =>
+      mintedAfter: (setAside) =>
         rehearse(() => {
+          const reading = { ...setAside, ownBodyNames: ownBodyNamesOf(setAside) };
           const mintings: SharedMinting[] = [];
-          const received = readWebhooks(operations, mintings);
-          const callbacks = readCallbacks(operations, received, mintings);
+          const received = readWebhooks(reading, mintings);
+          const callbacks = readCallbacks(reading, received, mintings);
           return collectExistingNames(
             [...received.inlineModels, ...callbacks.inlineModels],
-            operations.services,
+            reading.services,
             [],
             received.webhooks,
           );
         }),
     },
   );
+  const { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks } = operations;
+  // A name an operation mints from its stem is that operation's against a
+  // webhook's or a callback's payload too (#712): each reader asks what the
+  // operations hold under a name before one of its models takes it.
+  const ownBodyNames = ownBodyNamesOf(operations);
 
   // Webhooks are read while the schema-name transform is still active, like
   // operations, so a payload's `$ref`s resolve to the same names as a field's.
@@ -365,7 +379,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // reaching the operation object a webhook was minted from shares that
   // minting rather than minting a copy beside it (#631).
   const webhookMintings: SharedMinting[] = [];
-  const received = readWebhooks({ services, inlineModels, declaredCallbacks }, webhookMintings);
+  const received = readWebhooks({ services, inlineModels, declaredCallbacks, ownBodyNames }, webhookMintings);
   const { webhooks, inlineModels: webhookInlineModels, inlineModelBundles: webhookInlineModelBundles } = received;
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
@@ -379,7 +393,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // callback reading the operation object of one of `webhookMintings` under
   // its stem names nothing: it references the webhook's models (#631).
   const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = readCallbacks(
-    { services, inlineModels, declaredCallbacks },
+    { services, inlineModels, declaredCallbacks, ownBodyNames },
     received,
     webhookMintings,
   );
