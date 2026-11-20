@@ -16,6 +16,7 @@ import {
   schemaRefOf,
   schemaRefTarget,
   schemaRefTokens,
+  withoutNull,
   type DerivedMappingSource,
 } from './schema-refs.js';
 import {
@@ -404,10 +405,13 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * description: 'The kind of pet.' }` is — the enum `Kind`, its text, flag
  * and default on the `Enum`, its limits read by a parameter that names it
  * — and the member's own nullability (a `null` member, a type list naming
- * `'null'`, OAS 3.0 `nullable: true` on the member) is the enum's, while
- * `nullable: true` beside the `allOf` declares nothing, as beside any
- * schema with neither a `type` nor a `oneOf`/`anyOf`
- * (`unionFlaggedNullable`). Or — for a component written as a nullable
+ * `'null'`, OAS 3.0 `nullable: true` on the member) is the enum's, unless
+ * the `allOf` vetoes `null` (`{ not: { type: 'null' } }` beside the
+ * member, or written beside the `allOf`), when the enum admits none
+ * (`enumComponentAdmitsNull`, which reads this declaration as written;
+ * #716), as the same `allOf` on a field is the bare enum; `nullable:
+ * true` beside the `allOf` declares nothing, as beside any schema with
+ * neither a `type` nor a `oneOf`/`anyOf` (`unionFlaggedNullable`). Or — for a component written as a nullable
  * `oneOf`/`anyOf` wrapper the type builder collapses (#606: one non-null
  * variant beside `null` variants, `nullableUnionBranch`) — the branch it
  * collapses to read in turn, carrying what the same wrapper hands a field
@@ -536,6 +540,52 @@ export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | u
   // The wrapper layer's `default` — the wrapper's own, then the first
   // annotating member's — over the member's, as its text is.
   return withWrapperLayerDefault(declaration, schema);
+}
+
+/**
+ * Whether an enum component admits `null`, so that a `$ref` to it is
+ * wrapped in `nullable` (`componentTypeRef`, through
+ * `activeNullableEnumComponentKeys`) and the value it pins admits `null`
+ * beside it (`enumComponentPin`): the schema it declares its members on
+ * admits it (`enumComponentDeclaration`, by the component's rule,
+ * `isNullableEnumSchema`), and no `allOf` the component is read through
+ * vetoes it (`enumNullVetoed`; #716). The declaration is read as written
+ * either way: a veto takes the `null` away and nothing else, so the
+ * members, and the descriptions an `x-enum-descriptions` list aligns with
+ * them by position, are the ones the same component has without the `not`.
+ * False for a component that is no enum.
+ */
+function enumComponentAdmitsNull(schema: SchemaObject): boolean {
+  const declaration = enumComponentDeclaration(schema);
+  return declaration !== undefined && isNullableEnumSchema(declaration) && !enumNullVetoed(schema);
+}
+
+/**
+ * Whether an `allOf` an enum component is read through
+ * (`enumComponentDeclaration`: one read as the member that declares the
+ * members, at any depth) vetoes the `null` that member admits
+ * (`allOfVetoesNull`): `Kind: { allOf: [{ type: ['string', 'null'], enum:
+ * ['cat', 'dog', null] }, { not: { type: 'null' } }] }`, or with the `not`
+ * beside the `allOf`, is the enum `Kind` that admits none, as the same
+ * `allOf` on a field is the bare enum. Read level by level from the
+ * component down, as the type builder reads the same schema, so what a
+ * level says itself stands over a veto below it or beside it: a schema
+ * that declares the members itself (a `not` beside an `enum:` list is not
+ * read), a nullable `oneOf`/`anyOf` wrapper, and a `type` beside the
+ * `allOf` that names `null` (`wrapsOwnType`) — `{ type: ['string',
+ * 'null'], allOf: [{ enum: ['cat', null] }, { not: { type: 'null' } }] }`
+ * is `nullable<Kind>`, as it is `nullable<enum>` on a field (Greptile,
+ * #726: the veto was read past the schema's own `type`, so the component
+ * was the bare `Kind` where the same schema inline stayed nullable).
+ */
+function enumNullVetoed(schema: SchemaObject): boolean {
+  if (schema.$ref || Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return false;
+  if ((nullableUnionBranch(schema) ?? flaggedNullableUnionBranch(schema)) !== undefined) return false;
+  if (!schema.allOf || wrapsOwnType(schema)) return false;
+  if (classifyInlineSchema(schema) !== 'allOf' || readInlineAllOf(schema.allOf, schema) !== 'unwrapped') {
+    return false;
+  }
+  return allOfVetoesNull(schema) || enumNullVetoed(unwrappedAllOfMember(schema));
 }
 
 /**
@@ -702,6 +752,25 @@ function enumValueDescriptions(schema: SchemaObject): (value: string | number, i
 /** Wrap `ref` in `nullable` unless it already is one, so a nullable enum `$ref` is never double-wrapped. */
 function asNullable(ref: TypeRef): TypeRef {
   return ref.kind === 'nullable' ? ref : { kind: 'nullable', inner: ref };
+}
+
+/**
+ * `ref`, the type of the member `schema`'s `allOf` is read as
+ * (`allOfReadAsMember`), as the `allOf` admits it: without its `nullable`
+ * wrapper, and those of a union's variants (`withoutNull`), when the
+ * `allOf` vetoes `null` (`allOfVetoesNull`; #716). A
+ * schema that wraps its own type in `nullable` (`wrapsOwnType`: a type
+ * list naming `null` beside the `allOf`) says so itself, before its
+ * `allOf` is read, and keeps the member's type as built. A member that is
+ * a JSON Pointer `$ref` has no type yet: the reference stays, marked so
+ * that the type it is settled to admits no `null` either (`withoutNull`;
+ * Greptile, #726: a pointer to a nullable schema passed through as it
+ * was, and settled to `nullable<…>`). Exported for
+ * the response path, which types a body's unwrapped member itself
+ * (`extractDirectResource`).
+ */
+export function withoutVetoedNull(schema: SchemaObject, ref: TypeRef): TypeRef {
+  return wrapsOwnType(schema) || !allOfVetoesNull(schema) ? ref : withoutNull(ref);
 }
 
 /**
@@ -1435,7 +1504,9 @@ export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
  * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
  * `nullable: true` beside a `type`, a `oneOf`/`anyOf` that collapses to one
  * non-null variant (`nullableUnionBranch`), an `allOf` read as a member
- * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`),
+ * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`)
+ * and that vetoes no `null` (`allOfVetoesNull`: `allOf: [{ type: ['array',
+ * 'null'] }, { not: { type: 'null' } }]` is the bare array; #716),
  * or an `allOf` merged into one model (`readInlineAllOf`: `'merged'`) whose
  * every member that types it admits `null` (`allOfAdmitsNull`: `allOf: [{
  * $ref: Owner }, { $ref: Tag }]` over two nullable components; #676: a
@@ -1451,8 +1522,10 @@ export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
  */
 export function declaresNull(schema: SchemaObject): boolean {
   if (wrapsOwnType(schema)) return true;
-  const member = allOfReadAsMember(unwrapNullableSchema(schema));
-  return member !== undefined ? declaresNull(member) : mergeDeclaresNull(schema);
+  const bare = unwrapNullableSchema(schema);
+  const member = allOfReadAsMember(bare);
+  if (member === undefined) return mergeDeclaresNull(schema);
+  return !allOfVetoesNull(bare) && declaresNull(member);
 }
 
 /** Whether the schema is itself a nullable wrapper the type builder strips (`unwrapNullableSchema`): a type list naming `null`, OAS 3.0 `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to one non-null variant (`nullableUnionBranch`). */
@@ -1483,9 +1556,11 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
 
 /**
  * What a schema says of `null`, as the vote it casts as a member of an
- * `allOf` (`nullVote`): it admits `null`, it rejects it, or it abstains —
- * it says nothing of what an instance is, so it only annotates or limits
- * the schema it is a member of and has no vote.
+ * `allOf` (`nullVote`): it admits `null`, it rejects it — by what it says
+ * an instance is, or by a `not` that vetoes `null` (`vetoesNull`; #716) —
+ * or it abstains: it says nothing of what an instance is and vetoes no
+ * `null`, so it only annotates or limits the schema it is a member of and
+ * has no vote.
  */
 export type NullVote = 'admits' | 'rejects' | 'abstains';
 
@@ -1555,16 +1630,22 @@ export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> =
  * `type` beside an `allOf` as the nullable wrapper around what the `allOf`
  * describes, and two such wrappers conjoin to the same `type` beside both
  * members (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }]
- * }`), which is nullable by that reading. Else it says what its `type`
- * and its `allOf` say (`allOfNullVote`): a `type` of its own that names no
- * `null` rejects it, whatever the schema composes — `{ type: 'object',
- * allOf: [{ $ref: Owner }] }` over a nullable `Owner` admits none — and
- * with no `type` the members of its `allOf` vote, as JSON Schema applies
+ * }`), which is nullable by that reading. Else it says what its `type`,
+ * its `not` and its `allOf` say (`allOfNullVote`): a `type` of its own
+ * that names no `null` rejects it, whatever the schema composes — `{ type:
+ * 'object', allOf: [{ $ref: Owner }] }` over a nullable `Owner` admits
+ * none — and so does a `not` of its own whose subschema admits `null`
+ * (`vetoesNull`: `{ not: { type: 'null' } }`, written as a member of an
+ * `allOf` or beside one; #716: a `not` was not read, so the member had no
+ * vote and `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { not: { type:
+ * 'null' } }] }` over two nullable components was `nullable<PetOwner>`);
+ * with neither, the members of its `allOf` vote, as JSON Schema applies
  * them all. A schema none of this settles rejects `null` when a keyword of
  * its own says what an instance is (`typesItself`: an inline object with
  * no `type` is the object the type builder reads it as) and abstains when
  * none does: `{ description }`, `{ required }`, `{ minProperties: 1 }`,
- * `{}`.
+ * `{}`, and a `not` that vetoes no `null` (`{ not: { type: 'string' } }`,
+ * `{ not: {} }`).
  *
  * A schema met again on the path being read (`path`: the schemas above
  * it, not every schema read so far) rejects `null`, which ends a component
@@ -1574,11 +1655,14 @@ export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> =
  * `$ref` met `A` in a shared seen set and read it as a cycle).
  *
  * Each schema is read once per document (`nullVotes`): what a schema says
- * does not depend on the path it was reached by. The only schemas read
- * under a schema are the one its `$ref` names and the members of its
- * `allOf`, and a rejection among them is the schema's own (`allOfNullVote`),
- * so a schema that reaches itself rejects `null` from wherever it is read,
- * and no other schema's vote turns on a schema met on the path. So a
+ * does not depend on the path it was reached by. The schemas read under a
+ * schema are the one its `$ref` names and the members of its `allOf`, and
+ * a rejection among them is the schema's own (`allOfNullVote`), so a
+ * schema that reaches itself rejects `null` from wherever it is read, and
+ * no other schema's vote turns on a schema met on the path; the subschema
+ * of its `not` is read too, where a rejection is no veto, and so only
+ * where it never leads back to the schema (`leadsBackTo`), which no path
+ * decides. So a
  * component many members name is read for the first of them and answered
  * for the rest (#676 review: each reading forgot its answer, so `A1: {
  * allOf: [{ $ref: A0 }, { $ref: A0 }] }`, `A2` the same over `A1`, and so
@@ -1669,8 +1753,9 @@ function writesNull(schema: SchemaObject): boolean {
  * Whether a schema that writes no `null` of its own (`writesNull`) admits
  * it through its `allOf` (`allOfNullVote`: `'admits'`) — the one
  * definition of "this `allOf` admits `null`": the schema writes no `type`
- * (one that names no `null` rejects it), no member rejects `null` and at
- * least one admits it, as JSON Schema applies them all.
+ * (one that names no `null` rejects it) and no `not` that vetoes `null`
+ * (`vetoesNull`), no member rejects `null` and at least one admits it, as
+ * JSON Schema applies them all.
  *
  * So `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
  * components admits `null`, and so does the same beside a member with no
@@ -1678,11 +1763,13 @@ function writesNull(schema: SchemaObject): boolean {
  * writes nothing else (#715) — while `{ allOf: [{ $ref: Owner }, { type:
  * 'object', properties: { extra } }] }` does not, and neither does `{
  * allOf: [{ $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits
- * none. Read for an `allOf` merged into one model by the type builder
- * (`buildTypeRef`), by `declaresNull`, and through it for a component
- * (`isNullableModelComponentEntry`) and the response path (`nullableIf`),
- * and for any `allOf` by `nullVote`. `path` is `nullVote`'s: the schemas
- * above the members.
+ * none, nor `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { not: { type:
+ * 'null' } }] }`, whose last member vetoes `null` whatever the others
+ * admit (#716). Read for an `allOf` merged into one model by the type
+ * builder (`buildTypeRef`), by `declaresNull`, and through it for a
+ * component (`isNullableModelComponentEntry`) and the response path
+ * (`nullableIf`), and for any `allOf` by `nullVote`. `path` is
+ * `nullVote`'s: the schemas above the members.
  */
 function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set([schema])): boolean {
   return allOfNullVote(schema, path) === 'admits';
@@ -1691,12 +1778,16 @@ function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set
 /**
  * What a schema that is no `$ref` and writes no `null` of its own
  * (`writesNull`) says of it (`nullVote`), in this order. A `type` of its
- * own, which then names no `null`, rejects it. With none, the members of
- * its `allOf` vote (`membersNullVote`): one rejection rejects, else one
- * admission admits. With no member that votes, the schema rejects `null`
- * when a keyword of its own says what an instance is (`typesItself`) and
- * abstains when none does — `{ description }`, `{ required }`, `{
- * minProperties: 1 }`, and a wrapper around nothing but members that
+ * own, which then names no `null`, rejects it, and so does a `not` of its
+ * own that vetoes `null` (`vetoesNull`; #716) — on a member, `{ not: {
+ * type: 'null' } }`, and on the schema the `allOf` is written on alike,
+ * where the `not` beside the `allOf` is one more member of it to JSON
+ * Schema. With neither, the members of its `allOf` vote
+ * (`membersNullVote`): one rejection rejects, else one admission admits.
+ * With no member that votes, the schema rejects `null` when a keyword of
+ * its own says what an instance is (`typesItself`) and abstains when none
+ * does — `{ description }`, `{ required }`, `{ minProperties: 1 }`, a
+ * `not` that vetoes no `null`, and a wrapper around nothing but members that
  * abstain (`{ allOf: [{ description }] }`, `{ allOf: [] }`, `{
  * description, allOf: [{ minProperties: 1 }] }`, `{ allOf: [{ $ref:
  * Described }] }` over a component that says nothing; #715), which admits
@@ -1705,9 +1796,154 @@ function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set
  * `nullVote`'s: the schemas above the members.
  */
 function allOfNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote {
-  if (schema.type !== undefined) return 'rejects';
+  if (schema.type !== undefined || vetoesNull(schema, path)) return 'rejects';
   const cast = membersNullVote(schema, path);
   return cast === 'abstains' && typesItself(schema) ? 'rejects' : cast;
+}
+
+/**
+ * Whether a schema that is no `$ref` vetoes `null` by its own `not`: the
+ * subschema the `not` holds admits `null`, as the type builder types it
+ * (`schemaAdmitsNull`), so `null` fails the `not` and no instance of the
+ * schema is `null`, whatever else it says — `{ not: { type: 'null' } }`,
+ * `{ not: { const: null } }`, `{ not: { enum: [null] } }`, a type list or
+ * an `enum:` list naming `null` among others (`{ not: { type: ['null',
+ * 'string'] } }`), a `oneOf`/`anyOf` with a `null` variant, a `$ref` to a
+ * component that admits `null` (`{ not: { $ref: Null } }`, and `{ not: {
+ * $ref: Owner } }` over a nullable `Owner`), an `allOf` that admits it.
+ * The one reading of a `not` (#716: none was read, so the one member that
+ * rejects `null` outright had no vote).
+ *
+ * A subschema that admits no `null` vetoes none. One that rejects it
+ * forbids other instances (`{ not: { type: 'string' } }`), and a double
+ * negation is no veto (`{ not: { not: { type: 'null' } } }`, whose
+ * subschema rejects `null`). One that says nothing of what an instance is
+ * (`{ not: {} }`, `{ not: { minLength: 3 } }`, `{ not: { description } }`)
+ * admits `null` to JSON Schema, but only as it admits every other value
+ * its limits allow: `not: {}` forbids every instance, and `not: {
+ * minLength: 3 }` every one that is no short string. The parser reads no
+ * such limit off a `not`, so it reads no veto off it either, and the
+ * schema stays typed by its other keywords, `null` included. A `not` that
+ * holds no Schema Object is not read (`notSchemaOf`), and neither is one
+ * whose subschema leads back to the schema that writes it (`leadsBackTo`).
+ *
+ * Reading a `not` never fails a parse. No reader looked under one before
+ * (#716), so a document may write anything there and parse: a `null`
+ * where a schema goes (`{ not: { allOf: [null, { type: 'null' }] } }`,
+ * `{ not: { items: null } }`), or a keyword that holds no list (`{ not: {
+ * oneOf: 5 } }`, `{ not: { enum: {} } }`). The subschema is read by the
+ * readers every schema is read by, and where they cannot read it — they
+ * fail on those — the `not` vetoes nothing and the schema is typed as it
+ * was before a `not` was read. So what they can read under a `not` is
+ * read as it is anywhere: a member that is no Schema Object but which
+ * they read as one with no vote (`true`, a number, a string, a list;
+ * `isSchemaObject`) leaves the veto to the others (`{ not: { allOf: [true,
+ * { type: 'null' }] } }` vetoes). `path` is `nullVote`'s.
+ */
+function vetoesNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  const not = notSchemaOf(schema);
+  if (not === undefined) return false;
+  try {
+    return !leadsBackTo(not, sourceDeclaration(schema)) && schemaAdmitsNull(not, path);
+  } catch {
+    // Unreadable, and unread until #716: no veto, and the parse goes on.
+    return false;
+  }
+}
+
+/** The Schema Object a schema's `not` holds (`isSchemaObject`); `undefined` when it writes none, or holds anything else — a boolean schema (`not: true`), a list — which is not read. */
+function notSchemaOf(schema: SchemaObject): SchemaObject | undefined {
+  const { not } = schema;
+  return isSchemaObject(not) ? not : undefined;
+}
+
+/**
+ * Whether reading `schema` for what it says of `null` (`nullVote`) can
+ * arrive at `host`: `schema` stands for it (`sourceDeclaration`), or a
+ * schema under it does — the one its `$ref` names, a member of its `allOf`
+ * as the vote reads them (`membersNullVote`), the subschema of its `not` —
+ * at any depth, each schema followed once (`seen`). Asked of the subschema
+ * of a `not` written on `host` (`vetoesNull`): such a `not` says what its
+ * schema is by what the schema itself is not — `Self: { not: { $ref: Self
+ * } }`, or `A: { allOf: [{ $ref: Owner }, { not: { $ref: B } }] }` beside
+ * `B: { allOf: [{ $ref: A }] }` — and vetoes nothing. A question of the
+ * document alone, whichever schema is read first: what a `not` says never
+ * turns on the path it is read on, so a schema's vote does not either and
+ * is kept (`nullVotes`), and two components that each name the other in a
+ * `not` are read alike in either order.
+ */
+function leadsBackTo(schema: SchemaObject, host: SchemaObject, seen: Set<SchemaObject> = new Set()): boolean {
+  // A member, or a component a `$ref` names, that is no Schema Object leads nowhere, as it has no vote.
+  if (!isSchemaObject(schema)) return false;
+  if (sourceDeclaration(schema) === host) return true;
+  if (seen.has(schema)) return false;
+  seen.add(schema);
+  if (schema.$ref !== undefined) {
+    const target = componentSchemaOf(schema.$ref);
+    return target !== undefined && leadsBackTo(target, host, seen);
+  }
+  const not = notSchemaOf(schema);
+  const under = [...(foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []), ...(not ? [not] : [])];
+  return under.some((next) => leadsBackTo(next, host, seen));
+}
+
+/**
+ * Whether an `allOf` read as one of its members (`allOfReadAsMember`: a
+ * reference, a lone member, the one typing member) vetoes the `null` that
+ * member admits: the schema writes a `not` that vetoes it beside the
+ * `allOf` (`vetoesNull`), or another member does, or conjoins one that
+ * does (`conjoinsVeto`) — `{ not: { type: 'null' } }`, with or without
+ * annotations beside it, or a wrapper around one (`{ allOf: [{ not }] }`,
+ * `{ not, allOf: [{ description }] }`). The type the `allOf` is read as is
+ * then the member's without its `nullable` wrapper (`withoutVetoedNull`):
+ * `{ allOf: [{ $ref: Owner }, { not: { type: 'null' } }] }` over a
+ * nullable `Owner` is `Owner`, a common way to write a use of a nullable
+ * component that is never `null` (#716: `nullable<Owner>`, the `not`
+ * unread). The member the `allOf` is read as is not asked: its type says
+ * what it admits.
+ *
+ * Only a `not` is asked. A `type` beside the `allOf` that names no `null`
+ * leaves the member its `null`, as before (`{ type: 'object', allOf: [{
+ * $ref: Owner }] }` is `nullable<Owner>`), and so does a member that
+ * rejects `null` by its `type` where the `allOf` is still read as another.
+ * The one test for every reader of the `null` such an `allOf` takes from
+ * its member: the type builder (`buildTypeRef`), `declaresNull`, a
+ * component's entry (`isNullableModelComponentEntry`,
+ * `enumComponentAdmitsNull`), the response path (`extractDirectResource`)
+ * and the readers of the values a declaration pins (`declarationPin`,
+ * `referencedPinnedValues`). An `allOf` merged into one model admits
+ * `null` by its members' votes instead (`allOfAdmitsNull`), where the same
+ * `not` rejects it.
+ */
+export function allOfVetoesNull(schema: SchemaObject): boolean {
+  if (vetoesNull(schema)) return true;
+  const read = allOfReferenceMember(schema) ?? writtenTypingMember(schema);
+  const seen = new Set<SchemaObject>();
+  return (spliceNestedAllOf(schema).allOf ?? []).some((member) => member !== read && conjoinsVeto(member, seen));
+}
+
+/**
+ * Whether `schema`, or a schema its `allOf` conjoins it with at any depth —
+ * a member, as the vote reads them (`membersNullVote`), or the schema a
+ * `$ref` names — vetoes `null` by its own `not` (`vetoesNull`), each
+ * schema read once (`seen`). A schema that writes `null` itself
+ * (`writesNull`) is read no further, as it is for its vote: its own word
+ * admits `null` whatever it composes. So `nullVote` is `'rejects'` for
+ * every schema this holds of; it tells the rejection a `not` makes from
+ * the one a `type` makes, for the reader that takes away a member's `null`
+ * for the first alone (`allOfVetoesNull`).
+ */
+function conjoinsVeto(schema: SchemaObject, seen: Set<SchemaObject>): boolean {
+  // A member, or a component a `$ref` names, that is no Schema Object writes no `not`, as it has no vote.
+  if (!isSchemaObject(schema) || seen.has(schema)) return false;
+  seen.add(schema);
+  if (schema.$ref !== undefined) {
+    const target = componentSchemaOf(schema.$ref);
+    return target !== undefined && conjoinsVeto(target, seen);
+  }
+  if (writesNull(schema)) return false;
+  if (vetoesNull(schema)) return true;
+  return (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).some((member) => conjoinsVeto(member, seen));
 }
 
 /**
@@ -1717,7 +1953,10 @@ function allOfNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote 
  * member abstained, or the schema has no `allOf`. A member that abstains
  * only annotates or limits the schema and changes nothing, so the nested
  * spelling votes as the flat one does, and a member that is a `$ref` votes
- * as the schema it names would in its place (#715).
+ * as the schema it names would in its place (#715). A member whose `not`
+ * vetoes `null` rejects it wherever it stands among the others, whatever
+ * they admit (`vetoesNull`; #716), and so does a `$ref` to a component
+ * that writes that `not` and a wrapper around such a member.
  *
  * The members are the schema's as written, with what it writes beside the
  * `allOf` that the readers read as members of it (`foldBesideAllOf`): its
@@ -2218,12 +2457,13 @@ export function extractSchemas(
   for (const [name, schema] of Object.entries(schemas)) {
     // An enum component is read on the schema it declares its members on
     // (`enumComponentDeclaration`): through an `allOf` wrapper, the
-    // member's own nullability is the enum's, and the wrapper's OAS 3.0
+    // member's own nullability is the enum's unless the `allOf` vetoes it
+    // (`enumComponentAdmitsNull`; #716), and the wrapper's OAS 3.0
     // `nullable: true` declares nothing.
     const declaration = enumComponentDeclaration(schema);
     if (declaration) {
       activeEnumComponentKeys.add(name);
-      if (isNullableEnumSchema(declaration)) activeNullableEnumComponentKeys.add(name);
+      if (enumComponentAdmitsNull(schema)) activeNullableEnumComponentKeys.add(name);
     } else if (
       // A named union's `null` variant, or the `null` an object component
       // declares on itself or on the component it is an alias of (#615),
@@ -3273,7 +3513,11 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * `null` the `allOf` spelling kept), followed through
  * aliases of aliases as an array or enum component's alias is
  * (`componentEntries`) — since the same `allOf` on a field is typed as the
- * reference, wrapper included. A bare `$ref` admits what its target admits
+ * reference, wrapper included — unless that `allOf` vetoes `null`
+ * (`allOfVetoesNull`; #716): `NonNullOwner: { allOf: [{ $ref: PetOwner },
+ * { not: { type: 'null' } }] }` admits none, as the same `allOf` on a
+ * field is the bare `PetOwner`, and neither does an alias of it. A bare
+ * `$ref` admits what its target admits
  * and nothing the keywords beside it say, as nothing but annotations is
  * read beside a `$ref`: `B: { $ref: Cat, type: ['object', 'null'] }` (OAS
  * 3.0: `type: 'object', nullable: true`) over a `Cat` that admits no `null`
@@ -3316,8 +3560,9 @@ function isNullableModelComponentEntry(
     if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
     if (isNullSchema(schema) || declaresNull(schema)) return true;
   }
-  const member = schema.$ref !== undefined ? schema : allOfReadAsMember(unwrapNullableSchema(schema));
-  if (member === undefined) return false;
+  const bare = unwrapNullableSchema(schema);
+  const member = schema.$ref !== undefined ? schema : allOfReadAsMember(bare);
+  if (member === undefined || (schema.$ref === undefined && allOfVetoesNull(bare))) return false;
   if (member.$ref === undefined) return isNullableModelComponentEntry(member, schemas, seen);
   const key = componentKeyOf(member.$ref);
   const aliased = key !== undefined && Object.hasOwn(schemas, key) ? schemas[key] : undefined;
@@ -4242,7 +4487,8 @@ function ownPinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
  * The values the one schema a declaration reaches pins (`pinnedValues`):
  * the component its `$ref` names (`componentSchemaOf`), the member its
  * `allOf` is typed as (`allOfReadAsMember`: a lone member, or the `$ref`
- * member beside members that add nothing to it), or the variant its
+ * member beside members that add nothing to it), `null` set aside where
+ * the `allOf` vetoes it (`allOfVetoesNull`; #716), or the variant its
  * nullable union wrapper collapses to (`nullableUnionBranch`). `undefined`
  * when it reaches none — an `allOf` merged into a model among them — or one
  * already read (a cycle of references, which runs through a `$ref`: the
@@ -4261,7 +4507,8 @@ function referencedPinnedValues(schema: SchemaObject, seen: ReadonlySet<SchemaOb
           : undefined;
   const next = reached?.$ref ? componentSchemaOf(reached.$ref) : reached;
   if (next === undefined || seen.has(next)) return undefined;
-  return pinnedValues(next, new Set([...seen, next]));
+  const values = pinnedValues(next, new Set([...seen, next]));
+  return kind === 'allOf' && allOfVetoesNull(schema) ? values?.filter((value) => value !== null) : values;
 }
 
 /** The document's variant each folded copy was made from (`conjoinSiblingProperties`). */
@@ -8720,6 +8967,9 @@ export function pinnedDeclarationAdmitsNull(
  *     (`writtenPin`).
  *   - A nullable wrapper, or an `allOf` read as one member, is read as what
  *     it wraps (`readAsWrapped`), its own `null` counted (`declaresNull`).
+ *     Under an `allOf` that vetoes `null` (`allOfVetoesNull`; #716) no
+ *     `null` is counted, whatever the member or the component it names
+ *     admits, as the type builder types such an `allOf`.
  *   - Anything else is read as written (`writtenPin`).
  */
 function declarationPin(
@@ -8728,6 +8978,10 @@ function declarationPin(
 ): WrittenPin | null {
   const seen = new Set<SchemaObject>();
   let admitsNull = false;
+  // Whether an `allOf` above `current` vetoes `null`: what it is read as
+  // admits none from there on, whatever it writes.
+  let vetoed = false;
+  const below = (admits: boolean): boolean => admitsNull || (!vetoed && admits);
   let current = declaration;
   while (!seen.has(current)) {
     seen.add(current);
@@ -8737,15 +8991,18 @@ function declarationPin(
       const component =
         next !== undefined && componentKeyOf(current.$ref) !== undefined ? enumComponentPin(next) : undefined;
       if (component !== undefined) {
-        return component && { value: component.value, admitsNull: admitsNull || component.admitsNull };
+        return component && { value: component.value, admitsNull: below(component.admitsNull) };
       }
     } else {
-      if (declaresNull(current)) admitsNull = true;
+      admitsNull = below(declaresNull(current));
       next = readAsWrapped(current);
+      // The veto is the bare `allOf`'s, the level a wrapper strips to.
+      const bare = next !== undefined && unwrapNullableSchema(current) === current;
+      if (bare && allOfVetoesNull(current)) vetoed = true;
     }
     if (next === undefined) {
       const pin = writtenPin(current);
-      return pin && { value: pin.value, admitsNull: admitsNull || pin.admitsNull };
+      return pin && { value: pin.value, admitsNull: below(pin.admitsNull) };
     }
     current = next;
   }
@@ -8762,10 +9019,11 @@ function declarationPin(
  * `oneOf`/`anyOf` an `enum:` list beside them leaves
  * (`constUnionEnumMembers`), else the list's entries with `null` set aside
  * (`nonNullEnumValues`), the members `extractEnum` gives the `Enum` — and
- * admits `null` by the component's rule (`isNullableEnumSchema`: the flag,
- * a type list naming `null`, a `null` in the list, or a `null` variant the
- * list does not forbid, on the schema the component declares its members
- * on). So `kind: { $ref: CatKind }` with `CatKind: { enum: ['cat', null] }`
+ * admits `null` by the component's rule (`enumComponentAdmitsNull`: the
+ * flag, a type list naming `null`, a `null` in the list, or a `null`
+ * variant the list does not forbid, on the schema the component declares
+ * its members on, unless an `allOf` it is read through vetoes it; #716).
+ * So `kind: { $ref: CatKind }` with `CatKind: { enum: ['cat', null] }`
  * pins `cat` and admits `null`, the field `nullable<CatKind>` (#678), and
  * the rule is the component's wherever it differs from the same schema
  * written on the property: `CatKind: { enum: ['cat'], nullable: true }` is
@@ -8782,7 +9040,7 @@ function enumComponentPin(component: SchemaObject): WrittenPin | null | undefine
   const values: readonly unknown[] = members ? members.map((member) => member.value) : nonNullEnumValues(listed);
   const [value] = values;
   if (values.length !== 1 || typeof value !== 'string') return null;
-  return { value, admitsNull: isNullableEnumSchema(declaration) };
+  return { value, admitsNull: enumComponentAdmitsNull(component) };
 }
 
 /**
@@ -10547,8 +10805,11 @@ function buildTypeRef(
     if (reading === 'reference') {
       const refItem = allOfReferenceMember(schema);
       // `'reference'` is only read with a `$ref` member among the members an
-      // `allOfTypesSchema` admits, so one is found here.
-      if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
+      // `allOfTypesSchema` admits, so one is found here. The reference
+      // carries the component's own `null`, unless the `allOf` vetoes it
+      // (`withoutVetoedNull`; #716: `{ allOf: [{ $ref: Owner }, { not: {
+      // type: 'null' } }] }` over a nullable `Owner` was `nullable<Owner>`).
+      if (refItem) return withoutVetoedNull(schema, schemaToTypeRef(refItem, contextName, parentModelName));
     } else {
       // A single member, or the one member that types the schema beside
       // members that only annotate or limit it, its items documented by a
@@ -10558,12 +10819,17 @@ function buildTypeRef(
       // documentation rides onto the member — an inline enum lifted from it
       // carries the wrapper's `description` and link (`withWrapperDocs`),
       // and a model built from it the wrapper's link (`unwrappedAllOfMember`).
-      return schemaToTypeRef(
-        withWrapperDocs(annotatedTypingMember(schema), allOfWrapperLayer(schema)),
-        contextName,
-        parentModelName,
-        siblingProperties,
-        reservedNames,
+      // The member's `null` is the schema's too, unless the `allOf` vetoes
+      // it (`withoutVetoedNull`; #716).
+      return withoutVetoedNull(
+        schema,
+        schemaToTypeRef(
+          withWrapperDocs(annotatedTypingMember(schema), allOfWrapperLayer(schema)),
+          contextName,
+          parentModelName,
+          siblingProperties,
+          reservedNames,
+        ),
       );
     }
     // Unreachable: `allOfTypesSchema` admits only the three readings above.

@@ -67,7 +67,9 @@ import {
   componentKeyOf,
   isPendingSchemaRef,
   markPendingSchemaRef,
+  pendingNullVetoed,
   pendingSiteLimitsOf,
+  recordPendingNullVeto,
   recordPendingSiteLimits,
   schemaRefTarget,
   schemaRefTokens,
@@ -1967,6 +1969,7 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
       if (isPendingSchemaRef(ref)) {
         markPendingSchemaRef(copy);
         recordPendingSiteLimits(copy, pendingSiteLimitsOf(ref));
+        recordPendingNullVeto(copy, pendingNullVetoed(ref));
       }
       const key = inheritedModelRefs.get(ref);
       if (key !== undefined) recordInheritedRef(copy, key);
