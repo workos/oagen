@@ -1601,7 +1601,10 @@ export interface Model {
    * or beside the component's own `properties`, whose every variant pins
    * one property to a distinct const — a `$ref` variant's read from its
    * component — or that the document declares a `discriminator:` for, on
-   * the union or on the component itself). Emitters should generate a
+   * the union or on the component itself; a component that composes
+   * several unions dispatches by one, the union whose variants the
+   * keyword's `mapping` names, and carries every other union's variants'
+   * properties as optional fields, #718). Emitters should generate a
    * dispatcher (factory) instead of a regular dataclass. The `property`
    * field is the discriminator key (e.g. "event"), and `mapping` maps each
    * discriminator value to the concrete variant model name (an IR model

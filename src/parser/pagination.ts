@@ -25,6 +25,7 @@ import {
   resolveSchemaName,
   unionAxesOf,
   axisDiscriminatorOf,
+  handedOn,
   unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
@@ -1050,12 +1051,16 @@ export function collectObjectProperties(
       for (const variants of unionAxesOf(bare)) {
         const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
         const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
-        // A member writing both keywords hands its own `discriminator` to
-        // the first of them that types it (`axisDiscriminatorOf`).
-        const axisDiscriminator =
-          axisDiscriminatorOf(bare, variants) ??
-          (bare === carrier ? undefined : carrier.discriminator) ??
-          wrapperDiscriminator;
+        // The keyword the union is read with, as the model reads it
+        // (`axisDiscriminatorOf`): the composition's decision, else the
+        // member's own — a member writing both keywords hands it to the
+        // one it goes with — else the one written on a nullable wrapper the
+        // resolver collapsed (`handedOn`), else the one handed down.
+        const handed =
+          bare === carrier
+            ? wrapperDiscriminator
+            : handedOn(wrapperDiscriminator, (was) => carrier.discriminator ?? was);
+        const axisDiscriminator = axisDiscriminatorOf(bare, variants, handed, componentSchemas);
         if (branch) {
           visit(branch, depth, origin, axisDiscriminator);
           continue;
@@ -1076,7 +1081,7 @@ export function collectObjectProperties(
         }
       }
     }
-    for (const sub of bare.allOf ?? []) visit(sub, depth + 1, origin, wrapperDiscriminatorOf(bare));
+    for (const sub of bare.allOf ?? []) visit(sub, depth + 1, origin, wrapperDiscriminatorOf(bare, componentSchemas));
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
       note(key);
@@ -1165,10 +1170,12 @@ export function readFlattenedUnion(
  * `allOf` on the way names, as the model reads the member (`direct` when
  * that member is one of the node's own and the component itself carries
  * the union), or `null` for a union the node's own model carries — the
- * node itself, or an inline member; and the `discriminator` the document
- * declares for it, on the schema or on the `allOf` wrapper around it
- * (`wrapperDiscriminatorOf`). What the override check decides from
- * (`unionCounts`).
+ * node itself, or an inline member; and the `discriminator` it is read
+ * with, as the model reads it (`axisDiscriminatorOf`): the document's, on
+ * the schema or on the `allOf` wrapper around it (`wrapperDiscriminatorOf`),
+ * or the decision that the keyword goes with another union of the same
+ * composition, which flattens this one (#718). What the override check
+ * decides from (`unionCounts`).
  */
 export interface CollectedUnion {
   schema: SchemaObject;
