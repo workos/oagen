@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.36.0](https://github.com/workos/oagen/compare/v0.35.0...v0.36.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **parser:** weigh an allOf member that is a union of one $ref as the $ref is ([#727](https://github.com/workos/oagen/issues/727))
+* **parser:** read a not that names null on an allOf or its members as rejecting null ([#726](https://github.com/workos/oagen/issues/726))
+* **parser:** read a component's allOf member that is itself an allOf as its members ([#725](https://github.com/workos/oagen/issues/725))
+* **parser:** keep an operation's own body name beside a model the document names the same ([#724](https://github.com/workos/oagen/issues/724))
+* **parser:** hand a discriminator to the union whose variants its mapping names ([#723](https://github.com/workos/oagen/issues/723))
+* **parser:** give an allOf member that is a $ref to an annotating component no vote on null ([#722](https://github.com/workos/oagen/issues/722))
+* **parser:** read the limits a type list's allOf members write as the union's alone ([#721](https://github.com/workos/oagen/issues/721))
+* **parser:** read declarations of one property the parser types identically as one shape ([#708](https://github.com/workos/oagen/issues/708))
+* **parser:** read a oneOf beside an anyOf as both unions wherever it is written ([#707](https://github.com/workos/oagen/issues/707))
+* **parser:** read an allOf merged into one model as nullable when every typing member is ([#706](https://github.com/workos/oagen/issues/706))
+* **parser:** share one item model between array bodies that differ only by deprecated ([#705](https://github.com/workos/oagen/issues/705))
+* **parser:** find an enum component by the key a $ref names, not by its resolved name ([#704](https://github.com/workos/oagen/issues/704))
+* **parser:** read an inline allOf member that is itself an allOf as its members ([#703](https://github.com/workos/oagen/issues/703))
+* **parser:** name a union's pointer variant by the model it settles to when deriving a mapping ([#702](https://github.com/workos/oagen/issues/702))
+* **parser:** let a site the readers ignore contest no title, as it types nothing ([#701](https://github.com/workos/oagen/issues/701))
+* **parser:** read OAS 3.0 nullable: true beside a union as its null variant ([#700](https://github.com/workos/oagen/issues/700))
+* **parser:** rename a contested inline enum under its callback stem, as its model is ([#698](https://github.com/workos/oagen/issues/698))
+* **parser:** keep a base only while the model's own declaration fits the base's field ([#697](https://github.com/workos/oagen/issues/697))
+* **parser:** let a component that deprecates a field take no error body that carries it ([#696](https://github.com/workos/oagen/issues/696))
+* **parser:** read a $ref parameter's component through its annotating allOf members ([#695](https://github.com/workos/oagen/issues/695))
+* **parser:** settle a name two operations' bodies both mint from their stems ([#694](https://github.com/workos/oagen/issues/694))
+* **parser:** read a type list's primitive copy by what its allOf says at any depth ([#692](https://github.com/workos/oagen/issues/692))
+* **parser:** share one minting between a webhook and a callback reaching one operation ([#690](https://github.com/workos/oagen/issues/690))
+* **parser:** carry openIdConnect, mutualTLS and every http security scheme in spec.auth ([#689](https://github.com/workos/oagen/issues/689))
+* **parser:** name a nested error body's items by the singular a component's field gets ([#688](https://github.com/workos/oagen/issues/688))
+* **parser:** type a single-value enum as the const of its value is typed ([#687](https://github.com/workos/oagen/issues/687))
+* **parser:** read a discriminator pin that lists null beside its one string as that string ([#686](https://github.com/workos/oagen/issues/686))
+
+### Features
+
+* **parser:** carry openIdConnect, mutualTLS and every http security scheme in spec.auth ([#689](https://github.com/workos/oagen/issues/689)) ([383b8f4](https://github.com/workos/oagen/commit/383b8f404dc0b9d4ca1a5856dc37da42443a0ebd))
+
+
+### Bug Fixes
+
+* **parser:** document a model a fold makes live as its first live copy, fields included ([#699](https://github.com/workos/oagen/issues/699)) ([56bf380](https://github.com/workos/oagen/commit/56bf38084800e6503434e756c2bb8d55be795c32))
+* **parser:** find an enum component by the key a $ref names, not by its resolved name ([#704](https://github.com/workos/oagen/issues/704)) ([88a1a74](https://github.com/workos/oagen/commit/88a1a7450cd0883606b87f1ae8111db1343f8ed8))
+* **parser:** give an allOf member that is a $ref to an annotating component no vote on null ([#722](https://github.com/workos/oagen/issues/722)) ([7db7024](https://github.com/workos/oagen/commit/7db7024b3a352c346ec5bab78bf7937a0db69d26))
+* **parser:** hand a discriminator to the union whose variants its mapping names ([#723](https://github.com/workos/oagen/issues/723)) ([f6aae50](https://github.com/workos/oagen/commit/f6aae505c2dcf0517b0afa0e46bef6a04388f97c))
+* **parser:** keep a base only while the model's own declaration fits the base's field ([#697](https://github.com/workos/oagen/issues/697)) ([08b7f56](https://github.com/workos/oagen/commit/08b7f5692886f6a2445f2e0fdf274855abbb259e))
+* **parser:** keep an operation's own body name beside a model the document names the same ([#724](https://github.com/workos/oagen/issues/724)) ([bd6f20c](https://github.com/workos/oagen/commit/bd6f20cd4d4630c199126f5c380622165f739aa6))
+* **parser:** keep the description and externalDocs every folded error body wrote ([#693](https://github.com/workos/oagen/issues/693)) ([9a9bfca](https://github.com/workos/oagen/commit/9a9bfcaddfac2eee29fc42dab3a82a8a8fd1dccb))
+* **parser:** let a component that deprecates a field take no error body that carries it ([#696](https://github.com/workos/oagen/issues/696)) ([63a75ed](https://github.com/workos/oagen/commit/63a75ed20e10c9ae93afc11c005cdf8538d2121a))
+* **parser:** let a site the readers ignore contest no title, as it types nothing ([#701](https://github.com/workos/oagen/issues/701)) ([0d37501](https://github.com/workos/oagen/commit/0d37501ca222d5af1a2a465b6e8d199c5c4532ca))
+* **parser:** name a nested error body's items by the singular a component's field gets ([#688](https://github.com/workos/oagen/issues/688)) ([d3f8761](https://github.com/workos/oagen/commit/d3f8761c8bb88ac6238ad9a733eb93f811785e98))
+* **parser:** name a union's pointer variant by the model it settles to when deriving a mapping ([#702](https://github.com/workos/oagen/issues/702)) ([797051b](https://github.com/workos/oagen/commit/797051b57d8a4d6ce06b8c0a8be736f1dfa77ede))
+* **parser:** read a $ref parameter's component through its annotating allOf members ([#695](https://github.com/workos/oagen/issues/695)) ([bbb5781](https://github.com/workos/oagen/commit/bbb578195d8a8b6195db4213d26cc50fa676a612))
+* **parser:** read a component's allOf member that is itself an allOf as its members ([#725](https://github.com/workos/oagen/issues/725)) ([75b969c](https://github.com/workos/oagen/commit/75b969ccffbb2741d2ac17e326047c25cfff5a78))
+* **parser:** read a content that is not an object as declaring no media type ([#720](https://github.com/workos/oagen/issues/720)) ([d320554](https://github.com/workos/oagen/commit/d3205546bd99b8778c052c1134f63d0f04f6b280))
+* **parser:** read a discriminator pin that lists null beside its one string as that string ([#686](https://github.com/workos/oagen/issues/686)) ([54b74f3](https://github.com/workos/oagen/commit/54b74f3149e04d61e0389c160b07e000574b5ac6))
+* **parser:** read a not that names null on an allOf or its members as rejecting null ([#726](https://github.com/workos/oagen/issues/726)) ([febd4be](https://github.com/workos/oagen/commit/febd4becfd572283cdbd739a6fe6d68c2cac787e))
+* **parser:** read a oneOf beside an anyOf as both unions wherever it is written ([#707](https://github.com/workos/oagen/issues/707)) ([6eac57c](https://github.com/workos/oagen/commit/6eac57ce351c17c189c688b2bfeb6baed87dc9b7))
+* **parser:** read a type list's primitive copy by what its allOf says at any depth ([#692](https://github.com/workos/oagen/issues/692)) ([7a64a5e](https://github.com/workos/oagen/commit/7a64a5e4b388e2bc546445fb76ea5e5eb1ae9cac))
+* **parser:** read an allOf merged into one model as nullable when every typing member is ([#706](https://github.com/workos/oagen/issues/706)) ([d85cb3e](https://github.com/workos/oagen/commit/d85cb3ea5c53cccf5ee4fea70780f7548d91ce0a))
+* **parser:** read an inline allOf member that is itself an allOf as its members ([#703](https://github.com/workos/oagen/issues/703)) ([2f9c3db](https://github.com/workos/oagen/commit/2f9c3db91943a675f10089eac76903b30febcdb4))
+* **parser:** read declarations of one property the parser types identically as one shape ([#708](https://github.com/workos/oagen/issues/708)) ([ced98f1](https://github.com/workos/oagen/commit/ced98f1f00ae1a6c00142968689471309ec2dd4b))
+* **parser:** read OAS 3.0 nullable: true beside a union as its null variant ([#700](https://github.com/workos/oagen/issues/700)) ([63f762f](https://github.com/workos/oagen/commit/63f762f20fe050f3c9080bae9f6911f4804983c0))
+* **parser:** read the limits a type list's allOf members write as the union's alone ([#721](https://github.com/workos/oagen/issues/721)) ([cf80f5d](https://github.com/workos/oagen/commit/cf80f5d5e80d52d79b6b567cf5c5093a2c8c7ecf))
+* **parser:** rename a contested inline enum under its callback stem, as its model is ([#698](https://github.com/workos/oagen/issues/698)) ([628b273](https://github.com/workos/oagen/commit/628b273788cd5404bfebc86e8e2f330f748aa151))
+* **parser:** settle a name two operations' bodies both mint from their stems ([#694](https://github.com/workos/oagen/issues/694)) ([4273697](https://github.com/workos/oagen/commit/427369779dccd5458a1a355c85cdd94709ef1cdb))
+* **parser:** share one item model between array bodies that differ only by deprecated ([#705](https://github.com/workos/oagen/issues/705)) ([5b01b94](https://github.com/workos/oagen/commit/5b01b9482b1afdd43e31fb593b68e1a1a1f15f0c))
+* **parser:** share one minting between a webhook and a callback reaching one operation ([#690](https://github.com/workos/oagen/issues/690)) ([7753da3](https://github.com/workos/oagen/commit/7753da339b8e64c3b3829546cd2bface590732b6))
+* **parser:** skip a parameter or request body that is not an object instead of failing the parse ([#691](https://github.com/workos/oagen/issues/691)) ([5cac936](https://github.com/workos/oagen/commit/5cac93602098aa19d09e066eee6eafa14ae96309))
+* **parser:** type a single-value enum as the const of its value is typed ([#687](https://github.com/workos/oagen/issues/687)) ([2c5b563](https://github.com/workos/oagen/commit/2c5b5630a1e9ef9992d0a21753a1610c29242378))
+* **parser:** weigh an allOf member that is a union of one $ref as the $ref is ([#727](https://github.com/workos/oagen/issues/727)) ([246587a](https://github.com/workos/oagen/commit/246587a7742f466b25c59e14d09169b0535af2c7))
+
 ## [0.35.0](https://github.com/workos/oagen/compare/v0.34.1...v0.35.0) (2026-11-12)
 
 
