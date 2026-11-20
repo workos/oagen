@@ -954,8 +954,40 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
  * are conjoined with this reading on the type and on the field or
  * parameter alike, where the type can carry them (#545 review).
  * `undefined` when no level declares any.
+ *
+ * A type list naming several types (`namesSeveralTypes`) is read as a
+ * whole, and then once more for each per-type copy that is itself such a
+ * reference (`typeListCopies`, `componentReference`), conjoined: the
+ * union the list is typed as carries the list's limits and its variants
+ * none (`typeListVariants`; #711), so what the builder takes off a variant
+ * typed as a component must be read here, for the union and the field
+ * alike, wherever the component is one a copy alone references — the
+ * array copy of `{ type: ['array', 'string'], oneOf: [{ $ref: TagList }, {
+ * type: 'null' }] }`, where the whole is no reference at all, or of `{
+ * type: ['array', 'object'], properties, allOf: [{ $ref: TagList }] }`,
+ * which as a whole is a merge. A copy that is no reference adds nothing:
+ * what it writes the whole writes, and what a primitive copy reads
+ * through a `$ref` member in the member's place (`allOfMemberReadAs`) is
+ * the component's own, as before (#674: `Named | string` carries none of
+ * `Named`'s).
  */
 export function schemaConstraints(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): Constraints | undefined {
+  const limits = shapeConstraints(schema, componentSchemas);
+  if (schema.$ref !== undefined || !namesSeveralTypes(schema)) return limits;
+  return typeListCopies(schema).reduce<Constraints | undefined>(
+    (conjoined, copy) =>
+      componentReference(copy, componentSchemas) === undefined
+        ? conjoined
+        : combineConstraints(conjoined, shapeConstraints(copy, componentSchemas)),
+    limits,
+  );
+}
+
+/** `schemaConstraints` of `schema` read as the one shape it is written as: its own levels and, for a reference to an array or primitive component or an alias of an enum component, the entries the reference passes. */
+function shapeConstraints(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): Constraints | undefined {
@@ -1018,6 +1050,45 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
  */
 export function withSchemaConstraints(ref: TypeRef, schema: SchemaObject): TypeRef {
   return withTypeConstraints(ref, schemaConstraints(schema, documentComponentSchemas()));
+}
+
+/**
+ * Take the limits off `ref` and return them: what `withTypeConstraints`
+ * attached, from the node it attaches them to — the `primitive`,
+ * `literal`, `array`, `map` or `union` itself, the `inner` of a `nullable`
+ * wrapper, or the record a reference `resolveSchemaPointers` has yet to
+ * settle keeps for its site (`recordPendingSiteLimits`). A `model` or
+ * `enum` reference carries none. `withTypeConstraints(ref, taken)` puts
+ * them back. The limits of what the type nests — an array's items, a map's
+ * values, a union's variants — are those schemas' own and stay.
+ *
+ * Read where a type is built for a site whose limits belong on another
+ * node: a variant of a type list, the same schema read as one of its
+ * types, whose limits are the union's (`typeListVariants`; #711).
+ */
+function takeTypeConstraints(ref: TypeRef): Constraints | undefined {
+  switch (ref.kind) {
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union': {
+      const { constraints } = ref;
+      delete ref.constraints;
+      return constraints;
+    }
+    case 'nullable':
+      return takeTypeConstraints(ref.inner);
+    case 'model': {
+      if (!isPendingSchemaRef(ref)) return undefined;
+      const limits = pendingSiteLimitsOf(ref);
+      recordPendingSiteLimits(ref, undefined);
+      return limits;
+    }
+    case 'enum':
+      return undefined;
+  }
+  return assertNever(ref);
 }
 
 /**
@@ -5188,17 +5259,21 @@ function nameInlineObjectVariants(
  * carry them (#545): the union of a multi-type variant, under its nullable
  * wrapper — `{ type: ['object', 'string'], properties, maxLength: 5 }` is
  * `union<Model | string>` with `{ maxLength: 5 }` — as a type list's are
- * the union's; a model reference carries none, the model its own. Attached
- * here, so a named union's variant (`namedUnionEntry`) carries them as an
- * inline union's does (Greptile, #545 review round 3: the inline caller
- * attached them and the named one did not). Each per-type copy of the
- * variant stands for the variant (`derivedCopy`), so a merge the variant
- * carries is the one the extractor builds for it, whichever type it is read
- * as (`materializingMergedAllOfName`; #566 review), and keeps the keywords
- * that apply to an instance of its type, as a type list's copies do
- * everywhere (`typeListCopy`; #616): the `string` member of `{ type:
- * ['object', 'string'], properties }` is `{ type: 'string' }`. A type two
- * members are typed alike as is one member (`dedupeTypeRefs`).
+ * the union's, its members carrying none, whichever level of the variant
+ * writes the limit (`typeListVariants`; #711: `{ type: ['object', 'array'],
+ * properties, allOf: [{ items, minItems: 2 }] }` had `{ minItems: 2 }` on
+ * its array member too); a model reference carries none, the model its
+ * own. Attached here, so a named union's variant (`namedUnionEntry`)
+ * carries them as an inline union's does (Greptile, #545 review round 3:
+ * the inline caller attached them and the named one did not). Each
+ * per-type copy of the variant stands for the variant (`derivedCopy`), so a
+ * merge the variant carries is the one the extractor builds for it,
+ * whichever type it is read as (`materializingMergedAllOfName`; #566
+ * review), and keeps the keywords that apply to an instance of its type, as
+ * a type list's copies do everywhere (`typeListCopy`; #616): the `string`
+ * member of `{ type: ['object', 'string'], properties }` is `{ type:
+ * 'string' }`. A type two members are typed alike as is one member
+ * (`dedupeTypeRefs`).
  */
 function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
   const modelRef: ModelRef = { kind: 'model', name: refName };
@@ -5207,8 +5282,9 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
   const nullable = variant.nullable === true || typeList.includes('null');
   const keys = variantMemberKeys(variant, modelName);
   // The variant's limits are the union's, as a type list's are
-  // (`schemaToTypeRef`; #545), so the other members are built without them.
-  const members = dedupeTypeRefs(
+  // (`schemaToTypeRef`; #545), so the other members carry none, whichever
+  // level of the variant wrote them (`typeListVariants`; #711).
+  const { variants: members } = typeListVariants(
     typeList
       .filter((t) => t !== 'null')
       .flatMap((t) => {
@@ -8958,8 +9034,12 @@ export function componentTypeRef(key: string): TypeRef {
  * level down — the outer level's reading replaces the branch's, which it
  * accounts for (a wrapper's keywords conjoin with its branch's, a `$ref`
  * site's with its component's, in the one order `Field.constraints` reads
- * them). So a field's `constraints` and its type's are one reading — for a
- * JSON Pointer `$ref` deeper into a component (#539) once
+ * them). A type list's variants are that site read once per type: the
+ * outer reading is the union's, and what a lower level left on a variant
+ * is taken off it (`typeListVariants`; #711), so `{ type: ['array',
+ * 'string'], allOf: [{ items, minItems: 2 }] }` carries `{ minItems: 2 }`
+ * on the union alone. So a field's `constraints` and its type's are one
+ * reading — for a JSON Pointer `$ref` deeper into a component (#539) once
  * `resolveSchemaPointers` settles the site, which conjoins the pointed
  * schema's limits with the site's on the type and the field or parameter
  * alike (#545 review).
@@ -9401,9 +9481,10 @@ function typeListCopies(schema: SchemaObject): SchemaObject[] {
 /**
  * `variants` with each repeat of an earlier one dropped — a model or enum
  * reference repeated by name, any other type by shape (`stableStringify`,
- * limits and all) — so a union never holds one type twice: the copies of a
- * type list one keyword types alike (`{ type: ['string', 'integer'], enum:
- * ['a', 1] }` is the one enum, not that enum twice; #616).
+ * the limits of what it nests and all) — so a union never holds one type
+ * twice: the copies of a type list one keyword types alike (`{ type:
+ * ['string', 'integer'], enum: ['a', 1] }` is the one enum, not that enum
+ * twice; #616).
  */
 function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
   const seen = new Set<string>();
@@ -9419,11 +9500,59 @@ function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
 }
 
 /**
+ * The variants a type list is read as, from the types its per-type copies
+ * were `built` as (`buildTypeRef` on each of `typeListCopies`), and the
+ * limits those types were built with.
+ *
+ * A variant is the list's own schema read as one of its types, so it is
+ * the list's site read again: the site's limits are the union's, read once
+ * from the schema (`schemaConstraints`), and a variant carries none
+ * (`UnionType.constraints`). The builder attaches no limits to the copy
+ * itself, but it re-enters `schemaToTypeRef` wherever a copy is read one
+ * level down, and that level's limits — the site's too, which
+ * `schemaConstraints` reads into the union's from every level — came
+ * back on the variant (#711): a lone `allOf` member's (`{ type: ['array',
+ * 'string'], allOf: [{ items: { type: 'string' }, minItems: 2 }] }` had `{
+ * minItems: 2 }` on the union and on its array variant, where `items` and
+ * `minItems` beside the list, or in two members, left the variant bare),
+ * at any depth (`allOf: [{ allOf: [{ items }, { minItems: 2 }] }]`); the
+ * one typing member's beside members that only limit it; a `$ref`
+ * member's array or primitive component's (`TagList: { items, minItems: 2
+ * }` named by the `allOf`); the one branch's of a nullable `oneOf`/`anyOf`
+ * (`oneOf: [{ items, minItems: 2 }, { type: 'null' }]`); and the copy's
+ * own, re-read under OAS 3.0 `nullable: true` beside the list. So every
+ * limit a variant was built with is taken off it here
+ * (`takeTypeConstraints`), whichever level wrote it and whatever the
+ * variant is — an array, a map, a primitive, a literal, a nested union,
+ * any of them under `nullable` — and only then are the variants compared
+ * (`dedupeTypeRefs`): two copies typed alike but for a limit one of them
+ * read are one variant, as they are when the limit sits beside the list
+ * (`{ type: ['string', 'integer'], allOf: [{ const: 'ab', minLength: 2 }]
+ * }` was the literal twice, once with `{ minLength: 2 }`). What a variant
+ * nests keeps its own limits: an array's items, a map's values, the
+ * variants of a `oneOf`/`anyOf` the copy is typed by.
+ *
+ * `limits` are the ones taken, conjoined (`combineConstraints`), for the
+ * caller whose list collapses to one variant: that variant is the type
+ * itself and no variant of anything, so it carries them as its copy alone
+ * would (`withTypeConstraints`), under the site's reading where the site
+ * has one.
+ */
+function typeListVariants(built: readonly TypeRef[]): { variants: TypeRef[]; limits: Constraints | undefined } {
+  const limits = built.reduce<Constraints | undefined>(
+    (taken, variant) => combineConstraints(taken, takeTypeConstraints(variant)),
+    undefined,
+  );
+  return { variants: dedupeTypeRefs(built), limits };
+}
+
+/**
  * `schemaToTypeRef` without the site's limits: the shape of the type, every
  * nested schema typed through `schemaToTypeRef` itself. A type list naming
  * several types is the union of its per-type copies (`typeListCopies`),
  * never one type twice, a lone copy the type itself (`dedupeTypeRefs`;
- * #616).
+ * #616), and no variant of it carries a limit, whichever level of the
+ * schema writes it (`typeListVariants`; #711).
  */
 function buildTypeRef(
   schema: SchemaObject,
@@ -9488,19 +9617,27 @@ function buildTypeRef(
     // none (Greptile, #616 review: `items: { type: ['object', 'string'],
     // allOf: [{ $ref: Owner }], minProperties: 2 }` is `Owner[]`, as
     // `items: { allOf: [{ $ref: Owner }], minProperties: 2 }` is). The
-    // variants are built without them
-    // (`buildTypeRef`); what they nest — items, values — carries its own.
+    // variants are built without them (`buildTypeRef`) and carry none a
+    // level below the copy wrote either — an `allOf` member's at any depth,
+    // a `$ref` member's component's, a nullable wrapper's branch's: the
+    // site's too, taken off whatever the copy was built as
+    // (`typeListVariants`; #711: `allOf: [{ items, minItems: 2 }]` beside
+    // `['array', 'string']` had `{ minItems: 2 }` on the array variant as
+    // well as on the union); what they nest — items, values — carries its
+    // own. A list that collapses to one variant is that type as its copy
+    // alone is built, limits and all.
     // Each per-type copy stands for the schema it was spread from
     // (`derivedCopy`), so a merge the schema carries (`allOf` beside `type:
     // ['object', 'string']`) is the one the extractor is building for the
     // schema itself (`materializingMergedAllOfName`; #566 review).
     if (nonNullTypes.length > 1) {
-      const variants = dedupeTypeRefs(
+      const { variants, limits } = typeListVariants(
         typeListCopies(schema).map((copy) =>
           buildTypeRef(copy, contextName, parentModelName, siblingProperties, reservedNames),
         ),
       );
-      const ref: TypeRef = variants.length === 1 ? variants[0]! : { kind: 'union', variants };
+      const ref: TypeRef =
+        variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : { kind: 'union', variants };
       return schema.type.includes('null') ? asNullable(ref) : ref;
     }
   }

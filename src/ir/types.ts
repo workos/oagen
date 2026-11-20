@@ -970,7 +970,11 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * (`type: ['string', 'integer']`) carries the schema's keywords itself and
  * its variants none: each variant is the same schema read as one of its
  * types, so the limits are read from the union for whichever type the
- * value takes.
+ * value takes. The schema's keywords are the ones written beside the list
+ * and the ones its `allOf` members write, at any depth, alike (#711): `{
+ * type: ['array', 'string'], allOf: [{ items: { type: 'string' },
+ * minItems: 2 }] }` has `{ minItems: 2 }` on the union and nothing on its
+ * array variant, as `items` and `minItems` beside the list have.
  *
  * `oagen diff` compares them on every node that carries them, the type's
  * at every level included, and reports each keyword tightened or loosened
@@ -1314,7 +1318,9 @@ export interface UnionType {
    * its first variant and nothing here, while `{ anyOf: [...], maxLength:
    * 10 }` has `{ maxLength: 10 }` here. A type list's variants carry none:
    * `{ type: ['string', 'integer'], maxLength: 20, minimum: 1 }` has both
-   * here, to read for whichever type the value takes.
+   * here, to read for whichever type the value takes, and so has `{ type:
+   * ['string', 'integer'], allOf: [{ maxLength: 20, minimum: 1 }] }` — a
+   * limit an `allOf` member writes, at any depth, is the list's (#711).
    */
   constraints?: Constraints;
 }
