@@ -515,7 +515,11 @@ export interface Operation {
    * `multipart/form-data; boundary=x`, `text/csv`), so an emitter can offer
    * each verbatim as a `Content-Type`. Present only when the body declares at
    * least one media type — whether or not one of them is read as
-   * `requestBody` — as `responseContentTypes` is on the response side.
+   * `requestBody` — as `responseContentTypes` is on the response side. Only
+   * the keys of a map are media types: a `content` that is no object
+   * (`content: "json"`, `['application/json']`, `null`) declares none, and
+   * the body is read as one that writes no `content`, after a parser
+   * warning — never by the indexes of a string or an array (#710).
    */
   requestBodyContentTypes?: string[];
   /**
@@ -583,6 +587,11 @@ export interface Operation {
    * only when it declares at least one. Like `responseHeaders`, this lifts
    * the primary entry's `contentTypes`, because `successResponses` only
    * exists when an operation declares more than one 2xx or 3xx response.
+   * Only the keys of a map are media types: a `content` that is no object
+   * (`content: "json"`, `['application/json']`, `null`) declares none, on
+   * this and on every other response entry, and the response is read as one
+   * that writes no `content`, after a parser warning — never by the indexes
+   * of a string or an array (#710).
    */
   responseContentTypes?: string[];
   /**
@@ -1023,7 +1032,10 @@ export interface Parameter {
    * one, each matched by media type essence (parameters and case stripped).
    * A `text/plain` entry without a schema types the parameter as a string;
    * a map none of whose media types is read does too, with a parser warning
-   * that names them; a `schema` beside a `content` map wins. Every field of
+   * that names them, and so does a `content` that is no map at all (a
+   * string, an array, a number, a boolean, `null`), which declares no media
+   * type and is read as absent, with a parser warning that names the value
+   * (#710); a `schema` beside a `content` map wins. Every field of
    * this interface that reads "the parameter's schema" reads this schema,
    * so a parameter declared either way is typed by one rule.
    *
@@ -1135,7 +1147,11 @@ export interface Parameter {
    * the map one entry. For a map none of whose media types is read, this is
    * where the media type the document declares the value in is kept: the
    * value is typed as a string and sent as written, so an emitter has
-   * nothing to encode.
+   * nothing to encode. Only the keys of a map are listed: a `content` that
+   * is no object (`content: "json"`, `['application/json']`) declares no
+   * media type, so the parameter carries neither this nor `contentType` —
+   * never the indexes of the string's characters or the array's elements
+   * (#710).
    */
   contentTypes?: string[];
   /**
