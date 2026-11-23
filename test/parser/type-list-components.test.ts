@@ -930,6 +930,299 @@ describe('#730 a component whose type list names `array` or `object` beside anot
     });
   });
 
+  describe('a `type` beside the `allOf` that names the component', () => {
+    // MichaelDeBoey-style neighbors of the review: the site's own `type`
+    // applies to every instance, so the union the `$ref` names is narrowed
+    // to the types it admits. Before #730 a `$ref` to `Owner` was the model
+    // alone, so `{ type: 'object', allOf: [{ $ref: Owner }] }` was `Owner`;
+    // it still is.
+    const schemas = { Owner: OWNER, Tags: TAGS, Tag: { type: ['string', 'integer'] } };
+    const typed = async (fields: Record<string, unknown>, more: Record<string, unknown> = {}): Promise<string[]> => {
+      const spec = await parse({ Note: { type: 'object', properties: fields }, ...schemas, ...more });
+      return modelOf(spec, 'Note').fields.map((field) => `${field.name}: ${show(field.type)}`);
+    };
+
+    it('narrows the reference on a field to the types the schema names', async () => {
+      expect(
+        await typed({
+          object: { type: 'object', allOf: [ref('Owner')] },
+          string: { type: 'string', allOf: [ref('Owner')] },
+          array: { type: 'array', allOf: [ref('Tags')] },
+          stringOfTags: { type: 'string', allOf: [ref('Tags')] },
+          nullable: { type: ['object', 'null'], allOf: [ref('Owner')] },
+          documented: { type: 'object', allOf: [ref('Owner'), { description: 'Documented.' }] },
+          nested: { type: 'object', allOf: [{ allOf: [ref('Owner')] }] },
+          // Each per-type copy of a list is narrowed by its own entry.
+          objectOrInteger: { type: ['object', 'integer'], allOf: [ref('Owner')] },
+          objectOrString: { type: ['object', 'string'], allOf: [ref('Owner')] },
+          arrayOrInteger: { type: ['array', 'integer'], allOf: [ref('Tags')] },
+          // No `type`: the reference whole.
+          untyped: { allOf: [ref('Owner')] },
+        }),
+      ).toMatchInlineSnapshot(`
+        [
+          "object: Owner",
+          "string: string",
+          "array: string[]",
+          "stringOfTags: string",
+          "nullable: nullable<Owner>",
+          "documented: Owner",
+          "nested: Owner",
+          "objectOrInteger: Owner",
+          "objectOrString: (Owner | string)",
+          "arrayOrInteger: string[]",
+          "untyped: (Owner | string)",
+        ]
+      `);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads a `type` written as a member of the `allOf` as one written beside it', async () => {
+      // Every member applies to every instance, so the two spellings say one thing.
+      expect(
+        await typed(
+          {
+            string: { allOf: [ref('Owner'), { type: 'string' }] },
+            array: { allOf: [ref('Tags'), { type: 'array' }] },
+            stringOfTags: { allOf: [ref('Tags'), { type: 'string' }] },
+            stringOfTag: { allOf: [ref('Tag'), { type: 'string' }] },
+            nullable: { allOf: [ref('Owner'), { type: ['object', 'null'] }] },
+            list: { allOf: [ref('Owner'), { type: ['string', 'integer'] }] },
+            nested: { allOf: [{ allOf: [ref('Owner'), { type: 'string' }] }] },
+            deeper: { allOf: [ref('Owner'), { description: 'Documented.', allOf: [{ type: 'string' }] }] },
+            both: { type: ['object', 'string'], allOf: [ref('Owner'), { type: 'string' }] },
+            // The two contradict each other: no type is left to narrow by.
+            neither: { type: 'object', allOf: [ref('Owner'), { type: 'string' }] },
+            // An inline `{ type: 'object' }` member is an object the `allOf` merges,
+            // as it is beside a `$ref` to any object component: the model the merge builds.
+            object: { allOf: [ref('Owner'), { type: 'object' }] },
+            plainObject: { allOf: [ref('Plain'), { type: 'object' }] },
+          },
+          { Plain: { type: 'object', properties: named } },
+        ),
+      ).toMatchInlineSnapshot(`
+        [
+          "string: string",
+          "array: string[]",
+          "stringOfTags: string",
+          "stringOfTag: string",
+          "nullable: Owner",
+          "list: string",
+          "nested: string",
+          "deeper: string",
+          "both: string",
+          "neither: (Owner | string)",
+          "object: NoteObject",
+          "plainObject: NotePlainObject",
+        ]
+      `);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('gives the two spellings one IR, so `oagen diff` between them reports nothing', async () => {
+      const limited = { ...schemas, Owner: { ...OWNER, minLength: 2 }, Tags: { ...TAGS, minItems: 1 } };
+      const spelled = (owner: unknown, tags: unknown, tag: unknown) =>
+        parse({ Note: { type: 'object', properties: { owner, tags, tag } }, ...limited, O: owner, T: tags, G: tag });
+      const beside = await spelled(
+        { type: 'string', allOf: [ref('Owner')] },
+        { type: 'array', allOf: [ref('Tags')] },
+        { type: 'string', allOf: [ref('Tag')] },
+      );
+      const member = await spelled(
+        { allOf: [ref('Owner'), { type: 'string' }] },
+        { allOf: [ref('Tags'), { type: 'array' }] },
+        { allOf: [ref('Tag'), { type: 'string' }] },
+      );
+      expect(member).toEqual(beside);
+      expectNoDiff(beside, member, 'the `type` beside the `allOf` and in a member');
+      expect(modelOf(beside, 'Note').fields.map((field) => `${field.name}: ${show(field.type)}`)).toEqual([
+        'owner: string {"minLength":2}',
+        'tags: string[] {"minItems":1}',
+        'tag: string',
+      ]);
+    });
+
+    it('leaves what is written beside a bare `$ref`, and a `not` that names a type, unread', async () => {
+      // As anywhere: nothing that types a schema is read beside a `$ref`, and
+      // a `not` is read for `null` alone.
+      expect(
+        await typed({
+          besideRef: { ...ref('Owner'), type: 'object' },
+          besideTagsRef: { ...ref('Tags'), type: 'array' },
+          notString: { allOf: [ref('Owner'), { not: { type: 'string' } }] },
+          notStringBeside: { not: { type: 'string' }, allOf: [ref('Owner')] },
+        }),
+      ).toEqual([
+        'besideRef: (Owner | string)',
+        'besideTagsRef: (string[] | string)',
+        'notString: (Owner | string)',
+        'notStringBeside: (Owner | string)',
+      ]);
+    });
+
+    it('reads a `type` that admits none of the types as written', async () => {
+      // The schema contradicts the component it names: no instance is both.
+      // It is read as the reference, as a list none of whose entries its
+      // composition admits is read as written.
+      expect(
+        await typed({
+          integerOverOwner: { type: 'integer', allOf: [ref('Owner')] },
+          booleanOverTags: { type: 'boolean', allOf: [ref('Tags')] },
+        }),
+      ).toMatchInlineSnapshot(`
+        [
+          "integerOverOwner: (Owner | string)",
+          "booleanOverTags: (string[] | string)",
+        ]
+      `);
+    });
+
+    it('narrows a list of primitives and a list written in the member the same way', async () => {
+      expect(
+        await typed({
+          stringOverTag: { type: 'string', allOf: [ref('Tag')] },
+          numberOverTag: { type: 'number', allOf: [ref('Tag')] },
+          tag: { allOf: [ref('Tag')] },
+          objectOverInline: { type: 'object', allOf: [OWNER] },
+          arrayOverInline: { type: 'array', allOf: [TAGS] },
+          inline: { allOf: [OWNER] },
+        }),
+      ).toMatchInlineSnapshot(`
+        [
+          "stringOverTag: string",
+          "numberOverTag: integer",
+          "tag: (string | integer)",
+          "objectOverInline: NoteObjectOverInline",
+          "arrayOverInline: string[]",
+          "inline: (NoteInline | string)",
+        ]
+      `);
+    });
+
+    it('reads a component written so as it reads the field, an alias keeping the model it builds', async () => {
+      const components = {
+        // The two spellings of one narrowing: a member, and beside the `allOf`.
+        Member: { allOf: [ref('Owner'), { type: 'object' }] },
+        Beside: { type: 'object', allOf: [ref('Owner')] },
+        ObjectOrInteger: { type: ['object', 'integer'], allOf: [ref('Owner')] },
+        AliasOfBeside: { allOf: [ref('Beside')] },
+        Wrapped: { type: 'object', allOf: [OWNER] },
+        // The `type` leaves the object out: the alias keeps the model it always built.
+        StringOverOwner: { type: 'string', allOf: [ref('Owner')] },
+        AllTags: { type: 'array', allOf: [ref('Tags')] },
+        TagsString: { type: 'string', allOf: [ref('Tags')] },
+        WrappedTags: { type: 'array', allOf: [TAGS] },
+        StringOverTag: { type: 'string', allOf: [ref('Tag')] },
+        // The `type` as a member, the same four.
+        StringMember: { allOf: [ref('Owner'), { type: 'string' }] },
+        ArrayMember: { allOf: [ref('Tags'), { type: 'array' }] },
+        TagsStringMember: { allOf: [ref('Tags'), { type: 'string' }] },
+        TagStringMember: { allOf: [ref('Tag'), { type: 'string' }] },
+      };
+      const fields = Object.fromEntries(Object.keys(components).map((key) => [key, ref(key)]));
+      const spec = await parse({ Note: { type: 'object', properties: fields }, ...schemas, ...components });
+      expect(modelOf(spec, 'Note').fields.map((field) => `${field.name}: ${show(field.type)}`)).toMatchInlineSnapshot(`
+        [
+          "Member: Member",
+          "Beside: Beside",
+          "ObjectOrInteger: ObjectOrInteger",
+          "AliasOfBeside: AliasOfBeside",
+          "Wrapped: Wrapped",
+          "StringOverOwner: StringOverOwner",
+          "AllTags: string[]",
+          "TagsString: string",
+          "WrappedTags: string[]",
+          "StringOverTag: string",
+          "StringMember: StringMember",
+          "ArrayMember: string[]",
+          "TagsStringMember: string",
+          "TagStringMember: string",
+        ]
+      `);
+      expect(spec.models.filter(({ name }) => name !== 'Note').map(showModel)).toMatchInlineSnapshot(`
+        [
+          "Owner { name?: string }",
+          "Member { name?: string } bases [Owner]",
+          "Beside { name?: string } bases [Owner]",
+          "ObjectOrInteger { name?: string } bases [Owner]",
+          "AliasOfBeside { name?: string } bases [Beside]",
+          "Wrapped { name?: string }",
+          "StringOverOwner { name?: string } bases [Owner]",
+          "StringMember { name?: string } bases [Owner]",
+        ]
+      `);
+      expectNoDanglingReference(spec);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('is the model beside the list’s own other types where the component names its own list', async () => {
+      // `A` names `object` and `string` itself: its `string` copy is narrowed
+      // to the string `Owner` admits, never `Owner | string` nested in the union.
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            a: ref('A'),
+            b: ref('B'),
+            f: { type: ['object', 'string'], allOf: [ref('Owner')] },
+            g: { type: ['object', 'string', 'integer'], allOf: [ref('Owner')] },
+          },
+        },
+        Owner: OWNER,
+        A: { type: ['object', 'string'], allOf: [ref('Owner')] },
+        B: { type: ['object', 'string', 'integer'], allOf: [ref('Owner')] },
+      });
+      expect(modelOf(spec, 'Note').fields.map((field) => `${field.name}: ${show(field.type)}`)).toEqual([
+        'a: (A | string)',
+        'b: (B | string)',
+        'f: (Owner | string)',
+        'g: (Owner | string)',
+      ]);
+      // `A` is the model it was: `Owner`'s fields, with `Owner` for its base.
+      for (const name of ['A', 'B']) {
+        expect(modelOf(spec, name).bases, name).toEqual([{ kind: 'model', name: 'Owner' }]);
+        expect(modelOf(spec, name).fields, name).toEqual([
+          {
+            ...fieldOf(spec, 'Owner', 'name'),
+            inheritedFrom: { kind: 'model', name: 'Owner' },
+          },
+        ]);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads the limits of the component at a site only while the reference carries them', async () => {
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            whole: ref('Owner'),
+            object: { type: 'object', allOf: [ref('Owner')] },
+            string: { type: 'string', allOf: [ref('Owner')] },
+            array: { type: 'array', allOf: [ref('Tags')] },
+            alias: ref('Beside'),
+          },
+        },
+        Owner: { ...OWNER, minLength: 2, minProperties: 1 },
+        Tags: { ...TAGS, minItems: 1 },
+        Beside: { type: 'object', allOf: [ref('Owner')] },
+      });
+      expect(
+        modelOf(spec, 'Note').fields.map(
+          (field) => `${field.name}: ${show(field.type)} / ${JSON.stringify(field.constraints)}`,
+        ),
+      ).toMatchInlineSnapshot(`
+        [
+          "whole: (Owner | string) {"minLength":2,"minProperties":1} / {"minLength":2,"minProperties":1}",
+          "object: Owner / undefined",
+          "string: string {"minLength":2,"minProperties":1} / {"minLength":2,"minProperties":1}",
+          "array: string[] {"minItems":1} / {"minItems":1}",
+          "alias: Beside / undefined",
+        ]
+      `);
+    });
+  });
+
   describe('a list envelope', () => {
     const envelope = (data: unknown) => ({
       '/pets': {
@@ -948,8 +1241,8 @@ describe('#730 a component whose type list names `array` or `object` beside anot
     const pet = { type: 'object', properties: { id: string } };
 
     it('is unwrapped on an array component, and not on one typed as a union', async () => {
-      const read = async (x: unknown): Promise<string> => {
-        const spec = await parseJson(document({ X: x, Pet: pet }, '3.1.0', envelope(ref('X'))));
+      const read = async (x: unknown, more: Record<string, unknown> = {}): Promise<string> => {
+        const spec = await parseJson(document({ X: x, Pet: pet, ...more }, '3.1.0', envelope(ref('X'))));
         const operation = spec.services[0]!.operations[0]!;
         return `${show(operation.response)} / item ${show(operation.pagination!.itemType)} / ${operation.pagination!.dataPath}`;
       };
@@ -959,11 +1252,22 @@ describe('#730 a component whose type list names `array` or `object` beside anot
         // Before #730 this one was read as the envelope's array: `Pet[] | string` with `string` for its item.
         'a list, items in an allOf member': await read({ type: ['array', 'string'], allOf: [{ items: ref('Pet') }] }),
         'a list that names array twice': await read({ type: ['array', 'array'], items: ref('Pet') }),
+        // A `type` beside the `allOf` leaves the array alone: an array again.
+        'an alias of the list that names array': await read(
+          { type: 'array', allOf: [ref('Tags')] },
+          { Tags: { type: ['array', 'string'], items: ref('Pet') } },
+        ),
+        'an alias of the list, array a member': await read(
+          { allOf: [ref('Tags'), { type: 'array' }] },
+          { Tags: { type: ['array', 'string'], items: ref('Pet') } },
+        ),
       }).toMatchInlineSnapshot(`
         {
           "a list that names array twice": "Pet[] / item Pet / data",
           "a list, items beside it": "ListPetsResponse / item ListPetsResponse / undefined",
           "a list, items in an allOf member": "ListPetsResponse / item ListPetsResponse / undefined",
+          "an alias of the list that names array": "Pet[] / item Pet / data",
+          "an alias of the list, array a member": "Pet[] / item Pet / data",
           "an array": "Pet[] / item Pet / data",
         }
       `);
@@ -1243,6 +1547,19 @@ describe('#730 a component whose type list names `array` or `object` beside anot
       const type = fieldOf(spec, 'Note', 'x').type;
       expect(type.kind === 'nullable' ? type.inner : type).toEqual({ kind: 'model', name: 'X' });
       expect(names(spec)).toEqual(['Note', 'X']);
+      expectNoDanglingReference(spec);
+    });
+
+    it('reads a list that only names a component the readers cannot read', async () => {
+      // `T`'s own reading throws and `T` keeps its model; `U`, which is
+      // well-formed, is read, its items the plain reference `T` then is.
+      const spec = await parse({
+        Note: { type: 'object', properties: { u: ref('U'), plain: ref('Plain') } },
+        T: { type: ['array', 'object'], items: { enum: true }, properties: named },
+        U: { type: ['array', 'string'], items: ref('T') },
+        Plain: { type: 'array', items: ref('T') },
+      });
+      expect(spec.models.map(showModel)).toEqual(['Note { u?: (T[] | string), plain?: T[] }', 'T { name?: string }']);
       expectNoDanglingReference(spec);
     });
 
