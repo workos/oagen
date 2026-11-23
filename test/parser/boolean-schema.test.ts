@@ -1227,6 +1227,37 @@ describe('#728 what stays as it was', () => {
     expect(render(await parse(document({ Pet: pet({ metadata: null }) })))).toBe('Pet { name?: string }');
   });
 
+  it('compares two schemas by what they write: `true` and `{}` are two shapes, as two spellings of one type always were', async () => {
+    // Greptile on #737. Two unions under one root, each with a variant titled `Circle`: the two share the
+    // bare title when their shapes are one (`schemaShapeKey`, a fingerprint of the schema as written), and
+    // each is named with its context when they differ. A document that writes `true` throughout reads as
+    // the one that writes `{}` throughout. One that writes each is two shapes, as it was before #597, and
+    // as `additionalProperties: true` beside `additionalProperties: {}` is, which never failed the parse.
+    const variant = (title: string, kind: string, properties: Record<string, unknown>, more: object = {}) => ({
+      title,
+      type: 'object',
+      properties: { kind: { const: kind }, ...properties },
+      required: ['kind'],
+      ...more,
+    });
+    const names = async (shape: object, marker: object): Promise<string> => {
+      const union = (circle: object) => ({ oneOf: [circle, variant('Square', 'square', { side: string })] });
+      const spec = await parse(document({ Pet: pet({ shape: union(shape), marker: union(marker) }) }));
+      return spec.models
+        .map((model) => model.name)
+        .filter((name) => name !== 'Pet')
+        .join(', ');
+    };
+    const circle = (metadata: unknown) => variant('Circle', 'circle', { metadata });
+    expect(await names(circle({}), circle({}))).toBe('Circle, Square');
+    expect(await names(circle(true), circle(true))).toBe('Circle, Square');
+    expect(await names(circle(true), circle({}))).toBe('CirclePetShape, Square, CirclePetMarker');
+    // The same for two spellings `main` has always parsed.
+    const open = (additionalProperties: unknown) => variant('Circle', 'circle', {}, { additionalProperties });
+    expect(await names(open(true), open(true))).toBe('Circle, Square');
+    expect(await names(open(true), open({}))).toBe('CirclePetShape, Square, CirclePetMarker');
+  });
+
   it('combines a list written where a schema goes as it did, its entries read as keywords of the declaration', async () => {
     // A list is no Schema Object either, but it is an object the memo holds: main parses it, and so it reads here
     // exactly as on main. The copy `{ 0: { type: 'string' }, type: 'string' }` is not `Base`'s declaration, so the
