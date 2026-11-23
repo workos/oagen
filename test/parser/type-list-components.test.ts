@@ -1060,6 +1060,34 @@ describe('#730 a component whose type list names `array` or `object` beside anot
       ]);
     });
 
+    it('leaves a `type` beside a `oneOf` or `anyOf` narrowing none of its variants, as before', async () => {
+      // A `type` beside a union narrows no variant, whatever the variant is
+      // (`plain`), so a variant that names the component is read as the same
+      // list written in the variant is (`inline`): the reference whole.
+      expect(
+        await typed(
+          {
+            refs: { type: 'object', oneOf: [ref('Owner'), ref('Pet')] },
+            inline: { type: 'object', oneOf: [OWNER, ref('Pet')] },
+            plain: { type: 'string', oneOf: [string, { type: 'integer' }] },
+            tag: { type: 'string', oneOf: [ref('Tag'), ref('Pet')] },
+            nullable: { type: 'object', anyOf: [ref('Owner'), { type: 'null' }] },
+            member: { type: 'object', allOf: [{ oneOf: [ref('Owner'), ref('Pet')] }] },
+          },
+          { Pet: { type: 'object', properties: { id: string } } },
+        ),
+      ).toMatchInlineSnapshot(`
+        [
+          "refs: ((Owner | string) | Pet)",
+          "inline: ((NoteInline | string) | Pet)",
+          "plain: (string | integer)",
+          "tag: ((string | integer) | Pet)",
+          "nullable: nullable<(Owner | string)>",
+          "member: ((Owner | string) | Pet)",
+        ]
+      `);
+    });
+
     it('reads a `type` that admits none of the types as written', async () => {
       // The schema contradicts the component it names: no instance is both.
       // It is read as the reference, as a list none of whose entries its
