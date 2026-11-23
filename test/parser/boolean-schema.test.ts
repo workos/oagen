@@ -523,6 +523,50 @@ function positions(openapi: Version): Array<[string, Build]> {
       'a component a webhook payload names',
       (v) => document({ Pet: pet(), Anything: v }, undefined, {}, webhook(ref('Anything'))),
     ],
+    [
+      'a component a discriminated variant names (field)',
+      (v) =>
+        document({
+          Cat: cat,
+          Pet: pet({ value: { oneOf: [ref('Cat'), ref('Anything')], discriminator: { propertyName: 'kind' } } }),
+          Anything: v,
+        }),
+    ],
+    [
+      'a component an `anyOf` variant names (field)',
+      (v) => document({ Pet: pet({ value: { anyOf: [string, ref('Anything')] } }), Anything: v }),
+    ],
+    [
+      'a component a `$ref` with text beside it names',
+      (v) =>
+        document({ Pet: pet({ any: { $ref: '#/components/schemas/Anything', description: 'Any.' } }), Anything: v }),
+    ],
+    [
+      'a component an alias written as a lone `allOf` names',
+      (v) => document({ Pet: pet({ any: ref('Alias') }), Alias: { allOf: [ref('Anything')] }, Anything: v }),
+    ],
+    [
+      'a component a response body merges with an inline member',
+      (v) => document({ Pet: pet(), Anything: v }, json({ allOf: [ref('Anything'), object({ id: string })] })),
+    ],
+    [
+      'a component a request body merges with an inline member',
+      (v) =>
+        document(
+          { Pet: pet(), Anything: v },
+          undefined,
+          {},
+          post(json({ allOf: [ref('Anything'), object({ id: string })] })),
+        ),
+    ],
+    [
+      'a component the body of a list operation names',
+      (v) => document({ Pet: pet(), Anything: v }, json(ref('Anything')), list),
+    ],
+    [
+      "a component a list envelope's `data` names",
+      (v) => document({ Pet: pet(), Anything: v }, json(envelope(ref('Anything'))), list),
+    ],
     // The operation's own schemas.
     ['a response body', (v) => document({ Pet: pet() }, json(v))],
     [
@@ -1048,6 +1092,30 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
       a component a webhook payload names
         true:  Pet { name?: string }; webhook pet.created body unknown
         false: Pet { name?: string }; webhook pet.created body unknown (as \`{}\`)
+      a component a discriminated variant names (field)
+        true:  Cat { kind: "cat", meow?: string }; Pet { name?: string, value?: (Cat | unknown) }
+        false: Cat { kind: "cat", meow?: string }; Pet { name?: string, value?: (Cat | unknown) } (as \`{}\`)
+      a component an \`anyOf\` variant names (field)
+        true:  Pet { name?: string, value?: (string | unknown) }
+        false: Pet { name?: string, value?: (string | unknown) } (as \`{}\`)
+      a component a \`$ref\` with text beside it names
+        true:  Pet { name?: string, any?: unknown }
+        false: Pet { name?: string, any?: unknown } (as \`{}\`)
+      a component an alias written as a lone \`allOf\` names
+        true:  Pet { name?: string, any?: unknown }
+        false: Pet { name?: string, any?: unknown } (as \`{}\`)
+      a component a response body merges with an inline member
+        true:  Pet { name?: string }; GetPetResponse { id?: string }; getPet(path petId: string) -> GetPetResponse
+        false: Pet { name?: string }; GetPetResponse { id?: string }; getPet(path petId: string) -> GetPetResponse (as \`{}\`)
+      a component a request body merges with an inline member
+        true:  Pet { name?: string }; CreatePetRequest { id?: string }; createPet() body CreatePetRequest -> Pet
+        false: Pet { name?: string }; CreatePetRequest { id?: string }; createPet() body CreatePetRequest -> Pet (as \`{}\`)
+      a component the body of a list operation names
+        true:  Pet { name?: string }; listPets(query after: string) -> unknown paged cursor of unknown
+        false: Pet { name?: string }; listPets(query after: string) -> unknown paged cursor of unknown (as \`{}\`)
+      a component a list envelope's \`data\` names
+        true:  Pet { name?: string }; ListPetsResponse { data?: unknown, list_metadata?: ListPetsResponseListMetadata }; ListPetsResponseListMetadata { after?: string }; listPets(query after: string) -> ListPetsResponse paged cursor of ListPetsResponse
+        false: Pet { name?: string }; ListPetsResponse { data?: unknown, list_metadata?: ListPetsResponseListMetadata }; ListPetsResponseListMetadata { after?: string }; listPets(query after: string) -> ListPetsResponse paged cursor of ListPetsResponse (as \`{}\`)
       a response body
         true:  Pet { name?: string }; getPet(path petId: string) -> unknown
         false: Pet { name?: string }; getPet(path petId: string) -> unknown (as \`{}\` and as not written)
@@ -1121,6 +1189,23 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
         true:  Pet { name?: string }; ListMetadata { after?: string }; listPets(query after: string) -> Pet[] paged cursor of Pet
         false: Pet { name?: string }; ListMetadata { after?: string }; listPets(query after: string) -> Pet[] paged cursor of Pet (as \`{}\`)"
     `);
+  });
+
+  it('reads a `$ref` to a component that is `false` as a `$ref` to `true` is: `unknown`, never a model the IR lacks', async () => {
+    // The one reading that is deliberately not the pre-#597 one. Before #597 the reference was `{ kind: 'model',
+    // name: 'Anything' }`, a model no pass builds, with no warning: the readers that look the component up asked
+    // whether it was truthy (`componentTypeRef`, `mergeAllOfMembers`), and `false` is a component that is there.
+    const naming = table.filter(({ position }) => /^a component (?!nothing)/.test(position));
+    expect(naming.length).toBeGreaterThanOrEqual(26);
+    for (const row of naming) {
+      for (const value of [false, 0, '']) {
+        const label = `${row.position}: ${JSON.stringify(value)}`;
+        const reading = await row.of(value);
+        expect(reading.spec, label).toEqual(row.empty.spec);
+        expect(reading.warnings, label).toEqual(row.empty.warnings);
+        expect(danglingReferences(reading.spec), label).toEqual([]);
+      }
+    }
   });
 
   it('references no model or enum the IR lacks, whatever is written', async () => {
