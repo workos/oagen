@@ -1524,7 +1524,10 @@ export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
  * or an `allOf` merged into one model (`readInlineAllOf`: `'merged'`) whose
  * every member that types it admits `null` (`allOfAdmitsNull`: `allOf: [{
  * $ref: Owner }, { $ref: Tag }]` over two nullable components; #676: a
- * merge declared none, whatever its members admitted). A `$ref` the schema
+ * merge declared none, whatever its members admitted) — as is one read as
+ * its reference because another `$ref` adds nothing beside it
+ * (`holdsReferenceAddingNothing`; #733), which was that merge and declares
+ * the `null` it declared. A `$ref` the schema
  * is read as — the schema itself, or the member an `allOf` is read as —
  * is the component's to answer for and not followed here: the reference
  * carries the component's own wrapper (`componentTypeRef`).
@@ -1538,7 +1541,7 @@ export function declaresNull(schema: SchemaObject): boolean {
   if (wrapsOwnType(schema)) return true;
   const bare = unwrapNullableSchema(schema);
   const member = allOfReadAsMember(bare);
-  if (member === undefined) return mergeDeclaresNull(schema);
+  if (member === undefined || holdsReferenceAddingNothing(bare)) return mergeDeclaresNull(schema);
   return !allOfVetoesNull(bare) && declaresNull(member);
 }
 
@@ -1555,7 +1558,10 @@ function wrapsOwnType(schema: SchemaObject): boolean {
  * Whether `schema` is an `allOf` merged into one model that admits `null`
  * for its members' sake alone (`allOfAdmitsNull`): it is no nullable
  * wrapper itself (`wrapsOwnType`), no member is the one it is read as
- * (`allOfReadAsMember`), and every member that types it admits `null`.
+ * (`allOfReadAsMember`) — or it is read as its reference only because
+ * another `$ref` adds nothing beside it (`holdsReferenceAddingNothing`;
+ * #733), the merge of the two it was — and every member that types it
+ * admits `null`.
  * The part of `declaresNull` that #676 added, asked on its own by the one
  * reader that must tell such a merge from a schema that says `null`
  * itself (`keptAsWritten`).
@@ -1564,7 +1570,10 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
   if (wrapsOwnType(schema)) return false;
   const bare = unwrapNullableSchema(schema);
   // No member the `allOf` is read as: one that types the schema is a merge.
-  if (bare.allOf === undefined || allOfReadAsMember(bare) !== undefined) return false;
+  // One read as its reference because another `$ref` adds nothing beside
+  // it was a merge of the two, and still admits `null` as one (#733).
+  if (bare.allOf === undefined) return false;
+  if (allOfReadAsMember(bare) !== undefined && !holdsReferenceAddingNothing(bare)) return false;
   return classifyInlineSchema(bare) === 'allOf' && allOfAdmitsNull(bare);
 }
 
@@ -2006,12 +2015,56 @@ function leadsBackTo(schema: SchemaObject, host: SchemaObject, seen: Set<SchemaO
  * `referencedPinnedValues`). An `allOf` merged into one model admits
  * `null` by its members' votes instead (`allOfAdmitsNull`), where the same
  * `not` rejects it.
+ *
+ * So does an `allOf` read as its reference because another `$ref` adds
+ * nothing beside it (`holdsReferenceAddingNothing`; workos/oagen#733): it
+ * was a merge of the two, and whether it admits `null` is still what that
+ * merge said — its own `type` and every member's vote, the `$ref` that
+ * adds nothing among them — so the reference loses its `null` wherever
+ * the merge admitted none. `{ allOf: [{ $ref: Tag }, { $ref: TagOutput }]
+ * }` over a nullable `Tag` and `TagOutput: { allOf: [{ $ref: Tag }, …] }`
+ * is `nullable<TagOutput>`; with `type: 'object'` beside the `allOf`, a
+ * `not` that vetoes `null` among the members, or a `Tag` that admits none
+ * under a `TagOutput` that writes a nullable `type` of its own, it is
+ * `TagOutput`, as each was the bare merged model.
  */
 export function allOfVetoesNull(schema: SchemaObject): boolean {
+  // An `allOf` that holds a `$ref` adding nothing beside its reference was
+  // a merge of the two, and admits `null` as that merge did: by its own
+  // `type` and every member's vote, a `not` that vetoes it among them.
+  if (holdsReferenceAddingNothing(schema)) return !allOfAdmitsNull(schema);
   if (vetoesNull(schema)) return true;
   const read = allOfReferenceMember(schema) ?? writtenTypingMember(schema);
   const seen = new Set<SchemaObject>();
   return (spliceNestedAllOf(schema).allOf ?? []).some((member) => member !== read && conjoinsVeto(member, seen));
+}
+
+/**
+ * Whether `schema` is an `allOf` read as its reference because another
+ * `$ref` member adds nothing beside it (`typingReferences`;
+ * workos/oagen#733): it holds a `$ref` to a component another `$ref`
+ * member names too, or to one another's component extends, and is read as
+ * the one `$ref` that stands (`readInlineAllOf`: `'reference'`), where it
+ * was a merge of the two. Such an `allOf` admits `null` as that merge did,
+ * whichever reader asks: by its own `type` and every member's vote
+ * (`allOfAdmitsNull`, which reads the members as written, the `$ref` that
+ * adds nothing among them). So the `null` of `{ allOf: [{ $ref: Tag }, {
+ * $ref: TagOutput }] }` is what the conjunction of both gives, never what
+ * `TagOutput` gives alone: `nullable<TagOutput>` over two nullable
+ * components, `TagOutput` where `Tag` admits none, where a `type:
+ * 'object'` is written beside the `allOf`, and where a member vetoes
+ * `null`. The one test of the three readers of an `allOf`'s `null` that
+ * tell a merge from a member it is read as (`allOfVetoesNull`,
+ * `declaresNull`, `mergeDeclaresNull`). False for a component's own
+ * schema, whose `allOf` is read as it was, and for an `allOf` that is a
+ * merge for another member's sake, which votes as one already.
+ */
+function holdsReferenceAddingNothing(schema: SchemaObject): boolean {
+  const members: unknown = spliceNestedAllOf(schema).allOf;
+  if (!Array.isArray(members)) return false;
+  const refs = members.filter((member) => isSchemaObject(member) && member.$ref !== undefined);
+  if (refs.length < 2 || refs.length === typingReferences(members, undefined, schema).length) return false;
+  return readInlineAllOf(schema.allOf ?? [], schema) === 'reference';
 }
 
 /**
@@ -11450,6 +11503,7 @@ import {
   schemaShapeKey,
   spliceNestedAllOf,
   splicedAllOfMembers,
+  typingReferences,
   stableStringify,
   unsplicedAllOf,
 } from './inline-models.js';

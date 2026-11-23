@@ -304,7 +304,7 @@ describe('#676 the members of an `allOf` vote on `null` by one rule, written by 
         a nullable \`$ref\` and a wrapper flagged \`nullable: true\` with no \`type\`: PetOwner
         a nullable \`$ref\` and a wrapper that also requires a field: nullable<PetOwner>
         a nullable \`$ref\` and a \`$ref\` to an alias of another: nullable<PetOwner>
-        a nullable \`$ref\` and a \`$ref\` to a component that merges two nullable ones: nullable<PetOwner>
+        a nullable \`$ref\` and a \`$ref\` to a component that merges two nullable ones: nullable<OwnerTag>
         a \`$ref\` that admits no \`null\` and a \`$ref\` to that component: PetOwner"
       `);
       expect(warnings()).toEqual([]);
@@ -475,8 +475,9 @@ describe('#676 the members of an `allOf` vote on `null` by one rule, written by 
     expect(Object.fromEntries(modelOf(spec, 'Pet')!.fields.map((f) => [f.name, show(f.type)]))).toEqual({
       loop: 'Loop',
       mutual: 'Mutual1',
-      twice: 'nullable<PetTwice>',
-      twice_wrapped: 'nullable<PetTwiceWrapped>',
+      // The one component, named twice: the second `$ref` adds nothing (#733; each was a copy of `Owner`).
+      twice: 'nullable<Owner>',
+      twice_wrapped: 'nullable<Owner>',
     });
   });
 });
@@ -822,7 +823,8 @@ describe('#676 review: a component many members name is read once', () => {
     );
     expect(Object.fromEntries(modelOf(spec, 'Pet')!.fields.map((f) => [f.name, show(f.type)]))).toEqual({
       top: `nullable<Level${depth}>`,
-      by_hand: 'nullable<PetByHand>',
+      // `Level40` composes `Level39`, so it is the `allOf` of the two (#733; it was a copy of `Level40`).
+      by_hand: `nullable<Level${depth}>`,
       plain: 'Plain1',
     });
     expect(fieldNames(spec, `Level${depth}`)).toEqual(['name']);
