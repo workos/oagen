@@ -2835,8 +2835,10 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * A `$ref` member to a component another `$ref` member's component already
  * is, is no second `$ref` either (`typingReferences`; workos/oagen#733):
  * one to the component an earlier `$ref` names, and one to a component
- * another's extends, reaching it through its own `allOf` chain
- * (`extendsComponent`). Every instance of the narrower component is an
+ * another's extends, reaching it through its own `allOf` chain — it, or a
+ * component it is only another name for (`extendsComponent`: `TagAlias: {
+ * $ref: Tag }` beside `{ $ref: TagOutput }` adds nothing either). Every
+ * instance of the narrower component is an
  * instance of the wider, so the wider adds nothing to the `allOf`: with
  * `TagOutput: { allOf: [{ $ref: Tag }, { required: ['label'] }] }`, `allOf:
  * [{ $ref: Tag }, { $ref: TagOutput }]` is `'reference'` and typed
@@ -4156,9 +4158,7 @@ function splicesOpen(schema: SchemaObject): boolean {
       key === 'allOf' ||
       key === 'required' ||
       key === 'nullable' ||
-      key === 'title' ||
-      key === '$comment' ||
-      key === 'xml' ||
+      UNCONSTRAINING_KEYWORDS.has(key) ||
       (key === 'type' && (value === 'object' || (Array.isArray(value) && value.includes('object')))) ||
       LIFTED_DECLARATION_KEYWORD_SET.has(key) ||
       key.startsWith('x-'),
@@ -4489,11 +4489,26 @@ function namesOneComponent(
  * branch-only, optional whatever the component requires), and does not
  * extend it. Neither do two components that each reach the other (`A: {
  * allOf: [{ $ref: B }, …] }` beside `B: { allOf: [{ $ref: A }, …] }`):
- * neither is the narrower, and both stand. An alias is a component of its
- * own, the model `TagAlias`: it extends what it names, and is extended
- * only by a component whose chain names it. A `$ref` no schema answers
+ * neither is the narrower, and both stand. A `$ref` no schema answers
  * extends nothing and is extended by nothing, and so is one to a value
  * that is no Schema Object (`isSchemaObject`).
+ *
+ * The wider component may be reached under another name. A component that
+ * is a `$ref`, or an `allOf` of one `$ref` member, beside nothing but
+ * documentation (`namedComponent`) adds no constraint of its own: `TagAlias:
+ * { $ref: Tag }` accepts exactly what `Tag` accepts, so every `TagOutput`
+ * is a `TagAlias` too, and `{ $ref: TagOutput }` extends `{ $ref: TagAlias
+ * }` as it extends `{ $ref: Tag }` — through a chain of such names
+ * (`TagAliasAlias: { $ref: TagAlias }`), and for the narrower under a name
+ * of its own (`OutputAlias: { $ref: TagOutput }` extends `TagAlias`). The
+ * wider is read through its names to a component the narrower's chain
+ * reaches; a name that says anything of its own — a limit, a `required`
+ * list, a `type`, `nullable`, a second member — is a component like any
+ * other, reached only by a chain that names it. Two names for one
+ * component with neither naming the other (`TagAlias` beside `OtherAlias:
+ * { $ref: Tag }`) are the same instances under two models: neither is the
+ * narrower, neither extends the other, and both stand, as two components
+ * that reach each other do.
  *
  * Asked of objects alone, the components a merge reads properties from:
  * the wider one declares properties, its own or its chain's, as
@@ -4535,7 +4550,14 @@ export function extendsComponent(
   const reached = composedOf(to, componentSchemas);
   if (!reached.declaresProperties || reached.schemas.has(from)) return false;
   const made = composedOf(from, componentSchemas);
-  return made.schemas.has(to) && !made.namesOtherType;
+  if (made.namesOtherType) return false;
+  if (made.schemas.has(to)) return true;
+  // The wider is another name for a component the narrower reaches, and the
+  // narrower no other name for one the wider reaches: two names for one
+  // component are told apart by neither.
+  const names = (chain: ComponentChain, of: ComponentChain): boolean =>
+    chain.names.some((named) => of.schemas.has(named));
+  return names(reached, made) && !names(made, reached);
 }
 
 /**
@@ -4549,6 +4571,8 @@ interface ComponentChain {
   schemas: ReadonlySet<SchemaObject>;
   declaresProperties: boolean;
   namesOtherType: boolean;
+  /** The components the component is another name for (`namedComponent`), nearest first: what an alias names, and what that names in turn. */
+  names: readonly SchemaObject[];
 }
 
 /**
@@ -4597,9 +4621,53 @@ function composedOf(
     if (schema.enum !== undefined || !namesObjectAlone(schema.type)) namesOtherType = true;
     if (Array.isArray(schema.allOf)) for (const member of schema.allOf) unread.push(member);
   }
-  const chain: ComponentChain = { schemas, declaresProperties, namesOtherType };
+  // What the component is another name for, each once: a name that comes
+  // back to one already read names nothing more.
+  const names = new Set<SchemaObject>();
+  let named = namedComponent(component, componentSchemas);
+  while (named !== undefined && named !== component && !names.has(named)) {
+    names.add(named);
+    named = namedComponent(named, componentSchemas);
+  }
+  const chain: ComponentChain = { schemas, declaresProperties, namesOtherType, names: [...names] };
   if (kept) componentChains.set(component, chain);
   return chain;
+}
+
+/**
+ * The component `schema` is only another name for, or `undefined`: the one
+ * its `$ref` names, when `schema` is a `$ref` or an `allOf` of exactly one
+ * `$ref` member, and nothing written beside the `$ref` or beside the
+ * `allOf` does more than document it (`documentsSchema`). Such a schema
+ * adds no constraint of its own, so it accepts exactly the instances the
+ * component it names accepts: `TagAlias: { $ref: Tag }`, `{ description:
+ * 'A tag.', $ref: Tag }`, `{ allOf: [{ $ref: Tag }] }` and `{ title: 'Tag',
+ * allOf: [{ $ref: Tag }], deprecated: true }` are each another name for
+ * `Tag`. Anything else beside the `$ref` makes the schema say something
+ * of its own, read by the parser or not, and it is no mere name: a limit
+ * (`{ $ref: Tag, minProperties: 1 }`), a `required` list, a `type`,
+ * `nullable`, `properties`, a `not`, an `enum` or a `const`, a union, or a
+ * second member of the `allOf` (`{ allOf: [{ $ref: Tag }, { description
+ * }] }`). The document's version is not asked: what is written beside a
+ * `$ref` is weighed alike in OAS 3.0 and 3.1, as the readers read a limit
+ * written there in both. `undefined` too where the `$ref` names no Schema
+ * Object.
+ */
+function namedComponent(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  const documented = (written: SchemaObject, typing: string): boolean =>
+    Object.entries(written).every(([key, value]) => key === typing || value === undefined || documentsSchema(key));
+  let reference: unknown = schema;
+  if (schema.$ref === undefined) {
+    const members: unknown = schema.allOf;
+    if (!Array.isArray(members) || members.length !== 1 || !documented(schema, 'allOf')) return undefined;
+    [reference] = members;
+  }
+  if (!isSchemaObject(reference) || reference.$ref === undefined || !documented(reference, '$ref')) return undefined;
+  const named: unknown = componentSchemaOf(reference.$ref, componentSchemas);
+  return isSchemaObject(named) ? named : undefined;
 }
 
 /** Whether a `type` names no type but `object`, `null` beside it or not, or is not written: what an object's schema, and every member of its `allOf`, may say of type (`composedOf`). */
@@ -4635,7 +4703,10 @@ let componentChains = new WeakMap<SchemaObject, ComponentChain>();
  * `$ref` that stands, written alone, is the reference to the component.
  * Two `$ref`s neither of whose components extends the other both type
  * the `allOf`, as before, and so do two whose components each reach the
- * other.
+ * other, and two names for one component neither of which names the
+ * other (`TagAlias: { $ref: Tag }` beside `OtherAlias: { $ref: Tag }`):
+ * the same instances under two models, with no narrower one to stand for
+ * both.
  *
  * The one reading of "the `$ref`s that type an `allOf`", for the reader
  * that counts them (`readInlineAllOf`: one is the reference, two a merge)
@@ -5219,6 +5290,25 @@ export const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   ...LIFTED_LIMIT_KEYWORDS,
 ];
 const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
+const LIFTED_LIMIT_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_LIMIT_KEYWORDS);
+
+/** The annotations no reader lifts and that constrain nothing: a schema that writes one accepts the instances it accepts without it (`splicesOpen`, `documentsSchema`). */
+const UNCONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set(['title', '$comment', 'xml']);
+
+/**
+ * Whether a keyword only documents the schema it is written on and
+ * constrains no instance: a keyword a field reads that is no limit
+ * (`LIFTED_DECLARATION_KEYWORDS` less `LIFTED_LIMIT_KEYWORDS`: text, a
+ * link, examples, a `default`, `deprecated`, `readOnly`, `writeOnly`), an
+ * `x-*` key, or an annotation no reader lifts (`UNCONSTRAINING_KEYWORDS`).
+ * Anything else may say what an instance is or must satisfy — a limit, a
+ * `required` list, a `type`, `nullable`, `properties`, a `not`, an `enum`
+ * or a `const`, a union — and so may a keyword no reader knows.
+ */
+function documentsSchema(key: string): boolean {
+  if (key.startsWith('x-') || UNCONSTRAINING_KEYWORDS.has(key)) return true;
+  return LIFTED_DECLARATION_KEYWORD_SET.has(key) && !LIFTED_LIMIT_KEYWORD_SET.has(key);
+}
 
 /**
  * The keywords under which a declaration nests the one schema its array

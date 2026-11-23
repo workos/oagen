@@ -422,7 +422,7 @@ describe('#733 `extendsComponent`: a component already is another it reaches thr
     }
   });
 
-  it('answers no for one component, two that reach each other, an alias on the wider side and strangers', () => {
+  it('answers no for one component, two that reach each other and strangers', () => {
     const pairs: Array<[string, string]> = [
       // One component is no extension of itself: `typingReferences` keeps the first of two `$ref`s to it.
       ['Tag', 'Tag'],
@@ -431,16 +431,154 @@ describe('#733 `extendsComponent`: a component already is another it reaches thr
       // Each reaches the other: neither is the narrower.
       ['A', 'B'],
       ['B', 'A'],
-      // An alias is a component of its own, which `TagOutput`'s chain does not name.
-      ['TagOutput', 'TagAlias'],
-      ['OutputAlias', 'TagAlias'],
-      ['TagAlias', 'OutputAlias'],
       ['Tag', 'Other'],
       ['Other', 'Tag'],
       ['TagOutput', 'Other'],
       ['Mid', 'Final'],
     ];
     for (const [narrow, wide] of pairs) expect(extended(narrow, wide), `${narrow} extends ${wide}`).toBe(false);
+  });
+
+  /** `Tag` under every spelling of another name for it, and under spellings that say something of their own. */
+  const named: Doc = {
+    ...tags,
+    Other,
+    // Each another name for `Tag`: it adds no constraint of its own.
+    Bare: ref('Tag'),
+    Described: ref('Tag', { description: 'A tag.' }),
+    Annotated: ref('Tag', {
+      title: 'Tag',
+      deprecated: true,
+      readOnly: true,
+      default: null,
+      example: { color: 'red' },
+      externalDocs: { url: 'https://example.com/tags' },
+      'x-note': 'n',
+      $comment: 'An alias.',
+    }),
+    Wrapped: all(ref('Tag')),
+    WrappedDescribed: { ...all(ref('Tag')), title: 'Tag', description: 'A tag.' },
+    WrappedInner: all(ref('Tag', { description: 'Inner.' })),
+    Twice: ref('Bare'),
+    Thrice: ref('Twice'),
+    WrappedTwice: all(ref('Wrapped')),
+    // Each says something of its own, read by the parser or not: a component like any other.
+    Limited: ref('Tag', { minProperties: 1 }),
+    Requiring: ref('Tag', { required: ['label'] }),
+    Typed: ref('Tag', { type: 'object' }),
+    Flagged: ref('Tag', { nullable: true }),
+    WithProperties: ref('Tag', { properties: { more: string } }),
+    WithNot: ref('Tag', notNull),
+    WithUnknown: ref('Tag', { propertyNames: { maxLength: 3 } }),
+    WrappedLimited: { ...all(ref('Tag')), minProperties: 1 },
+    WrappedRequiring: { ...all(ref('Tag')), required: ['label'] },
+    WrappedTyped: { type: 'object', ...all(ref('Tag')) },
+    WrappedNullable: { type: ['object', 'null'], ...all(ref('Tag')) },
+    WrappedFlagged: { nullable: true, ...all(ref('Tag')) },
+    WrappedInnerLimited: all(ref('Tag', { minProperties: 1 })),
+    TwoMembers: all(ref('Tag'), { description: 'A tag.' }),
+    WithBoolean: all(ref('Tag'), true),
+    // The narrower under a name of its own.
+    OutputAlias: ref('TagOutput'),
+    OutputWrapped: { description: 'An output tag.', ...all(ref('TagOutput')) },
+  };
+  const NAMES = [
+    'Bare',
+    'Described',
+    'Annotated',
+    'Wrapped',
+    'WrappedDescribed',
+    'WrappedInner',
+    'Twice',
+    'Thrice',
+    'WrappedTwice',
+  ];
+  const NO_NAMES = [
+    'Limited',
+    'Requiring',
+    'Typed',
+    'Flagged',
+    'WithProperties',
+    'WithNot',
+    'WithUnknown',
+    'WrappedLimited',
+    'WrappedRequiring',
+    'WrappedTyped',
+    'WrappedNullable',
+    'WrappedFlagged',
+    'WrappedInnerLimited',
+    'TwoMembers',
+    'WithBoolean',
+  ];
+
+  it('reads the wider through its names: a `$ref`, or an `allOf` of one, beside documentation only', () => {
+    within(named, () => {
+      for (const name of NAMES) {
+        // Every `TagOutput` is a `Tag`, and so one of whatever is only another name for `Tag`.
+        for (const narrow of ['TagOutput', 'OutputAlias', 'OutputWrapped']) {
+          expect(extendsComponent(at(narrow), at(name)), `${narrow} extends ${name}`).toBe(true);
+          expect(extendsComponent(at(name), at(narrow)), `${name} extends ${narrow}`).toBe(false);
+        }
+        // The name is a component of its own, which names `Tag` in its chain.
+        expect(extendsComponent(at(name), at('Tag')), name).toBe(true);
+        expect(extendsComponent(at('Tag'), at(name)), name).toBe(false);
+        expect(extendsComponent(at('Other'), at(name)), name).toBe(false);
+        expect(extendsComponent(at(name), at('Other')), name).toBe(false);
+      }
+    });
+  });
+
+  it('takes a name that says anything of its own for a component like any other', () => {
+    within(named, () => {
+      for (const name of NO_NAMES) {
+        // `TagOutput`'s chain does not name it, and it is no mere name for what that chain names.
+        expect(extendsComponent(at('TagOutput'), at(name)), `TagOutput extends ${name}`).toBe(false);
+        expect(extendsComponent(at(name), at('TagOutput')), `${name} extends TagOutput`).toBe(false);
+        // It still names `Tag` in its own chain, so it extends `Tag`, and `Tag` under another name.
+        expect(extendsComponent(at(name), at('Tag')), `${name} extends Tag`).toBe(true);
+        expect(extendsComponent(at(name), at('Bare')), `${name} extends Bare`).toBe(true);
+        expect(extendsComponent(at('Bare'), at(name)), `Bare extends ${name}`).toBe(false);
+      }
+    });
+  });
+
+  it('tells two names for one component apart by neither, unless one names the other', () => {
+    within(named, () => {
+      const strangers: Array<[string, string]> = [
+        ['Bare', 'Described'],
+        ['Described', 'Wrapped'],
+        ['Wrapped', 'WrappedInner'],
+        ['Thrice', 'WrappedTwice'],
+        ['Annotated', 'Twice'],
+      ];
+      for (const [first, second] of strangers) {
+        expect(extendsComponent(at(first), at(second)), `${first} extends ${second}`).toBe(false);
+        expect(extendsComponent(at(second), at(first)), `${second} extends ${first}`).toBe(false);
+      }
+      const chained: Array<[string, string]> = [
+        ['Twice', 'Bare'],
+        ['Thrice', 'Twice'],
+        ['Thrice', 'Bare'],
+        ['WrappedTwice', 'Wrapped'],
+      ];
+      for (const [narrow, wide] of chained) {
+        expect(extendsComponent(at(narrow), at(wide)), `${narrow} extends ${wide}`).toBe(true);
+        expect(extendsComponent(at(wide), at(narrow)), `${wide} extends ${narrow}`).toBe(false);
+      }
+    });
+  });
+
+  it('ends on names that name each other', () => {
+    // The bundler refuses such a document; a reader handed the map must still answer.
+    const looped = { ...tags, LoopA: ref('LoopB'), LoopB: ref('LoopA'), LoopC: all(ref('LoopC')) } as unknown;
+    const map = looped as Record<string, SchemaObject>;
+    for (const name of ['LoopA', 'LoopB', 'LoopC']) {
+      expect(extendsComponent(at('TagOutput'), at(name), map), name).toBe(false);
+      expect(extendsComponent(at(name), at('Tag'), map), name).toBe(false);
+      expect(extendsComponent(at(name), at(name), map), name).toBe(false);
+    }
+    expect(extendsComponent(at('LoopA'), at('LoopB'), map)).toBe(false);
+    expect(extendsComponent(at('TagOutput'), at('Tag'), map)).toBe(true);
   });
 
   it('is asked of objects alone: the wider declares properties, and nothing the narrower is made of says another type', () => {
@@ -512,7 +650,8 @@ describe('#733 `extendsComponent`: a component already is another it reaches thr
     const schemas = components as Record<string, SchemaObject>;
     expect(extendsComponent(at('Final'), at('Tag'), schemas)).toBe(true);
     expect(extendsComponent(at('Tag'), at('Final'), schemas)).toBe(false);
-    expect(extendsComponent(at('TagOutput'), at('TagAlias'), schemas)).toBe(false);
+    expect(extendsComponent(at('TagOutput'), at('TagAlias'), schemas)).toBe(true);
+    expect(extendsComponent(at('TagAlias'), at('TagOutput'), schemas)).toBe(false);
     // Outside a document, and with no map, no `$ref` resolves.
     expect(extendsComponent(at('Final'), at('Tag'))).toBe(false);
     expect(extendsComponent(at('Final'), at('Tag'), {})).toBe(false);
@@ -613,6 +752,10 @@ describe('#733 an inline `allOf` of two `$ref`s, one to a component the other al
           ['a component and an alias of it', all(ref('Tag'), ref('TagAlias')), schemas],
           ['an alias of it first', all(ref('TagAlias'), ref('Tag')), schemas],
           ['a component and an alias of one extending it', all(ref('Tag'), ref('OutputAlias')), schemas],
+          ['an alias of the wider beside the narrower', all(ref('TagAlias'), ref('TagOutput')), schemas],
+          ['the narrower beside an alias of the wider', all(ref('TagOutput'), ref('TagAlias')), schemas],
+          ['an alias on both sides', all(ref('TagAlias'), ref('OutputAlias')), schemas],
+          ['the wider, an alias of it and the narrower', all(ref('Tag'), ref('TagAlias'), ref('TagOutput')), schemas],
           ['a component reached inside nested members', all(ref('Tag'), ref('Deep')), schemas],
           ['a boolean among the narrower’s members', all(ref('Tag'), ref('WithTrue')), schemas],
           ['a component that names itself, and one extending it', all(ref('Node'), ref('Leaf')), schemas],
@@ -627,6 +770,10 @@ describe('#733 an inline `allOf` of two `$ref`s, one to a component the other al
         a component and an alias of it: TagAlias
         an alias of it first: TagAlias
         a component and an alias of one extending it: OutputAlias
+        an alias of the wider beside the narrower: TagOutput
+        the narrower beside an alias of the wider: TagOutput
+        an alias on both sides: OutputAlias
+        the wider, an alias of it and the narrower: TagOutput
         a component reached inside nested members: Deep
         a boolean among the narrower’s members: WithTrue
         a component that names itself, and one extending it: Leaf
@@ -653,8 +800,9 @@ describe('#733 an inline `allOf` of two `$ref`s, one to a component the other al
       expect(
         await table(openapi, [
           ['two strangers', all(ref('Tag'), ref('Other')), schemas],
-          ['an alias on the wider side', all(ref('TagAlias'), ref('TagOutput')), schemas],
+          // Two names for one component, neither naming the other: no narrower one to stand for both.
           ['two aliases of one component', all(ref('TagAlias'), ref('OtherAlias')), schemas],
+          ['two aliases of one component, the other first', all(ref('OtherAlias'), ref('TagAlias')), schemas],
           ['the wider under a union of two', all(ref('Tag'), ref('Either')), schemas],
           ['the wider under a union of one', all(ref('Tag'), ref('One')), schemas],
           ['the wider under a nullable wrapper', all(ref('Tag'), ref('Maybe')), schemas],
@@ -664,8 +812,8 @@ describe('#733 an inline `allOf` of two `$ref`s, one to a component the other al
         ]),
       ).toMatchInlineSnapshot(`
         "two strangers: HolderTag { label?, color, other? }
-        an alias on the wider side: HolderTag { label, color }
         two aliases of one component: HolderTag { label?, color }
+        two aliases of one component, the other first: HolderTag { label?, color }
         the wider under a union of two: HolderTag { label, color, other? }
         the wider under a union of one: HolderTag { label, color }
         the wider under a nullable wrapper: HolderTag { label, color }
@@ -761,6 +909,193 @@ describe('#733 an inline `allOf` of two `$ref`s, one to a component the other al
       const nested = await parse(holder(openapi, all(ref('Nested'), ref('NestedOutput')), schemas));
       expect(show(fieldOf(nested, 'Holder', 'tag')?.type)).toBe('NestedOutput');
       expect(lineOf(nested, 'NestedOutput')).toBe('NestedOutput extends Nested { meta: NestedOutputMeta }');
+    });
+  });
+});
+
+describe('#733 the wider component under another name', () => {
+  describe.each(VERSIONS)('OpenAPI %s', (openapi) => {
+    const nullableTyped = (...members: unknown[]) =>
+      openapi === '3.0.3'
+        ? { type: 'object', nullable: true, allOf: members }
+        : { type: ['object', 'null'], allOf: members };
+    /** `TagAlias`, in spellings that only name `Tag` and in spellings that say something of their own. */
+    const names: ReadonlyArray<readonly [string, unknown]> = [
+      ['a `$ref`', ref('Tag')],
+      ['a `$ref` beside a `description`', ref('Tag', { description: 'An alias.' })],
+      [
+        'a `$ref` beside a `title`, flags, an example and an `x-*` key',
+        ref('Tag', { title: 'Alias', deprecated: true, example: { color: 'red' }, 'x-note': 'n' }),
+      ],
+      ['an `allOf` of one `$ref`', all(ref('Tag'))],
+      ['an `allOf` of one `$ref` beside a `description`', { ...all(ref('Tag')), description: 'An alias.' }],
+      ['an `allOf` of one described `$ref`', all(ref('Tag', { description: 'Inner.' }))],
+      ['a name for a name', ref('Inner')],
+      ['a name for a name for a name', ref('Middle')],
+    ];
+    const noNames: ReadonlyArray<readonly [string, unknown]> = [
+      ['a `$ref` beside a limit', ref('Tag', { minProperties: 1 })],
+      ['a `$ref` beside `required`', ref('Tag', { required: ['label'] })],
+      ['a `$ref` beside `type: object`', ref('Tag', { type: 'object' })],
+      ['a `$ref` beside `nullable: true`', ref('Tag', { nullable: true })],
+      ['a `$ref` beside `properties`', ref('Tag', { properties: { more: string } })],
+      ['a `$ref` beside a `not`', ref('Tag', notNull)],
+      ['an `allOf` of one `$ref` beside a limit', { ...all(ref('Tag')), minProperties: 1 }],
+      ['an `allOf` of one `$ref` beside `required`', { ...all(ref('Tag')), required: ['label'] }],
+      ['an `allOf` of one `$ref` beside `type: object`', { type: 'object', ...all(ref('Tag')) }],
+      ['an `allOf` of one `$ref` beside a nullable `type`', nullableTyped(ref('Tag'))],
+      ['an `allOf` of one `$ref` beside `nullable: true`', { nullable: true, ...all(ref('Tag')) }],
+      ['an `allOf` of one limited `$ref`', all(ref('Tag', { minProperties: 1 }))],
+      ['an `allOf` of a `$ref` and a `description` member', all(ref('Tag'), { description: 'A member.' })],
+      ['an `allOf` of a `$ref` and a `not` member', all(ref('Tag'), notNull)],
+    ];
+    const others = { Inner: ref('Tag'), Middle: ref('Inner'), OutputAlias: ref('TagOutput'), OtherAlias: ref('Tag') };
+    /** `[TagAlias, TagOutput]` by hand in both orders, then as two declarations in both orders. */
+    const row = async (TagAlias: unknown, Tag_: unknown = Tag): Promise<string> => {
+      const schemas = { Tag: Tag_, TagOutput, TagAlias, ...others };
+      const types: string[] = [];
+      for (const members of [
+        [ref('TagAlias'), ref('TagOutput')],
+        [ref('TagOutput'), ref('TagAlias')],
+      ]) {
+        types.push(await tagOf(openapi, all(...members), schemas));
+        const spec = await parse(declared(openapi, members[0], members[1], schemas));
+        const field = fieldOf(spec, 'X', 'tag');
+        expect(modelOf(spec, 'XTag') !== undefined).toBe(show(field?.type).includes('XTag'));
+        types.push(show(field?.type));
+      }
+      return types.join(' | ');
+    };
+
+    it('is the narrower component: a `$ref`, or an `allOf` of one, beside documentation only', async () => {
+      for (const [label, TagAlias] of names) {
+        // By hand and for two declarations, in either order: every `TagOutput` is a `TagAlias`.
+        expect(await row(TagAlias), label).toBe('TagOutput | TagOutput | TagOutput | TagOutput');
+      }
+      expect(warnings()).toEqual([]);
+    });
+
+    it('stays the merge where the name says anything of its own', async () => {
+      const lines: string[] = [];
+      for (const [label, TagAlias] of noNames) lines.push(`${label}: ${await row(TagAlias)}`);
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "a \`$ref\` beside a limit: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        a \`$ref\` beside \`required\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        a \`$ref\` beside \`type: object\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        a \`$ref\` beside \`nullable: true\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        a \`$ref\` beside \`properties\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        a \`$ref\` beside a \`not\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of one \`$ref\` beside a limit: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of one \`$ref\` beside \`required\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of one \`$ref\` beside \`type: object\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of one \`$ref\` beside a nullable \`type\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of one \`$ref\` beside \`nullable: true\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of one limited \`$ref\`: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of a \`$ref\` and a \`description\` member: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag
+        an \`allOf\` of a \`$ref\` and a \`not\` member: HolderTag { label, color } | XTag | HolderTag { label, color } | XTag"
+      `);
+    });
+
+    it('the issue’s documents with the base’s property typed by an alias', async () => {
+      const aliased = (output: unknown) =>
+        document(openapi, get('/pets', 'listPets', ref('PetOutput')), {
+          ...tags,
+          TagAlias: ref('Tag', { description: 'An alias.' }),
+          Pet: { type: 'object', properties: { name: string, tag: ref('TagAlias') } },
+          PetOutput: output,
+        });
+      const narrowing = aliased(all(ref('Pet'), { properties: { tag: ref('TagOutput') } }));
+      const written = aliased({ type: 'object', properties: { name: string, tag: ref('TagOutput') } });
+      expect(script(await parse(narrowing))).toMatchInlineSnapshot(`
+        "Tag { label?: string, color: string }
+        TagOutput extends Tag { label: string, color: string }
+        TagAlias extends Tag { label?: string, color: string }
+        Pet { name?: string, tag?: TagAlias }
+        PetOutput extends Pet { name?: string, tag?: TagOutput }"
+      `);
+      await expectNoDiff(narrowing, written);
+      // The reverse pair, and the override written first.
+      const reverse = document(openapi, get('/pets', 'listPets', ref('PetOutput')), {
+        ...tags,
+        TagAlias: ref('Tag'),
+        Pet: { type: 'object', properties: { name: string, tag: ref('TagOutput') } },
+        PetOutput: all({ properties: { tag: ref('TagAlias') } }, ref('Pet')),
+      });
+      expect(lineOf(await parse(reverse), 'PetOutput')).toBe(
+        'PetOutput extends Pet { tag?: TagOutput, name?: string }',
+      );
+    });
+
+    it('with a name on both sides, three in a row, and two names with nothing narrower', async () => {
+      const schemas = { ...tags, TagAlias: ref('Tag'), ...others, OutputWrapped: all(ref('TagOutput')) };
+      expect(
+        await table(openapi, [
+          ['a name for each', all(ref('TagAlias'), ref('OutputAlias')), schemas],
+          ['a name for each, the narrower first', all(ref('OutputAlias'), ref('TagAlias')), schemas],
+          ['a name for each, the narrower an `allOf`', all(ref('Middle'), ref('OutputWrapped')), schemas],
+          ['the wider, a name for it and the narrower', all(ref('Tag'), ref('TagAlias'), ref('TagOutput')), schemas],
+          [
+            'two names for the wider and the narrower',
+            all(ref('TagAlias'), ref('OtherAlias'), ref('TagOutput')),
+            schemas,
+          ],
+          ['a name for the wider beside the wider', all(ref('TagAlias'), ref('Tag')), schemas],
+          ['a name for a name beside the name', all(ref('Inner'), ref('Middle')), schemas],
+          // Neither is the narrower, and neither name is the other's: both stand, as they did.
+          ['two names for one component', all(ref('TagAlias'), ref('OtherAlias')), schemas],
+          ['two names for one component, the other first', all(ref('OtherAlias'), ref('TagAlias')), schemas],
+          ['two names of different depth', all(ref('Middle'), ref('OtherAlias')), schemas],
+        ]),
+      ).toMatchInlineSnapshot(`
+        "a name for each: OutputAlias
+        a name for each, the narrower first: OutputAlias
+        a name for each, the narrower an \`allOf\`: OutputWrapped
+        the wider, a name for it and the narrower: TagOutput
+        two names for the wider and the narrower: TagOutput
+        a name for the wider beside the wider: TagAlias
+        a name for a name beside the name: Middle
+        two names for one component: HolderTag { label?, color }
+        two names for one component, the other first: HolderTag { label?, color }
+        two names of different depth: HolderTag { label?, color }"
+      `);
+    });
+
+    it('admits `null` as the merge of both did', async () => {
+      const NullableTag = nullableTag(openapi);
+      const lines: string[] = [];
+      for (const [label, TagAlias, Tag_] of [
+        ['a name for a nullable component', ref('Tag'), NullableTag],
+        ['an `allOf` name for a nullable component', all(ref('Tag')), NullableTag],
+        ['a name for a component that admits none', ref('Tag'), Tag],
+        // No names: a nullable `type` is the alias's own word.
+        ['a nullable wrapper around a component that admits none', nullableTyped(ref('Tag')), Tag],
+        ['a nullable wrapper around a nullable component', nullableTyped(ref('Tag')), NullableTag],
+      ] as const) {
+        const schemas = { Tag: Tag_, TagOutput, TagAlias, NotNull: notNull };
+        const both = all(ref('TagAlias'), ref('TagOutput'));
+        const types: string[] = [];
+        for (const tag of [
+          both,
+          { type: 'object', ...both },
+          all(ref('TagAlias'), ref('TagOutput'), notNull),
+          all(ref('TagAlias'), ref('TagOutput'), ref('NotNull')),
+        ]) {
+          types.push(await tagOf(openapi, tag, schemas));
+        }
+        const spec = await parse(declared(openapi, ref('TagAlias'), ref('TagOutput'), schemas));
+        types.push(show(fieldOf(spec, 'X', 'tag')?.type));
+        lines.push(`${label}: ${types.join(' | ')}`);
+      }
+      expect(
+        `both | \`type: object\` beside | a \`not\` member | a \`$ref\` to a \`not\` | two declarations\n${lines.join('\n')}`,
+      ).toMatchInlineSnapshot(`
+        "both | \`type: object\` beside | a \`not\` member | a \`$ref\` to a \`not\` | two declarations
+        a name for a nullable component: nullable<TagOutput> | TagOutput | TagOutput | TagOutput | nullable<TagOutput>
+        an \`allOf\` name for a nullable component: nullable<TagOutput> | TagOutput | TagOutput | TagOutput | nullable<TagOutput>
+        a name for a component that admits none: TagOutput | TagOutput | TagOutput | TagOutput | TagOutput
+        a nullable wrapper around a component that admits none: HolderTag { label, color } | HolderTag { label, color } | HolderTag { label, color } | HolderTag { label, color } | XTag
+        a nullable wrapper around a nullable component: nullable<HolderTag> { label, color } | HolderTag { label, color } | HolderTag { label, color } | HolderTag { label, color } | nullable<XTag>"
+      `);
     });
   });
 });
@@ -1164,6 +1499,24 @@ describe('#733 `bases` and `inheritedFrom` say what they said', () => {
       expect(lines(await parse(repro(openapi, narrowedAfter, 'Tag')), 'Pet', 'PetOutput')).toEqual([
         'Pet { name?: string, tag?: TagOutput }',
         'PetOutput extends Pet { name?: string <from=Pet>, tag?: TagOutput }',
+      ]);
+    });
+
+    it('a base the copy had cost the model is kept: the component fits where the copy, without its limits, did not', async () => {
+      // `Limited` writes a limit of its own, which a merged copy of `[Limited, Tag]` never carried, so the copy
+      // was looser than `Pet.tag` and `Pet` was dropped as a base. The field is `Limited` now, as `Pet.tag` is.
+      const limited = (narrowing: (base: string, tag: unknown) => unknown) =>
+        document(openapi, get('/pets', 'listPets', ref('PetOutput')), {
+          Tag,
+          Limited: all(ref('Tag'), { minProperties: 1 }),
+          Pet: { type: 'object', properties: { name: string, tag: ref('Limited') } },
+          PetOutput: narrowing('Pet', ref('Tag')),
+        });
+      expect(lines(await parse(limited(narrowedAfter)), 'PetOutput')).toEqual([
+        'PetOutput extends Pet { name?: string <from=Pet>, tag?: Limited }',
+      ]);
+      expect(lines(await parse(limited(narrowedBefore)), 'PetOutput')).toEqual([
+        'PetOutput extends Pet { tag?: Limited, name?: string <from=Pet> }',
       ]);
     });
 
