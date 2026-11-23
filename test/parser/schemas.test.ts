@@ -3015,6 +3015,7 @@ describe('#569', () => {
         type: 'object',
         properties: {
           array_without_items: ref('ArrayWithoutItems'),
+          array_or_string_without_items: ref('ArrayOrStringWithoutItems'),
           object_or_string: ref('ObjectOrString'),
           array_or_string: ref('ArrayOrString'),
           null_only: ref('NullOnly'),
@@ -3025,6 +3026,7 @@ describe('#569', () => {
         },
       },
       ArrayWithoutItems: { type: 'array' },
+      ArrayOrStringWithoutItems: { type: ['array', 'string'] },
       ObjectOrString: { type: ['object', 'string'] },
       ArrayOrString: { type: ['array', 'string'], items: { type: 'string' } },
       NullOnly: { type: 'null' },
@@ -3037,11 +3039,13 @@ describe('#569', () => {
 
     expect(names(spec)).toEqual({
       enums: ['OneConst'],
+      // A type list naming `array` beside other types is no model (#730); one
+      // naming `object` still is, the object it names.
       models: [
         'Holder',
         'ArrayWithoutItems',
+        'ArrayOrStringWithoutItems',
         'ObjectOrString',
-        'ArrayOrString',
         'NullOnly',
         'NullList',
         'MapWithoutType',
@@ -3050,8 +3054,31 @@ describe('#569', () => {
     });
     expect(fieldsOf(spec, 'Holder').map(({ name, type }) => ({ name, type }))).toEqual([
       { name: 'array_without_items', type: { kind: 'model', name: 'ArrayWithoutItems' } },
-      { name: 'object_or_string', type: { kind: 'model', name: 'ObjectOrString' } },
-      { name: 'array_or_string', type: { kind: 'model', name: 'ArrayOrString' } },
+      // A list whose `array` declares no `items` is unread as `type: 'array'` without them is.
+      { name: 'array_or_string_without_items', type: { kind: 'model', name: 'ArrayOrStringWithoutItems' } },
+      // #730: a `$ref` to a type list naming `object` or `array` beside another
+      // type is the union the list is where it is written — the model beside
+      // the `string`, and the array beside it — where each was the model alone.
+      {
+        name: 'object_or_string',
+        type: {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'ObjectOrString' },
+            { kind: 'primitive', type: 'string' },
+          ],
+        },
+      },
+      {
+        name: 'array_or_string',
+        type: {
+          kind: 'union',
+          variants: [
+            { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+            { kind: 'primitive', type: 'string' },
+          ],
+        },
+      },
       // A `null`-only component keeps its fieldless model, and admits `null`
       // in either spelling, so the reference is wrapped (#615).
       { name: 'null_only', type: nullable({ kind: 'model', name: 'NullOnly' }) },
