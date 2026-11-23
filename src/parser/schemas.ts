@@ -1699,8 +1699,77 @@ export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set
  * it is handed, since the members of an `allOf` and the component a `$ref`
  * names are whatever the document wrote.
  */
-function isSchemaObject(value: unknown): value is SchemaObject {
+export function isSchemaObject(value: unknown): value is SchemaObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The keywords of a Schema Object that hold a list of schemas. */
+const SCHEMA_LIST_KEYWORDS = ['allOf', 'oneOf', 'anyOf'] as const;
+
+/** The keywords of a Schema Object that hold schemas by name. */
+const SCHEMA_MAP_KEYWORDS = ['properties', 'patternProperties'] as const;
+
+/** The keywords of a Schema Object that hold one schema, which may be a JSON Schema boolean the readers read (`additionalProperties: false`, `not: true`). */
+const SCHEMA_OR_BOOLEAN_KEYWORDS = ['additionalProperties', 'not'] as const;
+
+/** The keywords of a Schema Object that hold a list the readers iterate. */
+const LIST_KEYWORDS = ['enum', 'required'] as const;
+
+/**
+ * Whether a schema is one the readers that type it can read as written, at
+ * every depth: a Schema Object (`isSchemaObject`) whose every keyword that
+ * holds schemas holds Schema Objects of the same kind — the members of its
+ * `allOf`, `oneOf` and `anyOf`, each a list; its `properties` and
+ * `patternProperties`, each an object of them; its `items`; its
+ * `additionalProperties` and `not`, which may be a boolean instead — whose
+ * `enum` and `required` are lists, and whose `discriminator` is an object
+ * with a `mapping` of strings when it writes one. Nothing is followed
+ * through a `$ref`: a component is read where it stands. A schema met
+ * again on the walk is read once.
+ *
+ * Asked before a schema is handed to a reader it did not reach before, so
+ * a document that parsed keeps parsing: the type builder reads every
+ * variant of a union and every keyword of each, where the merge of an
+ * `allOf` reads the object properties alone, so a variant that is no
+ * Schema Object — a JSON Schema boolean (`anyOf: [{ $ref: Owner }, true]`,
+ * `items: true` under a variant), which fails the parse wherever the type
+ * builder meets one (workos/oagen#728), or anything else a document may
+ * hold there — or a keyword written as another kind of value (`enum:
+ * 'cat'`, `oneOf: {}`) is read by the merge as nothing and by the type
+ * builder not at all. `readInlineAllOf` leaves an `allOf` whose union
+ * member is not readable to the reading it had (workos/oagen#732).
+ */
+export function isReadableSchema(schema: unknown): schema is SchemaObject {
+  const seen = new Set<unknown>();
+  const readable = (value: unknown): boolean => {
+    if (!isSchemaObject(value)) return false;
+    if (seen.has(value)) return true;
+    seen.add(value);
+    const written = value as Record<string, unknown>;
+    for (const keyword of SCHEMA_LIST_KEYWORDS) {
+      const members = written[keyword];
+      if (members !== undefined && !(Array.isArray(members) && members.every(readable))) return false;
+    }
+    for (const keyword of SCHEMA_MAP_KEYWORDS) {
+      const named = written[keyword];
+      if (named !== undefined && !(isSchemaObject(named) && Object.values(named).every(readable))) return false;
+    }
+    if (written.items !== undefined && !readable(written.items)) return false;
+    for (const keyword of SCHEMA_OR_BOOLEAN_KEYWORDS) {
+      const held = written[keyword];
+      if (held !== undefined && typeof held !== 'boolean' && !readable(held)) return false;
+    }
+    for (const keyword of LIST_KEYWORDS) {
+      if (written[keyword] !== undefined && !Array.isArray(written[keyword])) return false;
+    }
+    const { discriminator } = written;
+    if (discriminator === undefined) return true;
+    if (!isSchemaObject(discriminator)) return false;
+    const { mapping } = discriminator as { mapping?: unknown };
+    if (mapping === undefined) return true;
+    return isSchemaObject(mapping) && Object.values(mapping).every((target) => typeof target === 'string');
+  };
+  return readable(schema);
 }
 
 /**
@@ -3861,7 +3930,9 @@ const TYPING_KEYWORDS: readonly string[] = [
  * model), a member declaring properties inline (a merged model —
  * `declaresInlineProperties`: its own `properties`, or those of a nested
  * `allOf` member or of a `oneOf`/`anyOf` variant, which `mergeAllOfMembers`
- * reads into the model), or exactly one member that types on its own
+ * reads into the model — or, where it is the one member that types the
+ * schema and carries a union, that union unwrapped: `readInlineAllOf`,
+ * #732), or exactly one member that types on its own
  * (`allOfTypingMember`, unwrapped) — alone, or beside members that declare
  * no type and only annotate or limit it: `allOf: [{ type: 'string', enum:
  * [...] }, { description }]` is the enum, as `allOf: [{ type: 'string',
@@ -10800,8 +10871,10 @@ function buildTypeRef(
   // a merged model — a `$ref` member augmented by an inline object member,
   // or inline members one of which declares properties, a `oneOf`/`anyOf`
   // member's inline object variants included — which `materializeMergedAllOf`
-  // builds under this very name; a lone member unwrapped; or a plain
-  // reference to the first `$ref` member.
+  // builds under this very name; a lone member, or the one member that
+  // types the schema beside members that only annotate or limit it — a
+  // union member included, whatever its variants declare (#732) —
+  // unwrapped; or a plain reference to the first `$ref` member.
   if (inlineKind === 'allOf' && schema.allOf) {
     const reading = readInlineAllOf(schema.allOf, schema);
     if (reading === 'merged') {
