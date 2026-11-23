@@ -236,9 +236,9 @@ interface ArrayComponentPlan {
  * carries its `null`.
  */
 interface MultiTypeModel {
-  /** The `components/schemas` keys the reference passes, nearest first: the key a `$ref` names, each alias it reads through, and last the key whose schema declares the type list. */
+  /** The `components/schemas` keys the reference passes, nearest first: the key a `$ref` names, each alias it reads through, the key whose schema declares the type list, and the keys that list's own `allOf` passes in turn when it is read as a reference to another such component (`multiTypeModelChain`). Read for the limits the reference carries. */
   chain: readonly string[];
-  /** The component that declares the type list: the last key of `chain`. One object for the component and every alias of it. */
+  /** The component that declares the type list: the first key of `chain` to declare one. One object for the component and every alias of it. */
   owner: MultiTypeModelOwner;
   /** The other types a reference to this key carries beside the model: the declaring component's, less those the `type` of an alias on the way does not admit (`multiTypeModelChain`). Never empty. */
   others: ReadonlySet<string>;
@@ -2999,7 +2999,7 @@ function decideComponentKinds(schemas: Record<string, SchemaObject>): void {
   const multiTypeOwners = new Map<string, MultiTypeModelOwner>();
   for (const key of Object.keys(schemas)) {
     const named = multiTypeModelChain(key, schemas);
-    const ownerKey = named?.chain[named.chain.length - 1];
+    const ownerKey = named?.owner;
     const declared = ownerKey === undefined ? undefined : multiTypeModelDeclaration(schemas[ownerKey]!);
     if (!named || ownerKey === undefined || !declared) continue;
     const owner = multiTypeOwners.get(ownerKey) ?? {
@@ -6081,8 +6081,16 @@ function multiTypeMembers(
   items?: ArrayComponentPlan,
   others?: ReadonlySet<string>,
 ): TypeRef {
-  const members = multiTypeMemberSchemas(schema, modelName, true).filter(
-    ([, member]) => member === undefined || others === undefined || others.has(String(member.type)),
+  // The members `others` leaves, a `number` it leaves the integers of read
+  // as an `integer` (`typeLeft`): the types an alias narrowed the list to
+  // (`multiTypeModelChain`).
+  const members = multiTypeMemberSchemas(schema, modelName, true).flatMap(
+    ([context, member]): Array<[string, SchemaObject | undefined]> => {
+      if (member === undefined || others === undefined) return [[context, member]];
+      const left = typeLeft(others, String(member.type));
+      if (left === undefined) return [];
+      return [[context, left === member.type ? member : derivedCopy({ ...member, type: left }, member)]];
+    },
   );
   // The schema's limits are the union's, as a type list's are
   // (`schemaToTypeRef`; #545), so the other members carry none, whichever
@@ -7022,7 +7030,12 @@ function listedCopies({ list, narrowings }: ListedSchema): SchemaObject[] | unde
   return (
     copies &&
     narrowings.reduceRight<SchemaObject[]>((kept, own) => {
-      const admitted = kept.filter((copy) => admits(own, String(copy.type)));
+      // A `number` copy the wrapper leaves the integers of is read as an `integer` one (`typeLeft`).
+      const admitted = kept.flatMap((copy) => {
+        const left = typeLeft(own, String(copy.type));
+        if (left === undefined) return [];
+        return [left === copy.type ? copy : derivedCopy({ ...copy, type: left }, copy)];
+      });
       return admitted.length > 0 ? admitted : kept;
     }, copies)
   );
@@ -7260,11 +7273,18 @@ function multiTypeModelDeclaration(schema: SchemaObject): { declaration: SchemaO
 /**
  * The `components/schemas` keys a reference to the model component under
  * `key` reads its other types through (`MultiTypeModel.chain`), nearest
- * first — `key`, each alias it names in turn, and last the component whose
- * type list names `object` beside other types
- * (`multiTypeModelDeclaration`) — with the other types the reference
+ * first — `key`, each alias it names in turn, and the component whose
+ * type list names `object` beside other types (`owner`;
+ * `multiTypeModelDeclaration`) — with the other types the reference
  * carries (`MultiTypeModel.others`), or `undefined` when the component
- * admits nothing but its object (#730). An alias is what it is for the
+ * admits nothing but its object (#730). A list written beside an `allOf`
+ * that is read as a reference to another such component (`Listed: { type:
+ * ['object', 'string'], allOf: [{ $ref: Owner }] }`) is the alias's own
+ * list, typed from its own copies, and the chain goes on through the
+ * component it names, whose limits the reference reads as the same schema
+ * on a field reads them (`limitReference`): `{ minLength: 2 }` on `Owner`
+ * is on `Listed | string` as it is on a `$ref` to `Plain: { allOf: [{
+ * $ref: Owner }] }`. An alias is what it is for the
  * `null` a nullable object component admits
  * (`isNullableModelComponentEntry`): a bare `$ref` (`OwnerAlias: { $ref:
  * Owner }`; #618) or an `allOf` read as its `$ref` member, alone or beside
@@ -7295,26 +7315,33 @@ function multiTypeModelChain(
   key: string,
   schemas: Record<string, SchemaObject>,
   seen: Set<string> = new Set(),
-): { chain: string[]; others: string[] } | undefined {
+): { chain: string[]; owner: string; others: string[] } | undefined {
   const schema: unknown = Object.hasOwn(schemas, key) ? schemas[key] : undefined;
   if (!isSchemaObject(schema) || seen.has(key) || !buildsComponentModel(schema, schemas)) return undefined;
   seen.add(key);
+  const aliasedBy = (wrapper: SchemaObject) => {
+    const member = wrapper.$ref !== undefined ? wrapper : allOfReadAsMember(wrapper);
+    const aliased = member?.$ref === undefined ? undefined : componentKeyOf(member.$ref);
+    return aliased === undefined ? undefined : multiTypeModelChain(aliased, schemas, seen);
+  };
   if (schema.$ref === undefined) {
     if (isNamedUnionSchema(schema)) return undefined;
     const declared = multiTypeModelDeclaration(schema);
-    if (declared) return { chain: [key], others: declared.others };
+    if (declared) {
+      return { chain: [key, ...(aliasedBy(declared.declaration)?.chain ?? [])], owner: key, others: declared.others };
+    }
   }
   const bare = schema.$ref !== undefined ? schema : unwrapNullableSchema(schema);
-  const member = bare.$ref !== undefined ? bare : allOfReadAsMember(bare);
-  const aliased = member?.$ref === undefined ? undefined : componentKeyOf(member.$ref);
-  const named = aliased === undefined ? undefined : multiTypeModelChain(aliased, schemas, seen);
+  const named = aliasedBy(bare);
   if (!named) return undefined;
   // Nothing but annotations is read beside a bare `$ref`; an `allOf` read
   // as the reference is narrowed by the `type` written beside it.
   const own = schema.$ref !== undefined ? undefined : ownTypes(bare);
   const admitted = typesAdmitted(['object', ...named.others], own);
   const others = admitted.filter((type) => type !== 'object');
-  return admitted.includes('object') && others.length > 0 ? { chain: [key, ...named.chain], others } : undefined;
+  return admitted.includes('object') && others.length > 0
+    ? { chain: [key, ...named.chain], owner: named.owner, others }
+    : undefined;
 }
 
 /**
@@ -11326,10 +11353,19 @@ function declaredTypes(schema: SchemaObject, seen: Set<SchemaObject> = new Set()
   }
 }
 
-/** Whether `schema` admits an instance of `type`: it declares no type (`declaredTypes`), or one that admits it. */
+/**
+ * Whether `schema` admits an instance of `type`: it declares no type
+ * (`declaredTypes`), or one that leaves some instance of it (`typeLeft`):
+ * the type itself, or `integer` for a `number` — an integer is a number
+ * both admit, so the `number` copy of `{ type: ['number', 'string'],
+ * allOf: [{ $ref: Tag }] }` over `Tag: { type: ['integer', 'string'] }`
+ * stays, and is the `integer` the `allOf` types it as (#730: the copy was
+ * left out, which nothing showed while the `string` copy was typed as the
+ * whole of `Tag`).
+ */
 function admitsType(schema: SchemaObject, type: string): boolean {
   const declared = declaredTypes(schema);
-  return declared === undefined || admits(declared, type);
+  return declared === undefined || typeLeft(declared, type) !== undefined;
 }
 
 /**
@@ -11353,7 +11389,7 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
       return target === undefined || appliesToType(target, type, seen);
     }
     if (isNullSchema(schema)) return false;
-    if (schema.type !== undefined) return admits(typesNamed(schema.type), type);
+    if (schema.type !== undefined) return typeLeft(typesNamed(schema.type), type) !== undefined;
     if (schema.const !== undefined || schema.enum !== undefined) return true;
     if ((TYPE_FAMILY_KEYWORDS[type] ?? []).some((keyword) => schema[keyword] !== undefined)) return true;
     return [schema.allOf, schema.oneOf, schema.anyOf].some(
@@ -11648,6 +11684,14 @@ function typeListCopies(schema: SchemaObject): SchemaObject[] {
  * twice; #616).
  */
 function dedupeTypeRefs(variants: readonly TypeRef[], types: readonly string[]): TypeRef[] {
+  return dedupeListedTypeRefs(
+    variants,
+    types.map((type) => [type]),
+  );
+}
+
+/** `dedupeTypeRefs` for variants each of which stands for several JSON types already (`stoodFor`, one list per variant): the variants a narrowing leaves (`narrowedToOwnType`). */
+function dedupeListedTypeRefs(variants: readonly TypeRef[], stoodFor: ReadonlyArray<readonly string[]>): TypeRef[] {
   const kept = new Map<string, { variant: TypeRef; types: string[] }>();
   variants.forEach((variant, index) => {
     const key =
@@ -11655,8 +11699,8 @@ function dedupeTypeRefs(variants: readonly TypeRef[], types: readonly string[]):
         ? `${variant.kind}:${variant.name}`
         : stableStringify(variant);
     const first = kept.get(key);
-    if (first) first.types.push(types[index]!);
-    else kept.set(key, { variant, types: [types[index]!] });
+    if (first) first.types.push(...stoodFor[index]!);
+    else kept.set(key, { variant, types: [...stoodFor[index]!] });
   });
   // Each variant kept stands for its own type and for that of every copy
   // typed alike (`listedVariantTypes`).
@@ -11713,16 +11757,31 @@ function ownTypes(schema: SchemaObject, seen: Set<SchemaObject> = new Set()): Re
 }
 
 /**
- * `types` less those `own` does not admit (`admits`: `number` admits an
- * `integer`), in their order; `types` as they are when `own` is `undefined`
- * — the schema names no type — or admits none of them: a schema that
+ * What a schema that names the types `own` leaves of the instances of
+ * `type`: `type` itself when `own` admits it (`admits`: it names the type,
+ * or `number` for an `integer`); `integer` for a `number` when `own` names
+ * `integer` and no `number` — the integers are the numbers both admit, so
+ * `{ type: 'integer', allOf: [{ $ref: Tag }] }` over `Tag: { type:
+ * ['number', 'string'] }` is `integer`, never nothing (Greptile, #741: the
+ * `number` was dropped, and with it every integer); and `undefined` when
+ * no instance is both.
+ */
+function typeLeft(own: ReadonlySet<string>, type: string): string | undefined {
+  if (admits(own, type)) return type;
+  return type === 'number' && own.has('integer') ? 'integer' : undefined;
+}
+
+/**
+ * What `own` leaves of `types` (`typeLeft`), in their order, a type left
+ * twice named once; `types` as they are when `own` is `undefined` — the
+ * schema names no type — or leaves none of them: a schema that
  * contradicts the member it is read as is read as written, as a type list
  * no entry of which its composition admits is (`typeListCopies`).
  */
-function typesAdmitted<T extends string>(types: readonly T[], own: ReadonlySet<string> | undefined): readonly T[] {
+function typesAdmitted(types: readonly string[], own: ReadonlySet<string> | undefined): readonly string[] {
   if (!own) return types;
-  const admitted = types.filter((type) => admits(own, type));
-  return admitted.length > 0 ? admitted : types;
+  const left = [...new Set(types.flatMap((type) => typeLeft(own, type) ?? []))];
+  return left.length > 0 ? left : types;
 }
 
 /**
@@ -11739,8 +11798,10 @@ function typesAdmitted<T extends string>(types: readonly T[], own: ReadonlySet<s
  * was the model alone — `{ type: 'array', allOf: [{ $ref: Tags }] }` over
  * `Tags: { type: ['array', 'string'], items }` is `string[]`, and `{ type:
  * 'string', allOf: [{ $ref: Tag }] }` over `Tag: { type: ['string',
- * 'integer'] }` is `string`. One variant left is the type itself, carrying
- * the union's limits where it can. A schema that names no type, a member
+ * 'integer'] }` is `string`. A `number` variant the schema leaves only
+ * the integers of is that `integer` (`typeLeft`), and a type left twice is
+ * one variant (`dedupeListedTypeRefs`). One variant left is the type
+ * itself, carrying the union's limits where it can. A schema that names no type, a member
  * typed as anything but such a union, and a `type` that admits none of the
  * variants (`typesAdmitted`: the schema contradicts its member, and is
  * read as written) leave `ref` as it is. The per-type copies of a type
@@ -11758,8 +11819,23 @@ function narrowedToOwnType(schema: SchemaObject, ref: TypeRef): TypeRef {
   if (ref.kind !== 'union') return ref;
   const stoodFor = ref.variants.map((variant) => listedVariantTypes.get(variant));
   if (stoodFor.some((types) => types === undefined)) return ref;
-  const kept = ref.variants.filter((_, index) => stoodFor[index]!.some((type) => admits(own, type)));
-  if (kept.length === 0 || kept.length === ref.variants.length) return ref;
+  // What the schema leaves of the types each variant stands for (`typeLeft`).
+  const left = stoodFor.map((types) => [...new Set(types!.flatMap((type) => typeLeft(own, type) ?? []))]);
+  // A `number` the schema leaves only the integers of is that `integer`.
+  const narrowed = ref.variants.map((variant, index): TypeRef => {
+    const integersAlone = left[index]!.length > 0 && !left[index]!.includes('number');
+    return variant.kind === 'primitive' && variant.type === 'number' && integersAlone
+      ? { ...variant, type: 'integer' }
+      : variant;
+  });
+  const keptAt = left.flatMap((types, index) => (types.length > 0 ? [index] : []));
+  const asBuilt =
+    keptAt.length === ref.variants.length && narrowed.every((variant, index) => variant === ref.variants[index]);
+  if (keptAt.length === 0 || asBuilt) return ref;
+  const kept = dedupeListedTypeRefs(
+    keptAt.map((index) => narrowed[index]!),
+    keptAt.map((index) => left[index]!),
+  );
   return kept.length === 1 ? withTypeConstraints(kept[0]!, ref.constraints) : { ...ref, variants: kept };
 }
 

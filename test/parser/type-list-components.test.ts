@@ -1060,6 +1060,148 @@ describe('#730 a component whose type list names `array` or `object` beside anot
       ]);
     });
 
+    describe('where one names `number` and the other `integer`', () => {
+      // Greptile on #741: `{ allOf: [{ $ref: Tag }, { type: ['integer', 'string'] }] }`
+      // over `Tag: { type: ['number', 'string'] }` was `string` alone. The
+      // integers are the numbers both admit, so the `number` is left as `integer`.
+      const numeric = {
+        Tag: { type: ['number', 'string'] },
+        IntTag: { type: ['integer', 'string'] },
+        Limited: { type: ['number', 'string'], minimum: 1, maxLength: 3 },
+        Either: { type: ['number', 'integer', 'string'] },
+        NumOwner: { type: ['object', 'number'], properties: named, minimum: 1 },
+        Nums: { type: ['array', 'number'], items: string },
+      };
+      const limited = (field: Field): string =>
+        `${field.name}: ${show(field.type)}${field.constraints ? ` / ${JSON.stringify(field.constraints)}` : ''}`;
+
+      it('leaves the integers of the list on a field, in either spelling', async () => {
+        const spec = await parse({
+          Note: {
+            type: 'object',
+            properties: {
+              member: { allOf: [ref('Tag'), { type: ['integer', 'string'] }] },
+              beside: { type: ['integer', 'string'], allOf: [ref('Tag')] },
+              integer: { type: 'integer', allOf: [ref('Tag')] },
+              integerMember: { allOf: [ref('Tag'), { type: 'integer' }] },
+              number: { type: 'number', allOf: [ref('Tag')] },
+              // The other way round: `number` admits the list's `integer` whole.
+              numberOverInteger: { type: 'number', allOf: [ref('IntTag')] },
+              listOverInteger: { type: ['number', 'string'], allOf: [ref('IntTag')] },
+              // The list's limits stay with what is left; one type left twice is one variant.
+              limited: { type: 'integer', allOf: [ref('Limited')] },
+              either: { type: 'integer', allOf: [ref('Either')] },
+              inline: { type: 'integer', allOf: [{ type: ['number', 'string'], minimum: 1 }] },
+              inlineList: { type: ['number', 'string'], allOf: [{ type: ['integer', 'string'] }] },
+              owner: { type: ['object', 'integer'], allOf: [ref('NumOwner')] },
+              ownerInteger: { type: 'integer', allOf: [ref('NumOwner')] },
+              nums: { type: ['array', 'integer'], allOf: [ref('Nums')] },
+              numsInteger: { allOf: [ref('Nums'), { type: 'integer' }] },
+            },
+          },
+          ...numeric,
+        });
+        expect(modelOf(spec, 'Note').fields.map(limited)).toMatchInlineSnapshot(`
+          [
+            "member: (integer | string)",
+            "beside: (integer | string)",
+            "integer: integer",
+            "integerMember: integer",
+            "number: number",
+            "numberOverInteger: integer",
+            "listOverInteger: (integer | string)",
+            "limited: integer {"minimum":1,"maxLength":3} / {"minimum":1,"maxLength":3}",
+            "either: integer",
+            "inline: integer {"minimum":1} / {"minimum":1}",
+            "inlineList: (integer | string)",
+            "owner: (NumOwner | integer) {"minimum":1} / {"minimum":1}",
+            "ownerInteger: integer {"minimum":1} / {"minimum":1}",
+            "nums: (string[] | integer)",
+            "numsInteger: integer",
+          ]
+        `);
+        expect(names(spec)).toEqual(['Note', 'NumOwner']);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('reads a component written so as it reads the field', async () => {
+        const components = {
+          Alias: { type: ['object', 'integer'], allOf: [ref('NumOwner')] },
+          AliasOfAlias: { allOf: [ref('Alias')] },
+          IntegerOverOwner: { type: 'integer', allOf: [ref('NumOwner')] },
+          NumsOrInteger: { type: ['array', 'integer'], allOf: [ref('Nums')] },
+          NumsInteger: { type: 'integer', allOf: [ref('Nums')] },
+          Wrapped: { type: ['array', 'integer'], allOf: [{ type: ['array', 'number'], items: string }] },
+          IntegerTag: { type: 'integer', allOf: [ref('Tag')] },
+          MemberTag: { allOf: [ref('Tag'), { type: ['integer', 'string'] }] },
+        };
+        const spec = await parse({
+          Note: {
+            type: 'object',
+            properties: Object.fromEntries(Object.keys(components).map((key) => [key, ref(key)])),
+          },
+          ...numeric,
+          ...components,
+        });
+        expect(modelOf(spec, 'Note').fields.map(limited)).toMatchInlineSnapshot(`
+          [
+            "Alias: (Alias | integer) {"minimum":1} / {"minimum":1}",
+            "AliasOfAlias: (AliasOfAlias | integer) {"minimum":1} / {"minimum":1}",
+            "IntegerOverOwner: IntegerOverOwner",
+            "NumsOrInteger: (string[] | integer)",
+            "NumsInteger: integer",
+            "Wrapped: (string[] | integer)",
+            "IntegerTag: integer",
+            "MemberTag: (integer | string)",
+          ]
+        `);
+        // `IntegerOverOwner` leaves the object out and keeps the model it always built.
+        expect(names(spec)).toEqual(['Alias', 'AliasOfAlias', 'IntegerOverOwner', 'Note', 'NumOwner']);
+        expectNoDanglingReference(spec);
+        expect(warn).not.toHaveBeenCalled();
+      });
+    });
+
+    it('reads the limits of the component an alias names beside a list of its own', async () => {
+      // `Listed` names `object` and `string` itself, so its other types are
+      // its own; the string is still `Owner`'s, with `Owner`'s limits, as
+      // the same schema on a field reads them.
+      const owner = { ...OWNER, minLength: 2 };
+      const listed = { type: ['object', 'string'], allOf: [ref('Owner')] };
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            plain: ref('Plain'),
+            listed: ref('Listed'),
+            inPlace: listed,
+            limited: ref('Limited'),
+            limitedInPlace: { ...listed, maxLength: 9 },
+            ofListed: ref('OfListed'),
+          },
+        },
+        Owner: owner,
+        Plain: { allOf: [ref('Owner')] },
+        Listed: listed,
+        Limited: { ...listed, maxLength: 9 },
+        OfListed: { allOf: [ref('Listed')] },
+      });
+      expect(
+        modelOf(spec, 'Note').fields.map(
+          (field) => `${field.name}: ${show(field.type)} / ${JSON.stringify(field.constraints)}`,
+        ),
+      ).toMatchInlineSnapshot(`
+        [
+          "plain: (Plain | string) {"minLength":2} / {"minLength":2}",
+          "listed: (Listed | string) {"minLength":2} / {"minLength":2}",
+          "inPlace: (Owner | string) {"minLength":2} / {"minLength":2}",
+          "limited: (Limited | string) {"minLength":2,"maxLength":9} / {"minLength":2,"maxLength":9}",
+          "limitedInPlace: (Owner | string) {"minLength":2,"maxLength":9} / {"minLength":2,"maxLength":9}",
+          "ofListed: (OfListed | string) {"minLength":2} / {"minLength":2}",
+        ]
+      `);
+    });
+
     it('leaves a `type` beside a `oneOf` or `anyOf` narrowing none of its variants, as before', async () => {
       // A `type` beside a union narrows no variant, whatever the variant is
       // (`plain`), so a variant that names the component is read as the same
@@ -1432,6 +1574,11 @@ describe('#730 a component whose type list names `array` or `object` beside anot
           { type: 'array', allOf: [ref('Tags')] },
           { Tags: { type: ['array', 'string'], items: ref('Pet') } },
         ),
+        // Narrowed to the array and the integers of the list's `number`: a union still.
+        'an alias that leaves an integer beside the array': await read(
+          { type: ['array', 'integer'], allOf: [ref('Tags')] },
+          { Tags: { type: ['array', 'number'], items: ref('Pet') } },
+        ),
         'an alias of the list, array a member': await read(
           { allOf: [ref('Tags'), { type: 'array' }] },
           { Tags: { type: ['array', 'string'], items: ref('Pet') } },
@@ -1443,6 +1590,7 @@ describe('#730 a component whose type list names `array` or `object` beside anot
           "a list, items in an allOf member": "ListPetsResponse / item ListPetsResponse / undefined",
           "an alias of the list that names array": "Pet[] / item Pet / data",
           "an alias of the list, array a member": "Pet[] / item Pet / data",
+          "an alias that leaves an integer beside the array": "ListPetsResponse / item ListPetsResponse / undefined",
           "an array": "Pet[] / item Pet / data",
         }
       `);
