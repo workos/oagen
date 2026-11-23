@@ -27,6 +27,7 @@ import {
   declaredComponentProperty,
   nonObjectVariantContexts,
   unionAxesOf,
+  unionTypesSchema,
   wrapperDiscriminatorWithin,
   constraintsEntry,
   deprecatedEntry,
@@ -41,6 +42,8 @@ import {
   derivedCopy,
   isInlineObjectSchema,
   isNullSchema,
+  isReadableSchema,
+  isSchemaObject,
   nullableAxisBranch,
   unionFlaggedNullable,
   unwrapNullableField,
@@ -1167,7 +1170,7 @@ export function markContestedTitles(document: unknown): void {
   if (!isRecord(document)) return;
   const components = isRecord(document['components']) ? document['components'] : undefined;
   const schemas = components?.['schemas'];
-  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord));
+  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaObject));
   // What a merged `allOf`'s `$ref` members resolve against: this document's
   // components only, none when it declares none.
   const componentSchemas = isRecord(schemas) ? (schemas as Record<string, SchemaObject>) : {};
@@ -1177,11 +1180,6 @@ export function markContestedTitles(document: unknown): void {
 /** A plain object: the only value that can be a schema or a container of them. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** `isRecord`, typed as a schema for the walks below. */
-function isSchemaRecord(value: unknown): value is SchemaObject {
-  return isRecord(value);
 }
 
 /**
@@ -1222,7 +1220,7 @@ function schemaRootsOf(
   if (document['paths'] && isRecord(responses)) {
     for (const name of Object.keys(responses)) {
       const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
-      if (isSchemaRecord(body)) roots.add(body);
+      if (isSchemaObject(body)) roots.add(body);
     }
   }
   return [...roots];
@@ -1411,7 +1409,9 @@ function markContestedTitlesUnderRoot(
     if (merged) {
       ancestors.add(schema);
       for (const property of merged) {
-        if (mergedRead.has(property)) continue;
+        // A property that is no Schema Object (`metadata: true`) holds no
+        // union to read, and only an object can be remembered as read.
+        if (!isSchemaObject(property) || mergedRead.has(property)) continue;
         mergedRead.add(property);
         walk(property);
       }
@@ -1438,8 +1438,8 @@ function markContestedTitlesUnderRoot(
     for (const [keyword, value] of Object.entries(schema)) {
       if ((keyword === 'properties' || keyword === 'patternProperties') && isRecord(value)) {
         const inherited = keyword === 'patternProperties' ? claims : undefined;
-        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub, inherited);
-      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaRecord(value)) {
+        for (const sub of Object.values(value)) if (isSchemaObject(sub)) walk(sub, inherited);
+      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaObject(value)) {
         walk(value, claims);
       } else if ((keyword === 'allOf' || keyword === 'oneOf' || keyword === 'anyOf') && Array.isArray(value)) {
         // An `allOf`'s members are the ones every reader reads
@@ -1451,7 +1451,7 @@ function markContestedTitlesUnderRoot(
           keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && members.length === 1)
             ? claims
             : undefined;
-        for (const sub of members) if (isSchemaRecord(sub)) walk(sub, inherited);
+        for (const sub of members) if (isSchemaObject(sub)) walk(sub, inherited);
       }
     }
     ancestors.delete(schema);
@@ -2161,7 +2161,9 @@ export function extractInlineModelsFromProperties(
     // (`readInlineAllOf`, the one decision):
     //  - `'merged'` — a `$ref` member plus an inline object member
     //    (`isInlineAllOfMember`), or several inline members one of which
-    //    declares properties inline (`declaresInlineProperties`): the field
+    //    declares properties inline (`declaresInlineProperties`; the one
+    //    member that types the schema and carries a union apart, which is
+    //    `'unwrapped'`, #732): the field
     //    is typed as the model `<Parent><Field>`; merge the referenced
     //    component(s) and the inline members into that model
     //    (`materializeMergedAllOf`), with every inherited property typed
@@ -2175,8 +2177,10 @@ export function extractInlineModelsFromProperties(
     //    several nested augmentations hands each of them its full field
     //    list. The model is built whatever fields the merge yields, since the
     //    reference that names it exists;
-    //  - `'unwrapped'` — a single non-`$ref` member: typed as the field
-    //    itself, so re-enter with it as the field (same siblings);
+    //  - `'unwrapped'` — a single non-`$ref` member, or the one member that
+    //    types the schema beside members that only annotate or limit it, a
+    //    union included: typed as the field itself, so re-enter with it as
+    //    the field (same siblings);
     //  - `'reference'` — `$ref` members only: a plain reference to the first
     //    component, nothing to materialize.
     if (kind === 'allOf' && fieldSchema.allOf) {
@@ -2453,9 +2457,34 @@ function unionWalkGuard(): (schema: SchemaObject, underUnion: boolean) => boolea
  * variant is another question, asked beside this one wherever several
  * members type the `allOf` (`referencesThroughUnion`; #717): it names a
  * component under a union of one variant and under a nullable wrapper as
- * it does under a union of several, which alone is counted here.
+ * it does under a union of several, which alone is counted here. Counted
+ * so, a member says that a merge would read fields from it, not that the
+ * `allOf` is one: the one member that types an `allOf` and carries a union
+ * is that union, whatever its variants declare (`carriesUnion`,
+ * `readInlineAllOf`; #732).
  */
 export function declaresInlineProperties(schema: SchemaObject): boolean {
+  return declaresProperties(schema, true);
+}
+
+/**
+ * Whether a schema writes object properties itself: `properties` of its
+ * own, or of a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
+ * depth — `declaresInlineProperties` with no `$ref` counted, wherever it is
+ * written. What a `required` list written beside the schema could name
+ * without asking a component (`readInlineAllOf`, which asks each `$ref`
+ * variant's component apart, `contributesProperties`): a `$ref` variant to
+ * a primitive, an array, an enum or a union component declares no property
+ * a `required` constrains (#732: the `$ref` counted whatever it named, so
+ * `{ allOf: [{ anyOf: [{ $ref: Nick }, { type: 'integer' }] }], required:
+ * [name] }` over a string `Nick` was a model with no fields).
+ */
+function writesInlineProperties(schema: SchemaObject): boolean {
+  return declaresProperties(schema, false);
+}
+
+/** The one walk `declaresInlineProperties` and `writesInlineProperties` make; `branchReferences` says whether a `$ref` variant of a union of two or more variants counts. */
+function declaresProperties(schema: SchemaObject, branchReferences: boolean): boolean {
   const enter = unionWalkGuard();
   // `onBranch`: under a variant of a union of two or more non-null
   // variants, where a `$ref` declares what its component declares — the
@@ -2474,7 +2503,7 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
     // On a branch a `$ref` declares what its component declares: nothing,
     // for one to a schema that says nothing of what an instance is, which
     // brings no object to a merge (`referenceReadInPlace`; #731).
-    if (s.$ref) return onBranch && referenceReadInPlace(s) === undefined;
+    if (s.$ref) return branchReferences && onBranch && referenceReadInPlace(s) === undefined;
     if (s.properties) return true;
     if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
     return unionAxesOf(s).some((axis) => {
@@ -2576,6 +2605,51 @@ export function referencesThroughUnion(member: SchemaObject): boolean {
 }
 
 /**
+ * Whether an `allOf` member carries a union of its own, as the type
+ * builder types one: a `oneOf` or an `anyOf` that types the schema it is
+ * written on (`unionTypesSchema`; one of bare limits types nothing) — of
+ * several variants or of one, whatever the variants are — written by the
+ * member itself, by a member of an `allOf` of its own, or by the one
+ * variant of a nullable wrapper it writes, at any depth. A nullable
+ * wrapper is no union (`nullableAxisBranch`, per keyword): it is the
+ * variant it wraps, and carries what that variant carries. None for a
+ * `$ref`: nothing beside one is read.
+ *
+ * A merge flattens such a member (`mergeAllOfMembers`): each variant's
+ * properties become optional fields of one model, and a variant that is
+ * no object — a primitive, an array, a `$ref` to a component that is one —
+ * contributes nothing. That is the reading where the `allOf` conjoins the
+ * member with another that types the schema. Where it is the one member
+ * that does (`allOfTypingMember`), the others only annotating or limiting
+ * it, there is nothing to conjoin it with, and the `allOf` is the member:
+ * the union the same member alone is read as (`readInlineAllOf`,
+ * `'unwrapped'`; workos/oagen#732: `allOf: [{ anyOf: [{ $ref: Owner }, {
+ * type: 'string' }] }, { description }]` was the merged model `{ name? }`,
+ * the `string` variant dropped, and with `anyOf: [{ $ref: Nick }, { type:
+ * 'integer' }]` over a string `Nick` a model with no fields, where the
+ * lone member, and the same text written beside the `allOf`, gave `Owner |
+ * string` and `string | integer`). A schema met again on the walk carries
+ * nothing more, and neither does a value that is no Schema Object
+ * (`isSchemaObject`), which has no keyword to ask. Asked of a member the
+ * readers can read as written (`isReadableSchema`): one they cannot is
+ * left to the reading it had (`readInlineAllOf`).
+ */
+export function carriesUnion(member: SchemaObject): boolean {
+  const seen = new Set<SchemaObject>();
+  const carries = (s: SchemaObject): boolean => {
+    if (!isSchemaObject(s) || seen.has(s)) return false;
+    seen.add(s);
+    if (s.$ref !== undefined) return false;
+    const union = unionAxesOf(s).some((variants) => {
+      const branch = nullableAxisBranch(s, variants);
+      return branch ? carries(branch) : unionTypesSchema(variants);
+    });
+    return union || (s.allOf ?? []).some(carries);
+  };
+  return carries(member);
+}
+
+/**
  * Whether an `allOf` member is an inline object member — one that, beside a
  * `$ref` member, makes the `allOf` an augmentation model rather than a plain
  * reference (`schemaToTypeRef`): not a `$ref`, and either `type: 'object'`
@@ -2597,7 +2671,10 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *
  *   - `'merged'`: a `$ref` member beside an inline object member
  *     (`isInlineAllOfMember`), or, without a `$ref`, several members one of
- *     which declares properties inline (`declaresInlineProperties`). The
+ *     which declares properties inline (`declaresInlineProperties`) —
+ *     beside another member that types the schema, or as an inline object
+ *     that carries no union; the one member that types the schema and
+ *     carries a union is `'unwrapped'`, below. The
  *     schema is the merged model `mergeAllOfMembers` reads, built with
  *     whatever fields the merge yields: an empty `properties: {}` is an
  *     inline object with no fields, as it is as a plain field or a union
@@ -2607,7 +2684,8 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     adds to it, typed and extracted as the schema itself
  *     (`unwrappedAllOfMember`, which carries the wrapper's limits, flag and
  *     link onto it). A `required` list the wrapper writes beside a lone
- *     member that declares properties (`declaresInlineProperties`) adds to
+ *     member that declares properties (`writesInlineProperties`: its own,
+ *     a nested member's or a variant's) adds to
  *     it: the schema is then the merged model, which reads both lists
  *     (workos/oagen#359 review: the unwrap carried the member's `required`
  *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
@@ -2626,7 +2704,30 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     was `unknown`, the description lost with it), and `allOf: [{ type:
  *     'array', items: { $ref: Owner } }, { items: { description } }]` is
  *     an `Owner[]` whose items the second member documents
- *     (`annotatedTypingMember`; the #555 review).
+ *     (`annotatedTypingMember`; the #555 review). A member that carries a
+ *     union of its own (`carriesUnion`: a `oneOf` or an `anyOf` of several
+ *     variants or of one) is read so whatever its variants are — `$ref`s
+ *     to components of any kind, inline objects, primitives — since a
+ *     merge would flatten them into one model with nothing beside the
+ *     member to conjoin it with: `allOf: [{ anyOf: [{ $ref: Owner }, {
+ *     type: 'string' }] }, { description }]` is `Owner | string`, described
+ *     by the second member, as `{ allOf: [{ anyOf: [...] }], description }`
+ *     is (workos/oagen#732: any member that declared properties inline, a
+ *     `$ref` variant of a union of two or more variants counted among
+ *     them, made the `allOf` `'merged'` before the one typing member was
+ *     asked for, so this was the model `{ name? }`, the `string` variant
+ *     dropped, and `anyOf: [{ $ref: Nick }, { type: 'integer' }]` over a
+ *     string `Nick` a model with no fields). A `required` list written
+ *     beside such a member — `wrapper`'s, or another member's — adds to
+ *     the objects it names, as beside a lone member, and the schema is
+ *     then the merged model; the list the member writes itself is its
+ *     own. An inline object that carries no union stays `'merged'` beside
+ *     members that only annotate or limit it, and so does a nullable
+ *     wrapper around one, which is no union — and a union member the type
+ *     builder cannot read as written (`isReadableSchema`: a keyword
+ *     written as another kind of value at any depth, `enum: 'cat'` under a
+ *     variant), which keeps the reading it had, so a document that parsed
+ *     still parses.
  *     Two members that each declare a type, neither of them properties —
  *     two primitives, say — are read as neither, and `allOfTypesSchema`
  *     leaves such a schema to its own keywords.
@@ -2694,7 +2795,13 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * Alone, or beside members that only annotate or limit it, such a member
  * is still the member the `allOf` is read as (`'unwrapped'`): the union of
  * one variant, or the nullable reference, the type builder types it as
- * (#445, #555).
+ * (#445, #555) — and the union of two or more variants, as any member
+ * that carries a union is (#732). A `required` list adds to it only when
+ * a component it names declares properties the merge would read: beside
+ * `{ anyOf: [{ $ref: Nick }, { type: 'integer' }] }` over a string `Nick`
+ * it constrains nothing, alone or beside such members (#732: the `$ref`
+ * variant counted whatever it named, and the schema was a model with no
+ * fields).
  *
  * A `$ref` member to a schema that says nothing of what an instance is
  * (`saysWhatInstanceIs`) — `Described: { description: 'Any owner.' }`,
@@ -2741,10 +2848,17 @@ export function readInlineAllOf(
   members = spliced.members;
   const wrapperRequires = (wrapper?.required?.length ?? 0) > 0 || spliced.required.length > 0;
   const conjoins = (member: SchemaObject): boolean => conjoinsObjectMember(member, componentSchemas);
-  // A `required` list adds to such a member as it adds to a `$ref`: when
-  // what the member composes, or the component its union names, declares
-  // properties the merge would read (`contributesProperties`).
+  // A `required` list adds to a member that is no `$ref` as it adds to one:
+  // when the member writes properties itself (`writesInlineProperties`), or
+  // what it composes, or a component its union names, declares properties
+  // the merge would read (`contributesProperties`). A `$ref` variant to a
+  // component that declares none — a primitive, an array, an enum, a union
+  // — gives the list nothing to constrain, whatever union it sits in
+  // (#732) — in a member the readers can read as written
+  // (`isReadableSchema`): one they cannot is left to the reading it had,
+  // where such a variant counted (`declaresInlineProperties`).
   const requiredAddsTo = (member: SchemaObject): boolean =>
+    (isReadableSchema(member) ? writesInlineProperties(member) : declaresInlineProperties(member)) ||
     composesObjectMember(member, componentSchemas) ||
     unionReferencesOf(member).some((reference) => contributesProperties(reference, componentSchemas));
   const requires = wrapperRequires || members.some((s) => (s.required?.length ?? 0) > 0);
@@ -2756,21 +2870,37 @@ export function readInlineAllOf(
     if (members.some(isInlineAllOfMember) || refs.length > 1 || members.some(conjoins)) return 'merged';
     return requires && contributesProperties(refs[0]!, componentSchemas) ? 'merged' : 'reference';
   }
-  if (members.length === 1) {
-    const only = members[0]!;
-    const addsRequired = wrapperRequires && (declaresInlineProperties(only) || requiredAddsTo(only));
-    return addsRequired ? 'merged' : 'unwrapped';
-  }
-  if (members.some(declaresInlineProperties)) return 'merged';
+  if (members.length === 1) return wrapperRequires && requiredAddsTo(members[0]!) ? 'merged' : 'unwrapped';
   // One member types the schema and the others only annotate or limit it
-  // (#555): read as that member, as a lone member is — a union of one
-  // `$ref`, or a nullable wrapper around one, included, which stays the
-  // union of one variant or the nullable reference the type builder types
-  // it as. Several typing members are a merge when one of them is an
-  // object the `allOf` conjoins (`conjoins`; #675, #717), and otherwise, or
-  // with none, no reading at all.
+  // (#555): read as that member, as a lone member is, the others part of
+  // the wrapper.
   const typing = allOfTypingMember(members);
-  if (typing !== undefined) return requires && requiredAddsTo(typing) ? 'merged' : 'unwrapped';
+  if (typing !== undefined) {
+    // A member that carries a union (`carriesUnion`) is that union, of
+    // several variants or of one, whatever its variants are: a merge would
+    // flatten them into one model, with nothing beside the member to
+    // conjoin it with (#732). A `required` list written beside it — the
+    // wrapper's, or another member's — adds to it as it adds to a lone
+    // member; the list the member writes itself is its own, read with it.
+    // A member the type builder cannot read as written (`isReadableSchema`:
+    // a keyword written as another kind of value, at any depth) is not
+    // read so: it keeps the reading it had, below, so a document that
+    // parsed still does. That is asked first, since `carriesUnion` asks
+    // the readers' own helpers, which such a keyword fails.
+    if (isReadableSchema(typing) && carriesUnion(typing)) {
+      const besideRequires = wrapperRequires || members.some((s) => s !== typing && (s.required?.length ?? 0) > 0);
+      return besideRequires && requiredAddsTo(typing) ? 'merged' : 'unwrapped';
+    }
+    // A member that carries no union is the merged model when it declares
+    // properties inline, and else the member, unless a `required` list —
+    // any member's — adds to it.
+    if (declaresInlineProperties(typing)) return 'merged';
+    return requires && requiredAddsTo(typing) ? 'merged' : 'unwrapped';
+  }
+  // Several typing members are a merge when one of them declares
+  // properties inline or is an object the `allOf` conjoins (`conjoins`;
+  // #675, #717), and otherwise, or with none, no reading at all.
+  if (members.some(declaresInlineProperties)) return 'merged';
   return members.some(conjoins) ? 'merged' : 'reference';
 }
 
@@ -3187,13 +3317,34 @@ export function resetCombinedDeclarations(): void {
  * (`sourceDeclaration`) — (workos/oagen#551 memoized the title walk alone;
  * workos/oagen#566: the extractor still got a new object from every merge,
  * and re-entered it without end).
+ *
+ * A declaration the memo cannot hold (`keysMemo`) — a JSON Schema boolean,
+ * `meta: true` beside another member's `meta: { type: 'string' }` — writes
+ * no keyword and adds nothing: the combination is the other declaration
+ * itself, as it is with `{}` in its place, and two of them are the first
+ * (workos/oagen#728: each was handed to the memo, so a property a boolean
+ * declares beside another declaration of it failed the parse with `Invalid
+ * value used as weak map key`).
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  if (!keysMemo(next)) return held;
+  if (!keysMemo(held)) return next;
   let byNext = combinedDeclarations.get(held);
   if (!byNext) combinedDeclarations.set(held, (byNext = new WeakMap()));
   let combined = byNext.get(next);
   if (!combined) byNext.set(next, (combined = combineAfresh(held, next)));
   return combined;
+}
+
+/**
+ * Whether a declaration can key `combinedDeclarations`: any object. A JSON
+ * Schema boolean cannot, nor can a number or a string, and each adds
+ * nothing to the declaration it meets (`combineDeclarations`). A list
+ * written where a schema goes is no Schema Object either (`isSchemaObject`)
+ * but is an object, so it is remembered and combined as it always was.
+ */
+function keysMemo(declaration: unknown): boolean {
+  return typeof declaration === 'object' && declaration !== null;
 }
 
 /** What `combineDeclarations` returns, built anew on every call. */

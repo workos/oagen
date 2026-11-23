@@ -1015,6 +1015,42 @@ const sites: Site[] = [
     reading: 'unread',
     build: (s) => callback({ requestBody: { content: [{ schema: s }] } }),
   },
+  // A response's `headers` that is no map declares no header, to the reader as to the walk (#729: the reader
+  // typed a header `0` from each of these, which the walk left out), and an entry that is no object is no
+  // Header Object to either.
+  {
+    label: 'a `200` response `headers` written as an array, which declares no header',
+    reading: 'unread',
+    build: (s) => get({ responses: { '200': { ...body(str), headers: [{ schema: s }] } } }),
+  },
+  {
+    label: 'a `404` response `headers` written as an array, which declares no header',
+    reading: 'unread',
+    build: (s) => responses({ '404': { ...ok, headers: [{ schema: s }] } }),
+  },
+  {
+    label: 'a `default` response `headers` written as an array, which declares no header',
+    reading: 'unread',
+    build: (s) => responses({ default: { ...ok, headers: [{ schema: s }] } }),
+  },
+  {
+    label: 'a `4XX` response `headers` written as an array, which declares no header',
+    reading: 'unread',
+    build: (s) => responses({ '4XX': { ...ok, headers: [{ schema: s }] } }),
+  },
+  {
+    label: 'the `headers` of a `components/responses` entry written as an array, the entry returned for a `200`',
+    reading: 'unread',
+    build: (s) =>
+      withComponents(get({ responses: { '200': { $ref: '#/components/responses/Note' } } }), {
+        responses: { Note: { ...ok, headers: [{ schema: s }] } },
+      }),
+  },
+  {
+    label: 'a response header written as an array of Header Objects, which is no Header Object',
+    reading: 'unread',
+    build: (s) => okWith({ 'X-Note': [{ schema: s }] }),
+  },
 
   // --- the other methods, and keys that are none -------------------------------------
   ...['put', 'post', 'patch', 'delete', 'head', 'options', 'trace'].map((method): Site => ({
