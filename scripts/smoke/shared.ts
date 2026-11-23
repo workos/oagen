@@ -341,14 +341,34 @@ export function generateFixtureValue(typeRef: TypeRef, fieldName: string, spec: 
   }
 }
 
+/**
+ * The fixture of every string `format` the smoke payloads know, and the one
+ * place that lists them: a string with any other `format`, or with none, is
+ * `test_<field name>`. The formats are the ones the snippet example builder
+ * knows (`STRING_FORMAT_SAMPLES` in `src/snippets/example-builder.ts`), with
+ * the values a smoke run sends: the date and time formats of the OpenAPI
+ * format registry all write one instant, midnight UTC on 2024-01-01, each as
+ * its own format spells it (a `duration` names no instant and is one day).
+ */
+const STRING_FORMAT_FIXTURES: ReadonlyMap<string, string> = new Map([
+  ['uuid', '550e8400-e29b-41d4-a716-446655440000'],
+  ['date', '2024-01-01'],
+  ['date-time', '2024-01-01T00:00:00Z'],
+  ['date-time-local', '2024-01-01T00:00:00'],
+  ['time', '00:00:00Z'],
+  ['time-local', '00:00:00'],
+  ['http-date', 'Mon, 01 Jan 2024 00:00:00 GMT'],
+  ['unixtime', '1704067200'],
+  ['duration', 'P1D'],
+  ['email', 'test@example.com'],
+  ['uri', 'https://example.com'],
+  ['url', 'https://example.com'],
+]);
+
 function generatePrimitiveFixture(type: string, format: string | undefined, fieldName: string): unknown {
   if (type === 'string') {
-    if (format === 'uuid') return '550e8400-e29b-41d4-a716-446655440000';
-    if (format === 'date') return '2024-01-01';
-    if (format === 'date-time') return '2024-01-01T00:00:00Z';
-    if (format === 'email') return 'test@example.com';
-    if (format === 'uri' || format === 'url') return 'https://example.com';
-    return `test_${toSnakeCase(fieldName)}`;
+    const fixture = format === undefined ? undefined : STRING_FORMAT_FIXTURES.get(format);
+    return fixture ?? `test_${toSnakeCase(fieldName)}`;
   }
   if (type === 'integer') return 1;
   if (type === 'number') return 1.0;

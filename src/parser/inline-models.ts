@@ -27,6 +27,7 @@ import {
   declaredComponentProperty,
   nonObjectVariantContexts,
   unionAxesOf,
+  unionTypesSchema,
   wrapperDiscriminatorWithin,
   constraintsEntry,
   deprecatedEntry,
@@ -41,6 +42,8 @@ import {
   derivedCopy,
   isInlineObjectSchema,
   isNullSchema,
+  isReadableSchema,
+  isSchemaObject,
   nullableAxisBranch,
   unionFlaggedNullable,
   unwrapNullableField,
@@ -53,6 +56,7 @@ import {
   sourceDeclaration,
   titleMappedVariantNames,
   typedDeclaration,
+  typesItself,
   variantMemberSchemas,
   foldSiblingProperties,
   foldedVariantOrigin,
@@ -1166,7 +1170,7 @@ export function markContestedTitles(document: unknown): void {
   if (!isRecord(document)) return;
   const components = isRecord(document['components']) ? document['components'] : undefined;
   const schemas = components?.['schemas'];
-  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord));
+  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaObject));
   // What a merged `allOf`'s `$ref` members resolve against: this document's
   // components only, none when it declares none.
   const componentSchemas = isRecord(schemas) ? (schemas as Record<string, SchemaObject>) : {};
@@ -1176,11 +1180,6 @@ export function markContestedTitles(document: unknown): void {
 /** A plain object: the only value that can be a schema or a container of them. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** `isRecord`, typed as a schema for the walks below. */
-function isSchemaRecord(value: unknown): value is SchemaObject {
-  return isRecord(value);
 }
 
 /**
@@ -1221,7 +1220,7 @@ function schemaRootsOf(
   if (document['paths'] && isRecord(responses)) {
     for (const name of Object.keys(responses)) {
       const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
-      if (isSchemaRecord(body)) roots.add(body);
+      if (isSchemaObject(body)) roots.add(body);
     }
   }
   return [...roots];
@@ -1410,7 +1409,9 @@ function markContestedTitlesUnderRoot(
     if (merged) {
       ancestors.add(schema);
       for (const property of merged) {
-        if (mergedRead.has(property)) continue;
+        // A property that is no Schema Object (`metadata: true`) holds no
+        // union to read, and only an object can be remembered as read.
+        if (!isSchemaObject(property) || mergedRead.has(property)) continue;
         mergedRead.add(property);
         walk(property);
       }
@@ -1437,8 +1438,8 @@ function markContestedTitlesUnderRoot(
     for (const [keyword, value] of Object.entries(schema)) {
       if ((keyword === 'properties' || keyword === 'patternProperties') && isRecord(value)) {
         const inherited = keyword === 'patternProperties' ? claims : undefined;
-        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub, inherited);
-      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaRecord(value)) {
+        for (const sub of Object.values(value)) if (isSchemaObject(sub)) walk(sub, inherited);
+      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaObject(value)) {
         walk(value, claims);
       } else if ((keyword === 'allOf' || keyword === 'oneOf' || keyword === 'anyOf') && Array.isArray(value)) {
         // An `allOf`'s members are the ones every reader reads
@@ -1450,7 +1451,7 @@ function markContestedTitlesUnderRoot(
           keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && members.length === 1)
             ? claims
             : undefined;
-        for (const sub of members) if (isSchemaRecord(sub)) walk(sub, inherited);
+        for (const sub of members) if (isSchemaObject(sub)) walk(sub, inherited);
       }
     }
     ancestors.delete(schema);
@@ -2160,7 +2161,9 @@ export function extractInlineModelsFromProperties(
     // (`readInlineAllOf`, the one decision):
     //  - `'merged'` — a `$ref` member plus an inline object member
     //    (`isInlineAllOfMember`), or several inline members one of which
-    //    declares properties inline (`declaresInlineProperties`): the field
+    //    declares properties inline (`declaresInlineProperties`; the one
+    //    member that types the schema and carries a union apart, which is
+    //    `'unwrapped'`, #732): the field
     //    is typed as the model `<Parent><Field>`; merge the referenced
     //    component(s) and the inline members into that model
     //    (`materializeMergedAllOf`), with every inherited property typed
@@ -2174,8 +2177,10 @@ export function extractInlineModelsFromProperties(
     //    several nested augmentations hands each of them its full field
     //    list. The model is built whatever fields the merge yields, since the
     //    reference that names it exists;
-    //  - `'unwrapped'` — a single non-`$ref` member: typed as the field
-    //    itself, so re-enter with it as the field (same siblings);
+    //  - `'unwrapped'` — a single non-`$ref` member, or the one member that
+    //    types the schema beside members that only annotate or limit it, a
+    //    union included: typed as the field itself, so re-enter with it as
+    //    the field (same siblings);
     //  - `'reference'` — `$ref` members only: a plain reference to the first
     //    component, nothing to materialize.
     if (kind === 'allOf' && fieldSchema.allOf) {
@@ -2452,9 +2457,34 @@ function unionWalkGuard(): (schema: SchemaObject, underUnion: boolean) => boolea
  * variant is another question, asked beside this one wherever several
  * members type the `allOf` (`referencesThroughUnion`; #717): it names a
  * component under a union of one variant and under a nullable wrapper as
- * it does under a union of several, which alone is counted here.
+ * it does under a union of several, which alone is counted here. Counted
+ * so, a member says that a merge would read fields from it, not that the
+ * `allOf` is one: the one member that types an `allOf` and carries a union
+ * is that union, whatever its variants declare (`carriesUnion`,
+ * `readInlineAllOf`; #732).
  */
 export function declaresInlineProperties(schema: SchemaObject): boolean {
+  return declaresProperties(schema, true);
+}
+
+/**
+ * Whether a schema writes object properties itself: `properties` of its
+ * own, or of a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
+ * depth — `declaresInlineProperties` with no `$ref` counted, wherever it is
+ * written. What a `required` list written beside the schema could name
+ * without asking a component (`readInlineAllOf`, which asks each `$ref`
+ * variant's component apart, `contributesProperties`): a `$ref` variant to
+ * a primitive, an array, an enum or a union component declares no property
+ * a `required` constrains (#732: the `$ref` counted whatever it named, so
+ * `{ allOf: [{ anyOf: [{ $ref: Nick }, { type: 'integer' }] }], required:
+ * [name] }` over a string `Nick` was a model with no fields).
+ */
+function writesInlineProperties(schema: SchemaObject): boolean {
+  return declaresProperties(schema, false);
+}
+
+/** The one walk `declaresInlineProperties` and `writesInlineProperties` make; `branchReferences` says whether a `$ref` variant of a union of two or more variants counts. */
+function declaresProperties(schema: SchemaObject, branchReferences: boolean): boolean {
   const enter = unionWalkGuard();
   // `onBranch`: under a variant of a union of two or more non-null
   // variants, where a `$ref` declares what its component declares — the
@@ -2470,7 +2500,10 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
   // (`unionReferencesOf`; #717).
   const declares = (s: SchemaObject, onBranch: boolean): boolean => {
     if (!enter(s, onBranch)) return false;
-    if (s.$ref) return onBranch;
+    // On a branch a `$ref` declares what its component declares: nothing,
+    // for one to a schema that says nothing of what an instance is, which
+    // brings no object to a merge (`referenceReadInPlace`; #731).
+    if (s.$ref) return branchReferences && onBranch && referenceReadInPlace(s) === undefined;
     if (s.properties) return true;
     if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
     return unionAxesOf(s).some((axis) => {
@@ -2519,6 +2552,21 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
  * allOf: [X], oneOf: [X] }` with one `X = { $ref: Pet }`, which a
  * `transformSpec` hook or a YAML anchor writes — is named by the union, as
  * two copies of it are.
+ *
+ * A `$ref` to a schema that says nothing of what an instance is
+ * (`saysWhatInstanceIs`: `Described: { description: 'Any owner.' }`,
+ * `NotNull: { not: { type: 'null' } }`, an alias of one) names no
+ * component a merge conjoins, and is not among them: the member is
+ * weighed as the `$ref` in its place is, and that `$ref`, as a member, is
+ * the keywords written in its place and no second `$ref`
+ * (`referenceReadInPlace`; workos/oagen#731). So `{ oneOf: [{ $ref:
+ * Described }] }` is weighed as `{ oneOf: [{ description: 'Any owner.' }]
+ * }` is — a member that brings no object to a merge — and `allOf: [{
+ * oneOf: [{ $ref: Described }] }, { $ref: Owner }]` is the reference to
+ * `Owner`, as `allOf: [{ $ref: Described }, { $ref: Owner }]` is (each was
+ * the merge, a copy of `Owner` under a name of its own). Only the weight
+ * changes: the union is typed, limited and asked about `null` as it was,
+ * where a `$ref` among the variants is a type whatever it names (#715).
  */
 export function unionReferencesOf(member: SchemaObject): SchemaObject[] {
   const enter = unionWalkGuard();
@@ -2526,7 +2574,10 @@ export function unionReferencesOf(member: SchemaObject): SchemaObject[] {
   const read = (s: SchemaObject, underUnion: boolean): void => {
     if (!enter(s, underUnion)) return;
     if (s.$ref !== undefined) {
-      if (underUnion) references.push(s);
+      // One to a schema that says nothing of what an instance is names no
+      // component a merge conjoins, under a union as beside one, where it
+      // is the keywords written in its place (`referenceReadInPlace`; #731).
+      if (underUnion && referenceReadInPlace(s) === undefined) references.push(s);
       return;
     }
     for (const sub of s.allOf ?? []) read(sub, underUnion);
@@ -2554,6 +2605,51 @@ export function referencesThroughUnion(member: SchemaObject): boolean {
 }
 
 /**
+ * Whether an `allOf` member carries a union of its own, as the type
+ * builder types one: a `oneOf` or an `anyOf` that types the schema it is
+ * written on (`unionTypesSchema`; one of bare limits types nothing) — of
+ * several variants or of one, whatever the variants are — written by the
+ * member itself, by a member of an `allOf` of its own, or by the one
+ * variant of a nullable wrapper it writes, at any depth. A nullable
+ * wrapper is no union (`nullableAxisBranch`, per keyword): it is the
+ * variant it wraps, and carries what that variant carries. None for a
+ * `$ref`: nothing beside one is read.
+ *
+ * A merge flattens such a member (`mergeAllOfMembers`): each variant's
+ * properties become optional fields of one model, and a variant that is
+ * no object — a primitive, an array, a `$ref` to a component that is one —
+ * contributes nothing. That is the reading where the `allOf` conjoins the
+ * member with another that types the schema. Where it is the one member
+ * that does (`allOfTypingMember`), the others only annotating or limiting
+ * it, there is nothing to conjoin it with, and the `allOf` is the member:
+ * the union the same member alone is read as (`readInlineAllOf`,
+ * `'unwrapped'`; workos/oagen#732: `allOf: [{ anyOf: [{ $ref: Owner }, {
+ * type: 'string' }] }, { description }]` was the merged model `{ name? }`,
+ * the `string` variant dropped, and with `anyOf: [{ $ref: Nick }, { type:
+ * 'integer' }]` over a string `Nick` a model with no fields, where the
+ * lone member, and the same text written beside the `allOf`, gave `Owner |
+ * string` and `string | integer`). A schema met again on the walk carries
+ * nothing more, and neither does a value that is no Schema Object
+ * (`isSchemaObject`), which has no keyword to ask. Asked of a member the
+ * readers can read as written (`isReadableSchema`): one they cannot is
+ * left to the reading it had (`readInlineAllOf`).
+ */
+export function carriesUnion(member: SchemaObject): boolean {
+  const seen = new Set<SchemaObject>();
+  const carries = (s: SchemaObject): boolean => {
+    if (!isSchemaObject(s) || seen.has(s)) return false;
+    seen.add(s);
+    if (s.$ref !== undefined) return false;
+    const union = unionAxesOf(s).some((variants) => {
+      const branch = nullableAxisBranch(s, variants);
+      return branch ? carries(branch) : unionTypesSchema(variants);
+    });
+    return union || (s.allOf ?? []).some(carries);
+  };
+  return carries(member);
+}
+
+/**
  * Whether an `allOf` member is an inline object member — one that, beside a
  * `$ref` member, makes the `allOf` an augmentation model rather than a plain
  * reference (`schemaToTypeRef`): not a `$ref`, and either `type: 'object'`
@@ -2575,7 +2671,10 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *
  *   - `'merged'`: a `$ref` member beside an inline object member
  *     (`isInlineAllOfMember`), or, without a `$ref`, several members one of
- *     which declares properties inline (`declaresInlineProperties`). The
+ *     which declares properties inline (`declaresInlineProperties`) —
+ *     beside another member that types the schema, or as an inline object
+ *     that carries no union; the one member that types the schema and
+ *     carries a union is `'unwrapped'`, below. The
  *     schema is the merged model `mergeAllOfMembers` reads, built with
  *     whatever fields the merge yields: an empty `properties: {}` is an
  *     inline object with no fields, as it is as a plain field or a union
@@ -2585,7 +2684,8 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     adds to it, typed and extracted as the schema itself
  *     (`unwrappedAllOfMember`, which carries the wrapper's limits, flag and
  *     link onto it). A `required` list the wrapper writes beside a lone
- *     member that declares properties (`declaresInlineProperties`) adds to
+ *     member that declares properties (`writesInlineProperties`: its own,
+ *     a nested member's or a variant's) adds to
  *     it: the schema is then the merged model, which reads both lists
  *     (workos/oagen#359 review: the unwrap carried the member's `required`
  *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
@@ -2604,13 +2704,40 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     was `unknown`, the description lost with it), and `allOf: [{ type:
  *     'array', items: { $ref: Owner } }, { items: { description } }]` is
  *     an `Owner[]` whose items the second member documents
- *     (`annotatedTypingMember`; the #555 review).
+ *     (`annotatedTypingMember`; the #555 review). A member that carries a
+ *     union of its own (`carriesUnion`: a `oneOf` or an `anyOf` of several
+ *     variants or of one) is read so whatever its variants are — `$ref`s
+ *     to components of any kind, inline objects, primitives — since a
+ *     merge would flatten them into one model with nothing beside the
+ *     member to conjoin it with: `allOf: [{ anyOf: [{ $ref: Owner }, {
+ *     type: 'string' }] }, { description }]` is `Owner | string`, described
+ *     by the second member, as `{ allOf: [{ anyOf: [...] }], description }`
+ *     is (workos/oagen#732: any member that declared properties inline, a
+ *     `$ref` variant of a union of two or more variants counted among
+ *     them, made the `allOf` `'merged'` before the one typing member was
+ *     asked for, so this was the model `{ name? }`, the `string` variant
+ *     dropped, and `anyOf: [{ $ref: Nick }, { type: 'integer' }]` over a
+ *     string `Nick` a model with no fields). A `required` list written
+ *     beside such a member — `wrapper`'s, or another member's — adds to
+ *     the objects it names, as beside a lone member, and the schema is
+ *     then the merged model; the list the member writes itself is its
+ *     own. An inline object that carries no union stays `'merged'` beside
+ *     members that only annotate or limit it, and so does a nullable
+ *     wrapper around one, which is no union — and a union member the type
+ *     builder cannot read as written (`isReadableSchema`: a keyword
+ *     written as another kind of value at any depth, `enum: 'cat'` under a
+ *     variant), which keeps the reading it had, so a document that parsed
+ *     still parses.
  *     Two members that each declare a type, neither of them properties —
  *     two primitives, say — are read as neither, and `allOfTypesSchema`
  *     leaves such a schema to its own keywords.
  *   - `'reference'`: a single `$ref` member with nothing beside it that adds
  *     to the component — a `description`, limits — is that component, and
- *     nothing is minted. A second `$ref` member, or a `required` list
+ *     nothing is minted. A second `$ref` member — one to a schema that
+ *     says what an instance is: one to a schema that says nothing of it
+ *     only annotates the `allOf` (below; #731), and one to a component
+ *     the first names too, or to one either extends, adds nothing to it
+ *     (below; #733) — or a `required` list
  *     (`wrapper`'s own, or a member's) adds to it: the schema is then the
  *     merged model, which carries every component's properties and every
  *     `required` (workos/oagen#359 review: `allOf: [{ $ref: Pet },
@@ -2670,13 +2797,76 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * Alone, or beside members that only annotate or limit it, such a member
  * is still the member the `allOf` is read as (`'unwrapped'`): the union of
  * one variant, or the nullable reference, the type builder types it as
- * (#445, #555).
+ * (#445, #555) — and the union of two or more variants, as any member
+ * that carries a union is (#732). A `required` list adds to it only when
+ * a component it names declares properties the merge would read: beside
+ * `{ anyOf: [{ $ref: Nick }, { type: 'integer' }] }` over a string `Nick`
+ * it constrains nothing, alone or beside such members (#732: the `$ref`
+ * variant counted whatever it named, and the schema was a model with no
+ * fields).
+ *
+ * A `$ref` member to a schema that says nothing of what an instance is
+ * (`saysWhatInstanceIs`) — `Described: { description: 'Any owner.' }`,
+ * `NotNull: { not: { type: 'null' } }`, limits, flags, a `title`, an
+ * `example`, `{}`, a union of bare limits, a JSON Schema boolean, an alias
+ * of one, a wrapper around nothing else — is no second `$ref`: beside a
+ * member that names a schema that says what one is (`namesTypedSchema`) it
+ * only annotates, limits or vetoes `null` for the `allOf`, and the members
+ * are read with the keywords it names written in its place
+ * (`splicedAllOfMembers`, `referencesReadInPlace`; workos/oagen#731). So
+ * `allOf: [{ $ref: Owner }, { $ref: NotNull }]` is `'reference'` and typed
+ * `Owner`, as `allOf: [{ $ref: Owner }, { not: { type: 'null' } }]` is,
+ * and `allOf: [{ $ref: Owner }, { $ref: Described }]` over a nullable
+ * `Owner` is `nullable<Owner>`, as `allOf: [{ $ref: Owner }, {
+ * description: 'Any owner.' }]` is (each was `'merged'`, any two `$ref`
+ * members being a merge whatever the second named: `PetOwner`, a second
+ * model with `Owner`'s fields, and `oagen diff` between the two spellings
+ * exited 2) — whichever member comes first, however many such `$ref`s
+ * there are, and wherever the `allOf` is written. Two `$ref`s that each
+ * name a schema that says what an instance is are a merge still, with or
+ * without such a `$ref` beside them, and so is a `$ref` beside an inline
+ * object member. Where no member names a schema that says what an
+ * instance is the `$ref`s stay as written and the `allOf` is read as it
+ * was: one `$ref` to such a schema is the reference, typed `unknown` as
+ * its component is (#569), alone or beside inline members that are no
+ * object, and two are the model with no fields two `$ref`s always were
+ * (#715).
+ *
+ * A `$ref` member to a component another `$ref` member's component already
+ * is, is no second `$ref` either (`typingReferences`; workos/oagen#733):
+ * one to the component an earlier `$ref` names, and one to a component
+ * another's extends, reaching it through its own `allOf` chain — it, or a
+ * component it is only another name for (`extendsComponent`: `TagAlias: {
+ * $ref: Tag }` beside `{ $ref: TagOutput }` adds nothing either). Every
+ * instance of the narrower component is an
+ * instance of the wider, so the wider adds nothing to the `allOf`: with
+ * `TagOutput: { allOf: [{ $ref: Tag }, { required: ['label'] }] }`, `allOf:
+ * [{ $ref: Tag }, { $ref: TagOutput }]` is `'reference'` and typed
+ * `TagOutput`, as `allOf: [{ $ref: TagOutput }]` is, in either member
+ * order, and `allOf: [{ $ref: Tag }, { $ref: Tag }]` is `Tag` (each was
+ * `'merged'`, any two `$ref` members being a merge whatever they named:
+ * a model with `TagOutput`'s fields under the name of the place the
+ * `allOf` is written at, one copy per place, and `oagen diff` to the
+ * document that writes `{ $ref: TagOutput }` exited 2). So is the `allOf`
+ * two members' declarations of one property conjoin into
+ * (`combineDeclarations`): `tag: { $ref: Tag }` on a base and `tag: {
+ * $ref: TagOutput }` on the member that narrows it is a `tag` typed
+ * `TagOutput`, where it was `PetOutputTag`. Whatever else the `allOf`
+ * holds is read as beside the one `$ref` that stands: a member that only
+ * annotates or limits it leaves it `'reference'`, and an inline object
+ * member, a `required` list that adds to it or a `$ref` to a component
+ * neither extends make it `'merged'`, every member read by the merge as
+ * before. Its `null` is the one the merge of both admitted
+ * (`allOfVetoesNull`). The `allOf` a component is composed of is not read
+ * so: `wrapper` standing for a component's own schema, every `$ref`
+ * member counts, as it did.
  *
  * `allOfTypesSchema` admits no other shape as an `allOf`. `wrapper` is the
- * schema the `allOf` is written on, for its own `required`; a site reading
- * bare members passes none. `componentSchemas` resolves the `$ref`; a site
- * handed none reads the document's components (`componentSchemaOf`), so
- * every site decides alike.
+ * schema the `allOf` is written on, for its own `required` and for whether
+ * it is a component's own; a site reading bare members passes none.
+ * `componentSchemas` resolves the `$ref`; a site handed none reads the
+ * document's components (`componentSchemaOf`), so every site decides
+ * alike.
  */
 export function readInlineAllOf(
   members: readonly SchemaObject[],
@@ -2686,37 +2876,65 @@ export function readInlineAllOf(
   // The members as every reader reads them, the bare `allOf`s among them
   // spliced open (`splicedAllOfMembers`; #675), with the `required` such a
   // member writes read as `wrapper`'s own, which carries it once spliced.
-  const spliced = splicedAllOfMembers(members);
+  const spliced = splicedAllOfMembers(members, componentSchemas);
   members = spliced.members;
   const wrapperRequires = (wrapper?.required?.length ?? 0) > 0 || spliced.required.length > 0;
   const conjoins = (member: SchemaObject): boolean => conjoinsObjectMember(member, componentSchemas);
-  // A `required` list adds to such a member as it adds to a `$ref`: when
-  // what the member composes, or the component its union names, declares
-  // properties the merge would read (`contributesProperties`).
+  // A `required` list adds to a member that is no `$ref` as it adds to one:
+  // when the member writes properties itself (`writesInlineProperties`), or
+  // what it composes, or a component its union names, declares properties
+  // the merge would read (`contributesProperties`). A `$ref` variant to a
+  // component that declares none — a primitive, an array, an enum, a union
+  // — gives the list nothing to constrain, whatever union it sits in
+  // (#732) — in a member the readers can read as written
+  // (`isReadableSchema`): one they cannot is left to the reading it had,
+  // where such a variant counted (`declaresInlineProperties`).
   const requiredAddsTo = (member: SchemaObject): boolean =>
+    (isReadableSchema(member) ? writesInlineProperties(member) : declaresInlineProperties(member)) ||
     composesObjectMember(member, componentSchemas) ||
     unionReferencesOf(member).some((reference) => contributesProperties(reference, componentSchemas));
   const requires = wrapperRequires || members.some((s) => (s.required?.length ?? 0) > 0);
-  const refs = members.filter((m) => m.$ref !== undefined);
+  // The `$ref` members that type the schema (`typingReferences`): one to a
+  // schema that says nothing of what an instance is, beside one of these,
+  // was read above as the keywords in its place and is none of them (#731),
+  // and neither is one to a component another of them already is — the
+  // component it names too, or one that extends it (#733).
+  const refs = typingReferences(members, componentSchemas, wrapper);
   if (refs.length > 0) {
     if (members.some(isInlineAllOfMember) || refs.length > 1 || members.some(conjoins)) return 'merged';
     return requires && contributesProperties(refs[0]!, componentSchemas) ? 'merged' : 'reference';
   }
-  if (members.length === 1) {
-    const only = members[0]!;
-    const addsRequired = wrapperRequires && (declaresInlineProperties(only) || requiredAddsTo(only));
-    return addsRequired ? 'merged' : 'unwrapped';
-  }
-  if (members.some(declaresInlineProperties)) return 'merged';
+  if (members.length === 1) return wrapperRequires && requiredAddsTo(members[0]!) ? 'merged' : 'unwrapped';
   // One member types the schema and the others only annotate or limit it
-  // (#555): read as that member, as a lone member is — a union of one
-  // `$ref`, or a nullable wrapper around one, included, which stays the
-  // union of one variant or the nullable reference the type builder types
-  // it as. Several typing members are a merge when one of them is an
-  // object the `allOf` conjoins (`conjoins`; #675, #717), and otherwise, or
-  // with none, no reading at all.
+  // (#555): read as that member, as a lone member is, the others part of
+  // the wrapper.
   const typing = allOfTypingMember(members);
-  if (typing !== undefined) return requires && requiredAddsTo(typing) ? 'merged' : 'unwrapped';
+  if (typing !== undefined) {
+    // A member that carries a union (`carriesUnion`) is that union, of
+    // several variants or of one, whatever its variants are: a merge would
+    // flatten them into one model, with nothing beside the member to
+    // conjoin it with (#732). A `required` list written beside it — the
+    // wrapper's, or another member's — adds to it as it adds to a lone
+    // member; the list the member writes itself is its own, read with it.
+    // A member the type builder cannot read as written (`isReadableSchema`:
+    // a keyword written as another kind of value, at any depth) is not
+    // read so: it keeps the reading it had, below, so a document that
+    // parsed still does. That is asked first, since `carriesUnion` asks
+    // the readers' own helpers, which such a keyword fails.
+    if (isReadableSchema(typing) && carriesUnion(typing)) {
+      const besideRequires = wrapperRequires || members.some((s) => s !== typing && (s.required?.length ?? 0) > 0);
+      return besideRequires && requiredAddsTo(typing) ? 'merged' : 'unwrapped';
+    }
+    // A member that carries no union is the merged model when it declares
+    // properties inline, and else the member, unless a `required` list —
+    // any member's — adds to it.
+    if (declaresInlineProperties(typing)) return 'merged';
+    return requires && requiredAddsTo(typing) ? 'merged' : 'unwrapped';
+  }
+  // Several typing members are a merge when one of them declares
+  // properties inline or is an object the `allOf` conjoins (`conjoins`;
+  // #675, #717), and otherwise, or with none, no reading at all.
+  if (members.some(declaresInlineProperties)) return 'merged';
   return members.some(conjoins) ? 'merged' : 'reference';
 }
 
@@ -2798,7 +3016,12 @@ export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObjec
  * description: 'The owner.', allOf: [{ $ref: Owner }] }, { $ref: Tag }]`
  * and `allOf: [{ $ref: Owner }, { allOf: [{ description: 'The owner.' }]
  * }]` are documented "The owner.", as `allOf: [{ description: 'The owner.'
- * }, …]` is. Empty for a schema with no `allOf`.
+ * }, …]` is. And so is the schema a `$ref` member names when it says
+ * nothing of what an instance is, beside a member that names a schema
+ * that says what one is (`referencesReadInPlace`; #731): `allOf: [{ $ref:
+ * Owner }, { $ref: Described }]` over `Described: { description: 'Any
+ * owner.' }` is documented "Any owner.", the component being no model
+ * that could keep its text. Empty for a schema with no `allOf`.
  */
 export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
   return (spliceNestedAllOf(schema).allOf ?? []).filter((member) => !declaresType(member));
@@ -3104,7 +3327,18 @@ export function resetCombinedDeclarations(): void {
  * component, or a `$ref` beside its own wrapper, keep the first (a first
  * of several parts is rebuilt as the conjunction where the conjunction
  * admits `null`, and so is a first that declares a `null` the conjunction
- * does not admit, so the admission is the same in either order); and a
+ * does not admit, so the admission is the same in either order); a `$ref`
+ * to a component another part's component extends stays a part, and the
+ * readers type the conjunction by the `$ref` that stands
+ * (`typingReferences`): `tag: { $ref: Tag }` beside `tag: { $ref:
+ * TagOutput }`, over `TagOutput: { allOf: [{ $ref: Tag }, { required:
+ * ['label'] }] }`, is `{ allOf: [{ $ref: Tag }, { $ref: TagOutput }], type:
+ * 'object' }`, a `tag` typed `TagOutput` in either member order — every
+ * `TagOutput` being a `Tag`, `Tag` adds nothing to it — with the keywords
+ * and the `null` of both declarations, as the conjunction always carried
+ * them (workos/oagen#733: it was read as a merge of two `$ref`s,
+ * `PetOutputTag`, a copy of `TagOutput` for each model that narrowed the
+ * property); and a
  * pair whose members the readers would not all read — one that is no
  * `$ref`, no inline object member (`isInlineAllOfMember`) and no
  * annotating or limiting member (`declaresType`): an `allOf` of `$ref`s
@@ -3128,13 +3362,34 @@ export function resetCombinedDeclarations(): void {
  * (`sourceDeclaration`) — (workos/oagen#551 memoized the title walk alone;
  * workos/oagen#566: the extractor still got a new object from every merge,
  * and re-entered it without end).
+ *
+ * A declaration the memo cannot hold (`keysMemo`) — a JSON Schema boolean,
+ * `meta: true` beside another member's `meta: { type: 'string' }` — writes
+ * no keyword and adds nothing: the combination is the other declaration
+ * itself, as it is with `{}` in its place, and two of them are the first
+ * (workos/oagen#728: each was handed to the memo, so a property a boolean
+ * declares beside another declaration of it failed the parse with `Invalid
+ * value used as weak map key`).
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  if (!keysMemo(next)) return held;
+  if (!keysMemo(held)) return next;
   let byNext = combinedDeclarations.get(held);
   if (!byNext) combinedDeclarations.set(held, (byNext = new WeakMap()));
   let combined = byNext.get(next);
   if (!combined) byNext.set(next, (combined = combineAfresh(held, next)));
   return combined;
+}
+
+/**
+ * Whether a declaration can key `combinedDeclarations`: any object. A JSON
+ * Schema boolean cannot, nor can a number or a string, and each adds
+ * nothing to the declaration it meets (`combineDeclarations`). A list
+ * written where a schema goes is no Schema Object either (`isSchemaObject`)
+ * but is an object, so it is remembered and combined as it always was.
+ */
+function keysMemo(declaration: unknown): boolean {
+  return typeof declaration === 'object' && declaration !== null;
 }
 
 /** What `combineDeclarations` returns, built anew on every call. */
@@ -3541,8 +3796,241 @@ function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[
   // (`declarationKeywords`); a wrapper spliced open inside it keeps its own
   // as a member (`bareAllOfParts`; workos/oagen#653 review, round 5: `{
   // allOf: [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
-  const parts = bareAllOfParts(declaration.allOf ?? [], () => true);
+  // A `$ref` among the parts stays as written here: the conjunction is a
+  // schema every reader reads in turn, a `$ref` to a schema that says
+  // nothing of what an instance is as the keywords in its place
+  // (`splicedAllOfMembers`; #731).
+  const parts = bareAllOfParts(declaration.allOf ?? [], () => true, undefined, false);
   return { members: parts.members, required: [...new Set([...(declaration.required ?? []), ...parts.required])] };
+}
+
+/**
+ * Whether `schema` says what an instance is: by a keyword of its own
+ * (`typesItself`, the test `nullVote` makes — `properties`, a `type`, an
+ * `enum`, a `const`, `items` that say so themselves, an
+ * `additionalProperties` or `patternProperties` map, a `oneOf`/`anyOf`
+ * that types it), or through what it is made of — the schema its `$ref`
+ * names (`componentSchemaOf`: a component, or the schema a pointer into
+ * one lands on), at every hop of a chain of aliases, and the members of
+ * its `allOf`, at any depth. `declaresType` answers for a schema as
+ * written, where any `$ref` and any `allOf` is a type; this answers for
+ * what they hold.
+ *
+ * So `Described: { description: 'Any owner.' }`, `NotNull: { not: { type:
+ * 'null' } }`, `{ minProperties: 1 }`, `{ deprecated: true }`, `{ title }`,
+ * `{ example }`, `{ required: ['name'] }`, `{}`, a union of bare limits
+ * (`{ anyOf: [{ required: ['a'] }, { maxProperties: 1 }] }`), an alias of
+ * one (`{ $ref: Described }`) and a wrapper around nothing else (`{ allOf:
+ * [{ description }] }`, `{ allOf: [{ $ref: Described }, { $ref: NotNull }]
+ * }`, `{ description, allOf: [{ minProperties: 1 }] }`) say nothing of
+ * what an instance is: each only annotates, limits or vetoes `null` for
+ * the schema it is a member of, and has no vote on `null` (`nullVote`;
+ * #715) or only vetoes it (#716). A `$ref` no schema answers says what an
+ * instance is — it is the reference the type builder types it as — and so
+ * does a schema that reaches itself (`Loop: { allOf: [{ $ref: Loop }, {
+ * description }] }`), which the model readers build a model for. A value
+ * that is no Schema Object says nothing: a JSON Schema boolean (`true`
+ * admits every instance, as `{}` does), or anything else a document
+ * writes where a schema goes.
+ *
+ * What a schema says does not turn on the path it is reached by — one
+ * that reaches itself says what an instance is from wherever it is read —
+ * so each schema is read once per document (`instanceVerdicts`), and a
+ * component many members name is answered for all of them.
+ */
+export function saysWhatInstanceIs(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  // The answers are kept for the document's own components, and for this
+  // one reading where the caller resolves against a map of its own.
+  const kept = componentSchemas === undefined || componentSchemas === documentComponentSchemas();
+  const verdicts = kept ? instanceVerdicts : new WeakMap<SchemaObject, boolean>();
+  const path = new Set<SchemaObject>();
+  const says = (s: SchemaObject): boolean => {
+    if (!isSchemaObject(s)) return false;
+    const settled = verdicts.get(s);
+    if (settled !== undefined) return settled;
+    if (path.has(s)) return true;
+    path.add(s);
+    let verdict: boolean;
+    if (s.$ref !== undefined) {
+      const target = componentSchemaOf(s.$ref, componentSchemas);
+      verdict = target === undefined || says(target);
+    } else {
+      const members: readonly SchemaObject[] = Array.isArray(s.allOf) ? s.allOf : [];
+      verdict = typesReadably(s) || members.some(says);
+    }
+    path.delete(s);
+    verdicts.set(s, verdict);
+    return verdict;
+  };
+  return says(schema);
+}
+
+/**
+ * `typesItself`, for a schema nothing asked it of before
+ * (`saysWhatInstanceIs`; #731): the schema a `$ref` member of an `allOf`
+ * names, which the readers followed for its properties alone, or not at
+ * all. Where `typesItself` cannot read the schema — `{ items: null }`, a
+ * `oneOf` that holds no list — the answer is that it says what an
+ * instance is, so its `$ref` stays the `$ref` it was and the document
+ * parses as it did, whatever a later reader then makes of the schema.
+ */
+function typesReadably(schema: SchemaObject): boolean {
+  try {
+    return typesItself(schema);
+  } catch {
+    return true;
+  }
+}
+
+/** Whether each schema read so far says what an instance is (`saysWhatInstanceIs`), by the schema, which the document owns. The answer follows a `$ref` to the document's components, so it is forgotten with the spliced schemas (`resetSplicedSchemas`). */
+let instanceVerdicts = new WeakMap<SchemaObject, boolean>();
+
+/**
+ * Whether one of `members`, the members of an `allOf`, names a schema that
+ * says what an instance is (`saysWhatInstanceIs`): it is a `$ref` to one,
+ * or holds one — as a member of an `allOf` of its own or as a variant of a
+ * union it writes, at any depth (`{ allOf: [{ $ref: Owner }] }`, `{ oneOf:
+ * [{ $ref: Owner }] }`, `{ anyOf: [{ $ref: Owner }, { type: 'string' }]
+ * }`), the places the readers of an `allOf` find the `$ref`s that type it
+ * (`splicedAllOfMembers`, `unionReferencesOf`). Beside such a member a
+ * `$ref` to a schema that says nothing of what an instance is only
+ * annotates the `allOf`, and is read as the keywords written in its place
+ * (`referencesReadInPlace`; #731). Where no member names one — the `$ref`
+ * alone, beside inline members, or beside another `$ref` like it — the
+ * `allOf` is read as it was: the first `$ref` is the reference it is read
+ * as, typed `unknown` as its component is (#569), and two are the model
+ * with no fields they were (#715).
+ */
+function namesTypedSchema(
+  members: readonly SchemaObject[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): boolean {
+  const seen = new Set<SchemaObject>();
+  const names = (s: SchemaObject): boolean => {
+    if (!isSchemaObject(s) || seen.has(s)) return false;
+    seen.add(s);
+    if (s.$ref !== undefined) return saysWhatInstanceIs(s, componentSchemas);
+    const under = [s.allOf, s.oneOf, s.anyOf].flatMap((list): SchemaObject[] => (Array.isArray(list) ? list : []));
+    return under.some(names);
+  };
+  // An `allOf` that holds no list names nothing.
+  return Array.isArray(members) && members.some(names);
+}
+
+/**
+ * What a `$ref` to a schema that says nothing of what an instance is
+ * (`saysWhatInstanceIs`) is read as where it only annotates the `allOf` it
+ * is a member of — beside a member that names a schema that says what one
+ * is (`referencesReadInPlace`): the keywords written in its place. JSON
+ * Schema applies `{ allOf: [{ $ref: Owner }, { $ref: Described }] }` over
+ * `Described: { description: 'Any owner.' }` as it applies `{ allOf: [{
+ * $ref: Owner }, { description: 'Any owner.' }] }`, but the readers decide
+ * an `allOf` by the members written on it, and a `$ref` was a `$ref` to
+ * them whatever it named: two `$ref` members are a merge, so the `allOf`
+ * was a new model with `Owner`'s fields — `PetOwner`, a second class for
+ * the one component — where the inline spelling is the reference to
+ * `Owner`, and `oagen diff` between the two spellings was breaking
+ * (workos/oagen#731). `nullVote` already read such a `$ref` as the
+ * keywords in its place for `null` (#715, #716); this is the same reading
+ * for everything else a member says. It is `undefined` for every other
+ * `$ref`, which is how a reader that weighs a `$ref` written elsewhere
+ * asks whether it names a component at all (`unionReferencesOf`,
+ * `declaresInlineProperties`).
+ *
+ * The parts, in place of the member: what the member writes beside its
+ * `$ref` that the schema reads (`declarationKeywords`: limits,
+ * documentation, flags, `x-*` keys — nothing else is read beside a `$ref`,
+ * #618), as one member that declares no type, when it writes any; then the
+ * schema the `$ref` names, the document's own object — or, when that is
+ * itself a `$ref`, an alias, what it is read as in turn, so `{ $ref: Alias
+ * }` over `Alias: { $ref: Described, description: 'Alias text.' }` is `{
+ * description: 'Alias text.' }` then `{ description: 'Any owner.' }`, the
+ * nearer text first, as a bare `$ref` to `Alias` reads it. A schema that
+ * wraps annotating members in an `allOf` of its own stands in the member's
+ * place as that wrapper, which the splice opens as it opens one written
+ * there (`bareAllOfParts`). A value that is no Schema Object stands in it
+ * as written — a JSON Schema boolean (`Anything: true`), or a number, a
+ * string or a list, which the readers read as one (#728) — as the same
+ * value written as the member does.
+ *
+ * `undefined` for a member that is no `$ref`, and for a `$ref` that stays
+ * the reference it is: one to a schema that says what an instance is, to
+ * a schema that reaches itself, or to none at all — and one to `null`,
+ * which no reader of a member reads.
+ */
+function referenceReadInPlace(
+  member: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): readonly SchemaObject[] | undefined {
+  if (!isSchemaObject(member) || member.$ref === undefined) return undefined;
+  const kept = componentSchemas === undefined || componentSchemas === documentComponentSchemas();
+  const settled = kept ? referencesInPlace.get(member) : undefined;
+  if (settled !== undefined) return settled ?? undefined;
+  const parts = saysWhatInstanceIs(member, componentSchemas) ? undefined : partsInPlace(member, componentSchemas);
+  if (kept) referencesInPlace.set(member, parts ?? null);
+  return parts;
+}
+
+/**
+ * The parts of a `$ref` to a schema that says nothing of what an instance
+ * is (`referenceReadInPlace`), an alias followed to what it names. A value
+ * that is no Schema Object (`isSchemaObject`) stands in the `$ref`'s place
+ * as it is written — a JSON Schema boolean (`Anything: true`), and a
+ * number, a string or a list, which the readers of an `allOf` read as they
+ * read a boolean member (#728) — so the `$ref` to it reads as the same
+ * value written as the member does. `undefined` where the chain ends at
+ * `null`, which no reader of a member reads: that `$ref` stays the `$ref`
+ * it was. Such a chain never returns to a schema it has read: one that
+ * does says what an instance is (`saysWhatInstanceIs`).
+ */
+function partsInPlace(
+  reference: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject[] | undefined {
+  const target: SchemaObject | null | undefined = componentSchemaOf(reference.$ref!, componentSchemas);
+  if (target === undefined || target === null) return undefined;
+  const named = isSchemaObject(target) && target.$ref !== undefined ? partsInPlace(target, componentSchemas) : [target];
+  if (named === undefined) return undefined;
+  const keywords = declarationKeywords(reference);
+  return Object.keys(keywords).length > 0 ? [keywords, ...named] : named;
+}
+
+/** What each `$ref` member read so far is read as in its place (`referenceReadInPlace`): its parts, or `null` for one that stays the reference. Keyed by the member, which the document owns, so every reader meets one object for what a member writes beside its `$ref`; forgotten with the spliced schemas (`resetSplicedSchemas`). */
+let referencesInPlace = new WeakMap<SchemaObject, readonly SchemaObject[] | null>();
+
+/**
+ * `members`, the members of an `allOf`, with each `$ref` to a schema that
+ * says nothing of what an instance is read as the keywords written in its
+ * place (`referenceReadInPlace`; workos/oagen#731): `[{ $ref: Owner }, {
+ * $ref: Described }]` over `Described: { description: 'Any owner.' }` is
+ * `[{ $ref: Owner }, { description: 'Any owner.' }]`, in whatever position
+ * the `$ref` stands and however many there are. `members` itself when it
+ * holds no such `$ref`. The first step of the one reading of an `allOf`'s
+ * members (`splicedAllOfMembers`, `bareAllOfParts`), taken where a member
+ * names a schema that says what an instance is (`namesTypedSchema`), so the
+ * `$ref` members left are the ones that type the schema, and a reader
+ * that asks a member whether it declares a type (`declaresType`), counts
+ * the `$ref`s (`readInlineAllOf`), picks the reference
+ * (`allOfReferenceMember`) or reads the annotating members
+ * (`annotatingAllOfMembers`) asks the schema such a `$ref` names what it
+ * asks a member written inline.
+ *
+ * Each `$ref` is read by itself here, so a schema two of the members name
+ * stands in each one's place, as the same keywords written twice do.
+ */
+function referencesReadInPlace(
+  members: readonly SchemaObject[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): readonly SchemaObject[] {
+  // An `allOf` that holds no list has no member to read in place, and is left to the readers as it was.
+  if (!Array.isArray(members)) return members;
+  let read: SchemaObject[] | undefined;
+  members.forEach((member, index) => {
+    const parts = referenceReadInPlace(member, componentSchemas);
+    if (parts !== undefined) read ??= members.slice(0, index);
+    read?.push(...(parts ?? [member]));
+  });
+  return read ?? members;
 }
 
 /**
@@ -3568,10 +4056,36 @@ function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[
  * members of a bare `allOf`": a conjunction of two declarations reads its
  * parts by it (`conjunctionMembers`), and every reader of an inline
  * `allOf` its members (`splicedAllOfMembers`; workos/oagen#675).
+ *
+ * Where a member of the `allOf` being read names a schema that says what
+ * an instance is (`inPlace`: `namesTypedSchema`, decided once for that
+ * `allOf` and handed down), a `$ref` among the members of a wrapper being
+ * opened to a schema that says nothing of it is the keywords written in
+ * its place (`referenceReadInPlace`; workos/oagen#731), a wrapper among
+ * them opened in turn. `standing` holds the schemas already standing in
+ * place under the member being opened, and each stands there once, where
+ * the document first reaches it, members in order and each wrapper before
+ * the member after it: JSON Schema applies `{ allOf: [X, X] }` as it
+ * applies `{ allOf: [X] }`, so a schema two `$ref`s under one wrapper name
+ * — two of its members, or two wrappers on the way — adds nothing the
+ * second time. So opening a member is as long as the schemas it reaches
+ * are many, however they name each other (`A1: { allOf: [{ $ref: A0 }, {
+ * $ref: A0 }] }`, `A2` the same over `A1`, and so on is read once per
+ * component, not twice per level), and what stands first is what the
+ * inline spelling writes first: with `D: { description: 'D' }`, `B: {
+ * allOf: [{ $ref: D }, { description: 'B' }] }` and `A: { allOf: [{ $ref:
+ * B }, { $ref: D }] }`, a `$ref` to `A` reads `D`'s text, then `B`'s, as
+ * `allOf: [{ allOf: [D, { description: 'B' }] }, D]` written out does
+ * (Greptile, #739 review: the members of a wrapper were all placed before
+ * the first of them was opened, so the `D` under `B` found `D` standing
+ * already and `B`'s text came first).
  */
 function bareAllOfParts(
   members: readonly SchemaObject[],
   opens: (wrapper: SchemaObject, parts: readonly SchemaObject[]) => boolean,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  inPlace: boolean,
+  standing?: Set<SchemaObject>,
 ): { members: SchemaObject[]; required: string[]; spliced: boolean } {
   const out: SchemaObject[] = [];
   const required: string[] = [];
@@ -3579,18 +4093,39 @@ function bareAllOfParts(
   const requires = (names: readonly string[] | undefined): void => {
     for (const name of names ?? []) if (!required.includes(name)) required.push(name);
   };
-  for (const member of members) {
-    const inner = splicesOpen(member) ? bareAllOfParts(member.allOf ?? [], opens) : undefined;
-    if (inner === undefined || !opens(member, inner.members)) {
-      out.push(member);
-      continue;
+  for (const written of members) {
+    // A `$ref` to a schema that says nothing of what an instance is: the
+    // parts written in its place, each read before the member after it.
+    const parts = inPlace ? referenceReadInPlace(written, componentSchemas) : undefined;
+    if (parts !== undefined) spliced = true;
+    for (const member of parts ?? [written]) {
+      // A part that stands under the member being opened already adds
+      // nothing more; one that does not stands from here on.
+      if (parts !== undefined && standing !== undefined) {
+        if (standing.has(member)) continue;
+        standing.add(member);
+      }
+      // What comes to stand under this member: the set of the member
+      // being opened above, or one of this member's own.
+      const under = inPlace ? (standing ?? new Set<SchemaObject>()) : undefined;
+      const placed = under?.size ?? 0;
+      const inner = splicesOpen(member)
+        ? bareAllOfParts(member.allOf ?? [], opens, componentSchemas, inPlace, under)
+        : undefined;
+      if (inner === undefined || !opens(member, inner.members)) {
+        // A wrapper left closed keeps what its own `allOf` reads to
+        // itself: nothing under it stands in the member being opened.
+        if (under && under.size > placed) for (const schema of [...under].slice(placed)) under.delete(schema);
+        out.push(member);
+        continue;
+      }
+      spliced = true;
+      requires(member.required);
+      const keywords = declarationKeywords(member);
+      if (Object.keys(keywords).length > 0) out.push(keywords);
+      out.push(...inner.members);
+      requires(inner.required);
     }
-    spliced = true;
-    requires(member.required);
-    const keywords = declarationKeywords(member);
-    if (Object.keys(keywords).length > 0) out.push(keywords);
-    out.push(...inner.members);
-    requires(inner.required);
   }
   return { members: out, required, spliced };
 }
@@ -3623,9 +4158,7 @@ function splicesOpen(schema: SchemaObject): boolean {
       key === 'allOf' ||
       key === 'required' ||
       key === 'nullable' ||
-      key === 'title' ||
-      key === '$comment' ||
-      key === 'xml' ||
+      UNCONSTRAINING_KEYWORDS.has(key) ||
       (key === 'type' && (value === 'object' || (Array.isArray(value) && value.includes('object')))) ||
       LIFTED_DECLARATION_KEYWORD_SET.has(key) ||
       key.startsWith('x-'),
@@ -3673,8 +4206,16 @@ function splicesOpen(schema: SchemaObject): boolean {
  * it, which is the object its `type` says. Such a wrapper around a `$ref`
  * is still one of the objects the `allOf` merges (`composesObjectMember`).
  *
+ * A `$ref` member to a schema that says nothing of what an instance is
+ * is read as the keywords written in its place, beside a member that
+ * names a schema that says what one is (`referencesReadInPlace`;
+ * workos/oagen#731), so `{ allOf: [{ $ref: Owner }, { $ref: Described }]
+ * }` over `Described: { description: 'Any owner.' }` is `{ allOf: [{ $ref:
+ * Owner }, { description: 'Any owner.' }] }` to every reader, and `oagen
+ * diff` between those two spellings reports nothing either.
+ *
  * Returns `schema` itself when nothing splices — no `allOf`, a `$ref`
- * (nothing beside one is read), no member opened — else a copy that
+ * (nothing beside one is read), no member opened or read in place — else a copy that
  * stands for it (`derivedCopy`), made once per schema, so every reader
  * meets one object for it, the members left closed the document's own.
  * The last step of every fold of an inline schema
@@ -3727,18 +4268,53 @@ export function spliceNestedAllOf(schema: SchemaObject): SchemaObject {
  * }, { allOf: [{ description: 'The owner.' }] }]` is `allOf: [{ allOf: [{
  * $ref: Owner }] }, { description: 'The owner.' }]`. `members` itself
  * when nothing is spliced open.
+ *
+ * Before any of that, a `$ref` member to a schema that says nothing of
+ * what an instance is (`saysWhatInstanceIs`: `Described: { description:
+ * 'Any owner.' }`, `NotNull: { not: { type: 'null' } }`, an alias of one,
+ * a wrapper around nothing else) is read as the keywords written in its
+ * place (`referencesReadInPlace`; workos/oagen#731) wherever a member
+ * names a schema that says what one is (`namesTypedSchema`): `allOf: [{
+ * $ref: Owner }, { $ref: Described }]` is `allOf: [{ $ref: Owner }, {
+ * description: 'Any owner.' }]`, the member the document's own
+ * `Described`, and `allOf: [{ $ref: Owner }, { $ref: Limits }]` over
+ * `Limits: { description: 'The owner.', allOf: [{ minProperties: 1 }] }`
+ * is `allOf: [{ $ref: Owner }, { description: 'The owner.' }, {
+ * minProperties: 1 }]`, the wrapper opened as one written there is. So
+ * the `$ref` members left are the ones that
+ * type the schema, and what such a component writes is the schema's as an
+ * inline member's is: its limits conjoin (`extractConstraints`), its
+ * `required` list adds to the `$ref` beside it, its `not` vetoes `null`
+ * (`allOfVetoesNull`), and its text, link, flags, `default`, examples and
+ * `x-*` keys are the wrapper layer's (`annotatingAllOfMembers`), since it
+ * names no model that could keep them. A `$ref` inside a bare `allOf` is
+ * read the same way, by what the `allOf` being read names as a whole.
+ * `componentSchemas` resolves the `$ref`s; a reader handed none reads the
+ * document's components.
  */
-export function splicedAllOfMembers(members: readonly SchemaObject[]): {
+export function splicedAllOfMembers(
+  members: readonly SchemaObject[],
+  componentSchemas?: Record<string, SchemaObject>,
+): {
   members: readonly SchemaObject[];
   required: readonly string[];
   spliced: boolean;
 } {
-  const asWritten = { members, required: [], spliced: false };
+  // First, where a member names a schema that says what an instance is,
+  // each `$ref` to a schema that says nothing of it is the keywords
+  // written in its place (`referencesReadInPlace`; #731), so every test
+  // below, and every reader after it, asks them what it asks a member
+  // written inline. Where no member names one the `$ref`s stay as
+  // written: the first is the reference the `allOf` is read as, as before.
+  const written = members;
+  const inPlace = namesTypedSchema(written, componentSchemas);
+  if (inPlace) members = referencesReadInPlace(written, componentSchemas);
+  const asWritten = { members, required: [], spliced: members !== written };
   if (!members.some((member) => member.allOf !== undefined)) return asWritten;
   // A lone member that declares a type — a wrapper declares one
   // (`declaresType`) — is the member the `allOf` is read as, as written.
   if (members.filter(declaresType).length < 2) return asWritten;
-  const read = members.map((member) => bareAllOfParts([member], splicesIntoAllOf));
+  const read = members.map((member) => bareAllOfParts([member], splicesIntoAllOf, componentSchemas, inPlace));
   const typing = read.filter((parts) => parts.members.some(declaresType));
   const out: SchemaObject[] = [];
   const required: string[] = [];
@@ -3762,11 +4338,19 @@ export function splicedAllOfMembers(members: readonly SchemaObject[]): {
  * (`readInlineAllOf`: `'reference'`): the first among its members, each
  * bare `allOf` spliced open (`spliceNestedAllOf`), so `{ allOf: [{ allOf:
  * [{ $ref: Owner }] }, { description }] }` names `Owner` as `{ allOf: [{
- * $ref: Owner }, { description }] }` does. `undefined` for a schema whose
- * `allOf` holds none.
+ * $ref: Owner }, { description }] }` does — the first that types the
+ * schema: a `$ref` to a schema that says nothing of what an instance is,
+ * written before one to a schema that says so, is no member of the
+ * spliced `allOf` but the keywords in its place (#731), so `{ allOf: [{
+ * $ref: Described }, { $ref: Owner }] }` names `Owner` too, and a `$ref`
+ * to a component a later `$ref`'s component extends adds nothing beside
+ * it (`typingReferences`; #733), so `{ allOf: [{ $ref: Tag }, { $ref:
+ * TagOutput }] }` over `TagOutput: { allOf: [{ $ref: Tag }, …] }` names
+ * `TagOutput`. A component's own schema names its first `$ref` member, as
+ * it did. `undefined` for a schema whose `allOf` holds none.
  */
 export function allOfReferenceMember(schema: SchemaObject): SchemaObject | undefined {
-  return spliceNestedAllOf(schema).allOf?.find((member) => member.$ref !== undefined);
+  return typingReferences(spliceNestedAllOf(schema).allOf ?? [], undefined, schema)[0];
 }
 
 /** The schema each schema with an `allOf` splices to (`spliceNestedAllOf`): itself when no member is spliced open. Keyed by the schema, which the document owns; forgotten per document (`resetSplicedSchemas`), where the folded schemas are. */
@@ -3776,6 +4360,10 @@ let splicedSchemas = new WeakMap<SchemaObject, SchemaObject>();
 export function resetSplicedSchemas(): void {
   splicedSchemas = new WeakMap();
   unsplicedSchemas = new WeakMap();
+  instanceVerdicts = new WeakMap();
+  referencesInPlace = new WeakMap();
+  componentChains = new WeakMap();
+  typingReferenceLists = new WeakMap();
 }
 
 /** The schema each spliced copy was made from (`spliceNestedAllOf`), its `allOf` as it stood before any member was opened. Forgotten with the copies (`resetSplicedSchemas`). */
@@ -3861,12 +4449,347 @@ function composesObject(schema: SchemaObject): boolean {
  * Whether two declarations are each a `$ref` to the same component — the
  * one object, by identity (`componentSchemaOf`), whatever each `$ref` is
  * spelled — so conjoining them would read that component twice
- * (`conjoinTypedDeclarations`).
+ * (`conjoinTypedDeclarations`). `componentSchemas` resolves the `$ref`s;
+ * without it they are the document's.
  */
-function namesOneComponent(first: SchemaObject, second: SchemaObject): boolean {
+function namesOneComponent(
+  first: SchemaObject,
+  second: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): boolean {
   if (first.$ref === undefined || second.$ref === undefined) return false;
-  const target = componentSchemaOf(first.$ref);
-  return target !== undefined && target === componentSchemaOf(second.$ref);
+  const target = componentSchemaOf(first.$ref, componentSchemas);
+  return target !== undefined && target === componentSchemaOf(second.$ref, componentSchemas);
+}
+
+/**
+ * Whether the component the `$ref` `narrow` names extends the one the
+ * `$ref` `wide` names: another component, which it reaches through its own
+ * chain (`composedOf`) — its `$ref`, for an alias, and the members of its
+ * `allOf`, each followed the same way at any depth — so that every
+ * instance of the first is an instance of the second, and the second adds
+ * nothing to a conjunction that holds the first. With `Tag { label?, color
+ * }` and `TagOutput: { allOf: [{ $ref: Tag }, { required: ['label'] }] }`,
+ * `{ $ref: TagOutput }` extends `{ $ref: Tag }`: JSON Schema applies every
+ * member of an `allOf`, so a `TagOutput` is a `Tag` whatever else
+ * `TagOutput` says, and so is `TagFinal: { allOf: [{ $ref: TagOutput }, …]
+ * }`, an alias `TagAlias: { $ref: TagOutput }`, and a component that names
+ * `Tag` inside a member that is an `allOf` of its own (workos/oagen#733:
+ * no reader asked, so a property a base declares `{ $ref: Tag }` and a
+ * member redeclares `{ $ref: TagOutput }` was the `allOf` of both, and
+ * that `allOf`, like one written by hand, a merge of two `$ref`s — a new
+ * model with `TagOutput`'s fields under the field's own name, one copy
+ * for every model that narrows the property so).
+ *
+ * Only an `allOf` and a `$ref` are followed. A component that names
+ * another under a `oneOf` or an `anyOf` — of several variants, of one, or
+ * a nullable wrapper — or under a `not`, a property, `items` or a map's
+ * values is not every time an instance of it, or is read by the model
+ * readers as something else (the fields of a union of one variant are
+ * branch-only, optional whatever the component requires), and does not
+ * extend it. Neither do two components that each reach the other (`A: {
+ * allOf: [{ $ref: B }, …] }` beside `B: { allOf: [{ $ref: A }, …] }`):
+ * neither is the narrower, and both stand. A `$ref` no schema answers
+ * extends nothing and is extended by nothing, and so is one to a value
+ * that is no Schema Object (`isSchemaObject`).
+ *
+ * The wider component may be reached under another name. A component that
+ * is a `$ref`, or an `allOf` of one `$ref` member, beside nothing but
+ * documentation (`namedComponent`) adds no constraint of its own: `TagAlias:
+ * { $ref: Tag }` accepts exactly what `Tag` accepts, so every `TagOutput`
+ * is a `TagAlias` too, and `{ $ref: TagOutput }` extends `{ $ref: TagAlias
+ * }` as it extends `{ $ref: Tag }` — through a chain of such names
+ * (`TagAliasAlias: { $ref: TagAlias }`), and for the narrower under a name
+ * of its own (`OutputAlias: { $ref: TagOutput }` extends `TagAlias`). The
+ * wider is read through its names to a component the narrower's chain
+ * reaches; a name that says anything of its own — a limit, a `required`
+ * list, a `type`, `nullable`, a second member — is a component like any
+ * other, reached only by a chain that names it. Two names for one
+ * component with neither naming the other (`TagAlias` beside `OtherAlias:
+ * { $ref: Tag }`) are the same instances under two models: neither is the
+ * narrower, neither extends the other, and both stand, as two components
+ * that reach each other do.
+ *
+ * Asked of objects alone, the components a merge reads properties from:
+ * the wider one declares properties, its own or its chain's, as
+ * `contributesProperties` reads them (so the narrower does), and nothing
+ * the narrower is made of says an instance is anything else — an `enum`,
+ * or a `type` naming another type than `object` and `null`. Two `$ref`s
+ * to components that declare no properties (arrays, enums, primitives,
+ * maps, schemas of nothing but annotations), and one to a component that
+ * writes an `enum` or `type: 'string'` beside an `allOf` that names an
+ * object, are read as they were.
+ *
+ * Nothing is asked of `null` here. JSON Schema never admits a `null`
+ * through an `allOf` that a member rejects, but the parser reads a
+ * nullable `type` written beside an `allOf` as the nullable wrapper around
+ * what the `allOf` describes, so `Loose: { type: ['object', 'null'],
+ * allOf: [{ $ref: Tag }] }` admits `null` to it where `Tag` admits none.
+ * Whether a conjunction that holds both admits `null` is therefore still
+ * settled by both: every member of an `allOf` votes, the `$ref` that adds
+ * nothing among them (`allOfVetoesNull`).
+ *
+ * The one test of "this component already is that one", asked of the
+ * `$ref` members of an inline `allOf` (`typingReferences`, for
+ * `readInlineAllOf` and `allOfReferenceMember`, and through them every
+ * reader of one) — one written by hand, and the one two declarations of a
+ * property conjoin into, whose members are the parts of both
+ * (`conjoinTypedDeclarations`). `componentSchemas` resolves the `$ref`s;
+ * without it they are the document's (`componentSchemaOf`).
+ */
+export function extendsComponent(
+  narrow: SchemaObject,
+  wide: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): boolean {
+  if (!isSchemaObject(narrow) || !isSchemaObject(wide)) return false;
+  if (narrow.$ref === undefined || wide.$ref === undefined) return false;
+  const from: unknown = componentSchemaOf(narrow.$ref, componentSchemas);
+  const to: unknown = componentSchemaOf(wide.$ref, componentSchemas);
+  if (!isSchemaObject(from) || !isSchemaObject(to) || from === to) return false;
+  const reached = composedOf(to, componentSchemas);
+  if (!reached.declaresProperties || reached.schemas.has(from)) return false;
+  const made = composedOf(from, componentSchemas);
+  if (made.namesOtherType) return false;
+  if (made.schemas.has(to)) return true;
+  // The wider is another name for a component the narrower reaches, and the
+  // narrower no other name for one the wider reaches: two names for one
+  // component are told apart by neither.
+  const names = (chain: ComponentChain, of: ComponentChain): boolean =>
+    chain.names.some((named) => of.schemas.has(named));
+  return names(reached, made) && !names(made, reached);
+}
+
+/**
+ * What a component is made of (`composedOf`): every schema its chain
+ * holds, the component among them; whether any of them declares
+ * properties; and whether any says the instance is something other than
+ * an object — an `enum`, or a `type` naming anything but `object` and
+ * `null`.
+ */
+interface ComponentChain {
+  schemas: ReadonlySet<SchemaObject>;
+  declaresProperties: boolean;
+  namesOtherType: boolean;
+  /** The components the component is another name for (`namedComponent`), nearest first: what an alias names, and what that names in turn. */
+  names: readonly SchemaObject[];
+}
+
+/**
+ * The schemas `component` is made of through its own chain, itself among
+ * them: the schema its `$ref` names, for an alias (nothing written beside
+ * a `$ref` is read; #618), else the members of its `allOf`, and what each
+ * of those is made of in turn — a `$ref` member's component, the members
+ * of an inline member's own `allOf`. Every instance of the component is an
+ * instance of each, as JSON Schema applies them all (`extendsComponent`).
+ * With them, whether any declares properties, the reading
+ * `contributesProperties` makes of the same chain, and whether any says
+ * an instance is something other than an object (`namesObjectAlone`).
+ *
+ * Each schema is read once per walk, which ends a component that names
+ * itself, through a hop or outright, and reads a component many members
+ * name — a diamond, or `A1: { allOf: [{ $ref: A0 }, { $ref: A0 }] }` with
+ * `A2` the same over `A1`, and so on — once however many paths lead to it.
+ * The walk keeps its own list of what is left to read, so a chain is as
+ * deep as the document makes it. A value that is no Schema Object
+ * (`isSchemaObject`) — a JSON Schema boolean among the members, an `allOf`
+ * that holds no list, a `$ref` no schema answers — is made of nothing.
+ * The answer is kept per component for the document's own components
+ * (`componentChains`), and read anew where the caller resolves against a
+ * map of its own.
+ */
+function composedOf(
+  component: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): ComponentChain {
+  const kept = componentSchemas === undefined || componentSchemas === documentComponentSchemas();
+  const settled = kept ? componentChains.get(component) : undefined;
+  if (settled !== undefined) return settled;
+  const schemas = new Set<SchemaObject>();
+  let declaresProperties = false;
+  let namesOtherType = false;
+  const unread: unknown[] = [component];
+  while (unread.length > 0) {
+    const schema = unread.pop();
+    if (!isSchemaObject(schema) || schemas.has(schema)) continue;
+    schemas.add(schema);
+    if (schema.$ref !== undefined) {
+      unread.push(componentSchemaOf(schema.$ref, componentSchemas));
+      continue;
+    }
+    if (isSchemaObject(schema.properties) && Object.keys(schema.properties).length > 0) declaresProperties = true;
+    if (schema.enum !== undefined || !namesObjectAlone(schema.type)) namesOtherType = true;
+    if (Array.isArray(schema.allOf)) for (const member of schema.allOf) unread.push(member);
+  }
+  // What the component is another name for, each once: a name that comes
+  // back to one already read names nothing more.
+  const names = new Set<SchemaObject>();
+  let named = namedComponent(component, componentSchemas);
+  while (named !== undefined && named !== component && !names.has(named)) {
+    names.add(named);
+    named = namedComponent(named, componentSchemas);
+  }
+  const chain: ComponentChain = { schemas, declaresProperties, namesOtherType, names: [...names] };
+  if (kept) componentChains.set(component, chain);
+  return chain;
+}
+
+/**
+ * The component `schema` is only another name for, or `undefined`: the one
+ * its `$ref` names, when `schema` is a `$ref` or an `allOf` of exactly one
+ * `$ref` member, and nothing written beside the `$ref` or beside the
+ * `allOf` does more than document it (`documentsSchema`). Such a schema
+ * adds no constraint of its own, so it accepts exactly the instances the
+ * component it names accepts: `TagAlias: { $ref: Tag }`, `{ description:
+ * 'A tag.', $ref: Tag }`, `{ allOf: [{ $ref: Tag }] }` and `{ title: 'Tag',
+ * allOf: [{ $ref: Tag }], deprecated: true }` are each another name for
+ * `Tag`. Anything else beside the `$ref` makes the schema say something
+ * of its own, read by the parser or not, and it is no mere name: a limit
+ * (`{ $ref: Tag, minProperties: 1 }`), a `required` list, a `type`,
+ * `nullable`, `properties`, a `not`, an `enum` or a `const`, a union, or a
+ * second member of the `allOf` (`{ allOf: [{ $ref: Tag }, { description
+ * }] }`). The document's version is not asked: what is written beside a
+ * `$ref` is weighed alike in OAS 3.0 and 3.1, as the readers read a limit
+ * written there in both. `undefined` too where the `$ref` names no Schema
+ * Object.
+ */
+function namedComponent(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  const documented = (written: SchemaObject, typing: string): boolean =>
+    Object.entries(written).every(([key, value]) => key === typing || value === undefined || documentsSchema(key));
+  let reference: unknown = schema;
+  if (schema.$ref === undefined) {
+    const members: unknown = schema.allOf;
+    if (!Array.isArray(members) || members.length !== 1 || !documented(schema, 'allOf')) return undefined;
+    [reference] = members;
+  }
+  if (!isSchemaObject(reference) || reference.$ref === undefined || !documented(reference, '$ref')) return undefined;
+  const named: unknown = componentSchemaOf(reference.$ref, componentSchemas);
+  return isSchemaObject(named) ? named : undefined;
+}
+
+/** Whether a `type` names no type but `object`, `null` beside it or not, or is not written: what an object's schema, and every member of its `allOf`, may say of type (`composedOf`). */
+function namesObjectAlone(type: unknown): boolean {
+  if (type === undefined) return true;
+  return (Array.isArray(type) ? type : [type]).every((name) => name === 'object' || name === 'null');
+}
+
+/** What each component read so far is made of (`composedOf`), by the component, which the document owns. The answer follows a `$ref` to the document's components, so it is forgotten with the spliced schemas (`resetSplicedSchemas`). */
+let componentChains = new WeakMap<SchemaObject, ComponentChain>();
+
+/**
+ * The `$ref` members of an `allOf` that type it, in document order: every
+ * `$ref` among `members` — the members as every reader reads them
+ * (`splicedAllOfMembers`), so one to a schema that says nothing of what an
+ * instance is, beside a member that names one that does, is already the
+ * keywords in its place and none of these (#731) — less each one that adds
+ * nothing beside another (workos/oagen#733): a `$ref` to a component an
+ * earlier `$ref` names too (`namesOneObject`), and a `$ref` to a component
+ * another `$ref`'s component extends (`extendsComponent`), whichever comes
+ * first. JSON Schema applies `{ allOf: [{ $ref: Tag }, { $ref: TagOutput
+ * }] }` over `TagOutput: { allOf: [{ $ref: Tag }, { required: ['label'] }]
+ * }` as it applies `{ allOf: [{ $ref: TagOutput }] }`, every `TagOutput`
+ * being a `Tag`, and `{ allOf: [{ $ref: Tag }, { $ref: Tag }] }` as it
+ * applies `{ allOf: [{ $ref: Tag }] }`; so only `{ $ref: TagOutput }`, or
+ * the first `{ $ref: Tag }`, types the `allOf`, in either member order and
+ * with any number of such `$ref`s (`[{ $ref: Tag }, { $ref: TagOutput }, {
+ * $ref: TagFinal }]` over a chain of three is typed by `{ $ref: TagFinal
+ * }`). The readers decided an `allOf` by the `$ref`s written on it, two
+ * being a merge whatever they named, so each of these was a new model
+ * with the narrower component's fields under the name of the place it
+ * was written at — `PetOutputTag`, a copy of `TagOutput` — where the
+ * `$ref` that stands, written alone, is the reference to the component.
+ * Two `$ref`s neither of whose components extends the other both type
+ * the `allOf`, as before, and so do two whose components each reach the
+ * other, and two names for one component neither of which names the
+ * other (`TagAlias: { $ref: Tag }` beside `OtherAlias: { $ref: Tag }`):
+ * the same instances under two models, with no narrower one to stand for
+ * both.
+ *
+ * The one reading of "the `$ref`s that type an `allOf`", for the reader
+ * that counts them (`readInlineAllOf`: one is the reference, two a merge)
+ * and the one that picks the reference (`allOfReferenceMember`), so an
+ * `allOf` is read as a reference exactly where its reference is picked.
+ * The members themselves stay as written: a `$ref` left out here is still
+ * a member of the `allOf` to the readers of one that is a merge for
+ * another member's sake (`mergeAllOfMembers`: an inline object member, a
+ * `required` list that adds, a third `$ref` neither extends), of its
+ * limits (`extractConstraints`, which reads what is written beside a
+ * `$ref` member) and of its `null` (`nullVote`; `allOfVetoesNull`).
+ *
+ * `written` is the schema the `allOf` is written on. A component's own
+ * `allOf` (`isComponentSchema`) is read as it was, every `$ref` member
+ * among these: it is what composes the component's model, which is a
+ * model of its own whatever its members name — no copy of another — and
+ * names each `$ref` member among its `bases` (`componentAllOfMembers`).
+ * Empty for an `allOf` that holds no list.
+ */
+export function typingReferences(
+  members: readonly SchemaObject[],
+  componentSchemas?: Record<string, SchemaObject>,
+  written?: SchemaObject,
+): readonly SchemaObject[] {
+  if (!Array.isArray(members)) return [];
+  const refs = members.filter((member) => isSchemaObject(member) && member.$ref !== undefined);
+  if (refs.length < 2 || isComponentSchema(written, componentSchemas)) return refs;
+  const kept = componentSchemas === undefined || componentSchemas === documentComponentSchemas();
+  const settled = kept ? typingReferenceLists.get(members) : undefined;
+  if (settled !== undefined) return settled;
+  const addsNothing = (reference: SchemaObject, index: number): boolean =>
+    refs.some((other, at) => {
+      if (at === index) return false;
+      if (extendsComponent(other, reference, componentSchemas)) return true;
+      return at < index && namesOneObject(other, reference, componentSchemas);
+    });
+  const typing = refs.filter((reference, index) => !addsNothing(reference, index));
+  if (kept) typingReferenceLists.set(members, typing);
+  return typing;
+}
+
+/**
+ * Whether `schema` is a component's own schema: the entry a
+ * `components/schemas` map holds, or a copy a reader made of it
+ * (`sourceDeclaration`: its nullable wrapper stripped, its sibling
+ * properties folded in, its bare `allOf`s spliced open). Its `allOf` is
+ * what composes the component's model, never a schema typed where it is
+ * written, and is read as it was (`typingReferences`). `componentSchemas`
+ * is the map; without it, the document's (`documentComponentSchemas`).
+ */
+function isComponentSchema(
+  schema: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): boolean {
+  const schemas = componentSchemas ?? documentComponentSchemas();
+  if (schema === undefined || schemas === undefined) return false;
+  let own = componentSchemaSets.get(schemas);
+  if (own === undefined) {
+    own = new WeakSet();
+    for (const component of Object.values(schemas)) if (isSchemaObject(component)) own.add(component);
+    componentSchemaSets.set(schemas, own);
+  }
+  return own.has(sourceDeclaration(schema));
+}
+
+/** The schemas each `components/schemas` map holds (`isComponentSchema`), by the map, so asking whether a schema is a component's own is one lookup however many components the document has. */
+const componentSchemaSets = new WeakMap<Record<string, SchemaObject>, WeakSet<SchemaObject>>();
+
+/** The `$ref`s that type each list of members read so far (`typingReferences`), by the list — the document's own `allOf`, or the one a schema splices to (`spliceNestedAllOf`), which every reader of that schema is handed — so the many readers of one `allOf` weigh its `$ref`s against each other once. The answer follows a `$ref` to the document's components, so it is forgotten with the spliced schemas (`resetSplicedSchemas`). */
+let typingReferenceLists = new WeakMap<readonly SchemaObject[], readonly SchemaObject[]>();
+
+/** Whether two `$ref`s name one component (`namesOneComponent`) that is an object as `extendsComponent` asks it of one — it declares properties, its own or its chain's, and nothing it is made of says an instance is anything else (`composedOf`): the second then adds nothing to an `allOf` that holds the first (`typingReferences`). */
+function namesOneObject(
+  first: SchemaObject,
+  second: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): boolean {
+  if (!isSchemaObject(first) || !isSchemaObject(second)) return false;
+  if (!namesOneComponent(first, second, componentSchemas)) return false;
+  const component: unknown = componentSchemaOf(first.$ref!, componentSchemas);
+  if (!isSchemaObject(component)) return false;
+  const made = composedOf(component, componentSchemas);
+  return made.declaresProperties && !made.namesOtherType;
 }
 
 /**
@@ -4174,9 +5097,15 @@ export function mergeAllOfMembers(
     if (s.$ref) {
       const key = componentKeyOf(s.$ref);
       const target = schemaRefTarget(s.$ref, componentSchemas);
-      const refs = target ? resolvedRefs : unresolvedRefs;
+      // Answered by whether a component is there, never by whether it is
+      // truthy: `Anything: false` is a component, one that declares
+      // nothing, as `Anything: true` is (workos/oagen#728: its `$ref` was
+      // listed as one no component answers, so a response body merging it
+      // with an inline member was typed by the reference alone, `unknown`,
+      // the member's fields lost).
+      const refs = target !== undefined ? resolvedRefs : unresolvedRefs;
       if (!refs.includes(s.$ref)) refs.push(s.$ref);
-      if (!target) return;
+      if (target === undefined) return;
       // The component the properties belong to is the one whose own model
       // carries them under its name. A ref inside an `allOf` component's own
       // chain stays that component's: its model inherits through its
@@ -4361,6 +5290,25 @@ export const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   ...LIFTED_LIMIT_KEYWORDS,
 ];
 const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
+const LIFTED_LIMIT_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_LIMIT_KEYWORDS);
+
+/** The annotations no reader lifts and that constrain nothing: a schema that writes one accepts the instances it accepts without it (`splicesOpen`, `documentsSchema`). */
+const UNCONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set(['title', '$comment', 'xml']);
+
+/**
+ * Whether a keyword only documents the schema it is written on and
+ * constrains no instance: a keyword a field reads that is no limit
+ * (`LIFTED_DECLARATION_KEYWORDS` less `LIFTED_LIMIT_KEYWORDS`: text, a
+ * link, examples, a `default`, `deprecated`, `readOnly`, `writeOnly`), an
+ * `x-*` key, or an annotation no reader lifts (`UNCONSTRAINING_KEYWORDS`).
+ * Anything else may say what an instance is or must satisfy — a limit, a
+ * `required` list, a `type`, `nullable`, `properties`, a `not`, an `enum`
+ * or a `const`, a union — and so may a keyword no reader knows.
+ */
+function documentsSchema(key: string): boolean {
+  if (key.startsWith('x-') || UNCONSTRAINING_KEYWORDS.has(key)) return true;
+  return LIFTED_DECLARATION_KEYWORD_SET.has(key) && !LIFTED_LIMIT_KEYWORD_SET.has(key);
+}
 
 /**
  * The keywords under which a declaration nests the one schema its array

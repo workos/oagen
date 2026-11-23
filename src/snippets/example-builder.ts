@@ -25,16 +25,23 @@ import type { ApiSpec, ArrayType, Constraints, Enum, Field, MapType, Model, Para
  *     Only when no value can satisfy the limits together (contradictory
  *     bounds, or no multiple between them) is the lower bound returned as
  *     is.
- *   - Plain strings are padded (by repeating the sample) to `minLength` and
- *     truncated to `maxLength`; format-driven values (`date-time`, `email`,
- *     `uuid`, ...) are never touched. A `pattern` is not synthesized: the
- *     sample is kept even when it does not match, since generating a string
- *     from an arbitrary regex is out of scope.
+ *   - A string whose `format` is a row of {@link STRING_FORMAT_SAMPLES} gets
+ *     that row's sample: the date and time formats of the OpenAPI format
+ *     registry (`date-time`, `date`, `date-time-local`, `time`, `time-local`,
+ *     `http-date`, `unixtime`, `duration`), `email`, `uri` / `url` and
+ *     `uuid`. A format-driven sample is never touched: the limits do not
+ *     pad or truncate it.
+ *   - Any other string, with another `format` or none, gets the plain
+ *     sample, padded (by repeating it) to `minLength` and truncated to
+ *     `maxLength`. A `pattern` is not synthesized: the sample is kept even
+ *     when it does not match, since generating a string from an arbitrary
+ *     regex is out of scope.
  *   - Arrays emit `max(1, minItems)` items capped at `maxItems` (an explicit
  *     `maxItems: 0` gives `[]`). Under `uniqueItems`, generated primitives
- *     vary by index (strings get the index appended, numbers get it added,
- *     booleans alternate — so a unique boolean array holds at most two
- *     items); enum, literal and model items are not varied.
+ *     vary by index (plain strings get the index appended, numbers get it
+ *     added, booleans alternate — so a unique boolean array holds at most
+ *     two items); format-driven strings, enum, literal and model items are
+ *     not varied.
  *   - Maps emit `max(1, minProperties)` entries capped at `maxProperties`:
  *     one entry keeps the `key` name, more are `key1`, `key2`, ...
  *   - Model-level `minProperties` / `maxProperties` are ignored: every
@@ -206,17 +213,53 @@ function primitiveExample(type: string, format: string | undefined, constraints?
 const STRING_SAMPLE = 'string_example';
 
 /**
- * Format-driven samples are returned untouched. The plain sample is padded
- * to `minLength` (within the size budget) and truncated to `maxLength`;
- * when both conflict, `maxLength` wins so the result at least fits. A
- * `pattern` is deliberately not honored.
+ * The sample of every string `format` the builder knows, and the one place
+ * that lists them: {@link stringExample} asks this table and nothing else,
+ * so a format is known exactly when it has a row here, spelled as the row
+ * spells it (`Date-Time` is not `date-time`). A string with any other
+ * `format`, or with none, gets the plain sample.
+ *
+ * The date and time rows are the formats the OpenAPI format registry
+ * (https://spec.openapis.org/registry/format/) defines for a string that
+ * holds a date, a time or a span of time, every one it listed when #734
+ * was fixed. All of them but `duration` write one instant, noon UTC on
+ * 2026-01-15, each as its own format spells it, so the samples of one
+ * snippet agree with each other; a `duration` names no instant and is one
+ * day.
+ */
+export const STRING_FORMAT_SAMPLES: ReadonlyMap<string, string> = new Map([
+  // RFC 3339 `date-time`.
+  ['date-time', '2026-01-15T12:00:00.000Z'],
+  // RFC 3339 `full-date`.
+  ['date', '2026-01-15'],
+  // RFC 3339 `date-time` without the time zone.
+  ['date-time-local', '2026-01-15T12:00:00'],
+  // RFC 3339 `full-time`: a time with its offset.
+  ['time', '12:00:00Z'],
+  // RFC 3339 time without the time zone.
+  ['time-local', '12:00:00'],
+  // RFC 7231 `HTTP-date`, in the form a sender writes (`IMF-fixdate`).
+  ['http-date', 'Thu, 15 Jan 2026 12:00:00 GMT'],
+  // Seconds since the Unix epoch, which the registry allows as a string too.
+  ['unixtime', '1768478400'],
+  // RFC 3339 `duration`.
+  ['duration', 'P1D'],
+  ['email', 'user@example.com'],
+  ['uri', 'https://example.com'],
+  ['url', 'https://example.com'],
+  ['uuid', '00000000-0000-0000-0000-000000000000'],
+]);
+
+/**
+ * A format's row of {@link STRING_FORMAT_SAMPLES} is returned untouched:
+ * neither the limits nor `seed` change it. The plain sample is padded to
+ * `minLength` (within the size budget) and truncated to `maxLength`; when
+ * both conflict, `maxLength` wins so the result at least fits. A `pattern`
+ * is deliberately not honored.
  */
 function stringExample(format: string | undefined, constraints?: Constraints, seed = 0): string {
-  if (format === 'date-time') return '2026-01-15T12:00:00.000Z';
-  if (format === 'date') return '2026-01-15';
-  if (format === 'email') return 'user@example.com';
-  if (format === 'uri' || format === 'url') return 'https://example.com';
-  if (format === 'uuid') return '00000000-0000-0000-0000-000000000000';
+  const formatSample = format === undefined ? undefined : STRING_FORMAT_SAMPLES.get(format);
+  if (formatSample !== undefined) return formatSample;
 
   const suffix = seed > 0 ? String(seed) : '';
   let value = STRING_SAMPLE;

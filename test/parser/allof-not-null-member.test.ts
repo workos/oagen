@@ -466,10 +466,10 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
       ).toMatchInlineSnapshot(`
         "inline: PetOwner { name, label } and Owner
         documented: PetOwner { name, label } and Owner
-        a \`$ref\` to \`NotNull: { not: { type: null } }\`: PetOwner { name, label } and PetOwner { name }
-        a \`$ref\` to a bare alias of it: PetOwner { name, label } and PetOwner { name }
-        a \`$ref\` to an \`allOf\` alias of it: PetOwner { name, label } and PetOwner { name }
-        a JSON Pointer to a field that writes it: PetOwner { name, label } and PetOwner { name }
+        a \`$ref\` to \`NotNull: { not: { type: null } }\`: PetOwner { name, label } and Owner
+        a \`$ref\` to a bare alias of it: PetOwner { name, label } and Owner
+        a \`$ref\` to an \`allOf\` alias of it: PetOwner { name, label } and Owner
+        a JSON Pointer to a field that writes it: PetOwner { name, label } and Owner
         wrapped in an \`allOf\`: PetOwner { name, label } and Owner
         wrapped twice: PetOwner { name, label } and Owner
         in a documented wrapper: PetOwner { name, label } and Owner
@@ -483,6 +483,11 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
       await expectNoDiff(
         ownerDoc(openapi, { allOf: [Owner, Tag, notNull] }, schemas),
         ownerDoc(openapi, { allOf: [Owner, Tag, ref('NotNull')] }, schemas),
+      );
+      // Beside one `$ref` too (#731: the `$ref` spelling was a second `$ref`, and so a merge, `PetOwner { name }`).
+      await expectNoDiff(
+        ownerDoc(openapi, { allOf: [Owner, notNull] }, schemas),
+        ownerDoc(openapi, { allOf: [Owner, ref('NotNull')] }, schemas),
       );
       expect(warnings()).toEqual([]);
     });

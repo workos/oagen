@@ -131,3 +131,50 @@ export function isResponsesObject(responses: unknown, label: string): responses 
   );
   return false;
 }
+
+/**
+ * The header map of a Response Object's `headers`, as every reader reads
+ * one: the object itself, whose keys are the names of the headers the
+ * response declares, or `undefined` when the response declares none through
+ * it. OpenAPI defines `headers` as a map of header names to Header Objects
+ * (or Reference Objects), so one that is absent declares no header, and
+ * neither does one written as anything but an object — a string, an array,
+ * a number, a boolean or `null`: `headers: "X-Rate-Limit"`, `headers:
+ * ['X-Rate-Limit']`, `headers: [{ schema: { type: 'integer' } }]`, `headers:
+ * 7`. Such a value is no map at all, and it is read as an absent `headers`
+ * is — never by the indexes of a string's characters or of an array's
+ * elements, which `Object.entries` lists as readily as a map's keys, so
+ * that `headers: [{ schema }]` declared a response header named `0`, and
+ * `headers: "X-Rate-Limit"` handed the header reader one character at a
+ * time and failed the whole parse with a `TypeError` that named neither the
+ * operation nor the response (#729).
+ *
+ * The one check every reader of a response's `headers` asks before it
+ * lists a key: the reader that types the headers (`extractResponseHeaders`)
+ * and the walk over the sites the readers type (`readSchemaSites`) — so
+ * neither can list a header the other does not, and neither an index.
+ *
+ * Given a `site`, a `headers` that is written and is no object is warned
+ * about once, naming the response and the value as JSON (`headers of the
+ * 200 response of listNotes is not a map of headers ("X-Rate-Limit");
+ * reading no header from it.`), the way a `content` that is no map and a
+ * `responses` that is no object are (`mediaTypesOf`, `isResponsesObject`).
+ * The site is passed by the one reader that reports on each `headers` —
+ * `extractResponseHeaders` — and by no other, so a `headers` both readers
+ * visit is reported once. What the map holds under a key is each reader's
+ * own to check: an entry that is no object is no Header Object and no
+ * Reference Object (`isReferenceEntry`).
+ */
+export function responseHeadersOf(headers: unknown, site?: string): Record<string, unknown> | undefined {
+  if (headers === undefined) return undefined;
+  if (typeof headers === 'object' && headers !== null && !Array.isArray(headers)) {
+    return headers as Record<string, unknown>;
+  }
+  if (site !== undefined) {
+    console.warn(
+      `[oagen] Warning: headers of ${site} is not a map of headers (${JSON.stringify(headers)}); ` +
+        `reading no header from it.`,
+    );
+  }
+  return undefined;
+}

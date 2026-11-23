@@ -525,9 +525,9 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
       it('a model fits one it carries every field of: a component built on the base’s, and the conjunction of two object declarations', async () => {
         const Named = { type: 'object', required: ['name'], properties: { name: { type: 'string' } } };
         const Dog = { allOf: [R('Named')], properties: { breed: { type: 'string' } } };
-        // `friend: { $ref: Dog }` over `Holder.friend: { $ref: Named }`: two
-        // object declarations, conjoined into a `PetFriend` with the fields
-        // of both, which fits `Named`.
+        // `friend: { $ref: Dog }` over `Holder.friend: { $ref: Named }`: every
+        // `Dog` is a `Named`, so the field is `Dog` (#733; it was `PetFriend`,
+        // a copy of `Dog`), which fits `Named`.
         const narrowed = await parsed({
           Named,
           Dog,
@@ -538,8 +538,7 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
           'Named { name: string }',
           'Dog : Named { breed?: string, name: string <- Named }',
           'Holder { friend?: Named }',
-          'Pet : Holder { friend: PetFriend }',
-          'PetFriend { breed?: string, name: string }',
+          'Pet : Holder { friend: Dog }',
         ]);
         // Under a union the reference stays as written, and `Dog` fits `Named`.
         const variant = await parsed({
@@ -550,8 +549,9 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         });
         expect(print(modelNamed(variant, 'Pet'))).toBe('Pet : Holder { friend?: Dog }');
         // `LooseDog` redeclares `name` as nullable, so `Named` is no base of
-        // it, and neither a `Pet` whose `friend` is the conjunction of the
-        // two nor one whose `friend` may be a `LooseDog` is on `Holder` —
+        // it, and neither a `Pet` whose `friend` is a `LooseDog` — the
+        // component itself, which composes `Named` (#733; it was `PetFriend`,
+        // a copy of it) — nor one whose `friend` may be one is on `Holder`,
         // whichever component the document declares first.
         const LooseDog = { allOf: [R('Named')], properties: { name: nullable({ type: 'string' }) } };
         const Holder = { type: 'object', properties: { friend: R('Named') } };
@@ -566,8 +566,7 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
           const printed = Object.fromEntries(spec.models.map((m) => [m.name, print(m)]));
           expect(printed).toMatchObject({
             LooseDog: 'LooseDog { name: string | null }',
-            Pet: 'Pet { friend?: PetFriend }',
-            PetFriend: 'PetFriend { name: string | null }',
+            Pet: 'Pet { friend?: LooseDog }',
             Pack: 'Pack { friend?: Dog | LooseDog }',
             Kennel: 'Kennel : Holder { friend?: Dog | Named }',
           });
@@ -640,14 +639,14 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
           'Pet : Base { id?: string, kind?: string <- Base }',
         );
         expect(await dispatcher(nullable({ type: 'string' }))).toBe('Pet { id?: string | null, kind?: string }');
-        // `next: { $ref: Pet }` over `Node.next: { $ref: Node }` is the
-        // conjunction of the two, which reaches itself and fits `Node`.
+        // `next: { $ref: Pet }` over `Node.next: { $ref: Node }` is `Pet`,
+        // which composes `Node` (#733; it was `PetNext`, a copy of `Pet`),
+        // reaches itself and fits `Node`.
         const Node = { type: 'object', properties: { next: R('Node'), id: { type: 'string' } } };
         const chained = await parsed({ Node, Pet: { allOf: [R('Node')], properties: { next: R('Pet') } } });
         expect(chained.models.map(print)).toEqual([
           'Node { next?: Node, id?: string }',
-          'Pet : Node { next?: PetNext, id?: string <- Node }',
-          'PetNext { next?: PetNext, id?: string }',
+          'Pet : Node { next?: Pet, id?: string <- Node }',
         ]);
       });
 
@@ -969,7 +968,8 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         });
         const printed = Object.fromEntries(narrowed.models.map((m) => [m.name, print(m)]));
         expect(printed).toMatchObject({
-          Friendly: 'Friendly { friends?: FriendlyFriend[], tags?: FriendlyTags[], name?: string }',
+          // `Dog[]` over `Named[]`: the items are `Dog` (#733; `FriendlyFriend`, a copy of it).
+          Friendly: 'Friendly { friends?: Dog[], tags?: FriendlyTags[], name?: string }',
           Tagged: 'Tagged { tags?: "cat"[], friends?: Named[], name?: string }',
           // The same items under a tighter limit is the same array to a type.
           Pet: 'Pet : Animal { tags?: PetTags[], friends?: Named[] <- Animal, name?: string <- Animal }',

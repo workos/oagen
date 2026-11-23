@@ -1004,9 +1004,18 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
   // single-member `allOf`, so `{ allOf: [{ type: 'string', maxLength: 3 }] }`
   // is a string whose limit is the value's own; a `$ref` member contributes
   // the keywords written beside the reference, but the target itself is not
-  // followed — its limits stay on the referenced model.
+  // followed — its limits stay on the referenced model. The members are the
+  // ones every reader reads (`spliceNestedAllOf`): a bare `allOf` among
+  // them opened, which moves no limit, and a `$ref` to a schema that says
+  // nothing of what an instance is, beside a member that names one that
+  // does, read as the keywords written in its place (#731) — it names no
+  // model that could keep them, so `{ allOf: [{ $ref: Owner }, { $ref:
+  // Limited }] }` over `Limited: { minProperties: 1 }` carries the limit,
+  // as `{ minProperties: 1 }` written as the member does.
   let out = ownConstraints(schema);
-  for (const member of schema.allOf ?? []) out = combineConstraints(out, extractConstraints(member));
+  for (const member of spliceNestedAllOf(schema).allOf ?? []) {
+    out = combineConstraints(out, extractConstraints(member));
+  }
   // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
   // collapses to `nullable<T>` in the IR, so that branch's keywords are the
   // value's own too and conjoin with the rest. A `$ref` branch keeps its
@@ -1329,10 +1338,11 @@ const derivedFrom = new WeakMap<SchemaObject, SchemaObject>();
  * (`sourceDeclaration`; see `derivedFrom`): the one call a reader makes
  * where it spreads a schema into a copy, so the copy is read as that
  * declaration wherever identity decides. Nothing is recorded when `copy`
- * is `source` itself.
+ * is `source` itself, or is no Schema Object (`isSchemaObject`), which
+ * only stands for itself and cannot key the record.
  */
 export function derivedCopy(copy: SchemaObject, source: SchemaObject): SchemaObject {
-  if (copy !== source) derivedFrom.set(copy, sourceDeclaration(source));
+  if (copy !== source && isSchemaObject(copy)) derivedFrom.set(copy, sourceDeclaration(source));
   return copy;
 }
 
@@ -1370,6 +1380,10 @@ export function sourceDeclaration(schema: SchemaObject): SchemaObject {
  * keyword of theirs survives without it. Every copy made here stands for
  * the schema it was spread from (`derivedCopy`), so a reader that guards by
  * identity reads it as that declaration (`sourceDeclaration`).
+ *
+ * A value that is no Schema Object (`isSchemaObject`: a JSON Schema
+ * boolean, `metadata: true`) writes no wrapper and is returned as it
+ * stands, as it folds nothing (`foldSiblingProperties`; #728).
  */
 export function unwrapNullableSchema(
   schema: SchemaObject,
@@ -1643,7 +1657,10 @@ export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
  * or an `allOf` merged into one model (`readInlineAllOf`: `'merged'`) whose
  * every member that types it admits `null` (`allOfAdmitsNull`: `allOf: [{
  * $ref: Owner }, { $ref: Tag }]` over two nullable components; #676: a
- * merge declared none, whatever its members admitted). A `$ref` the schema
+ * merge declared none, whatever its members admitted) — as is one read as
+ * its reference because another `$ref` adds nothing beside it
+ * (`holdsReferenceAddingNothing`; #733), which was that merge and declares
+ * the `null` it declared. A `$ref` the schema
  * is read as — the schema itself, or the member an `allOf` is read as —
  * is the component's to answer for and not followed here: the reference
  * carries the component's own wrapper (`componentTypeRef`).
@@ -1657,7 +1674,7 @@ export function declaresNull(schema: SchemaObject): boolean {
   if (wrapsOwnType(schema)) return true;
   const bare = unwrapNullableSchema(schema);
   const member = allOfReadAsMember(bare);
-  if (member === undefined) return mergeDeclaresNull(schema);
+  if (member === undefined || holdsReferenceAddingNothing(bare)) return mergeDeclaresNull(schema);
   return !allOfVetoesNull(bare) && declaresNull(member);
 }
 
@@ -1674,7 +1691,10 @@ function wrapsOwnType(schema: SchemaObject): boolean {
  * Whether `schema` is an `allOf` merged into one model that admits `null`
  * for its members' sake alone (`allOfAdmitsNull`): it is no nullable
  * wrapper itself (`wrapsOwnType`), no member is the one it is read as
- * (`allOfReadAsMember`), and every member that types it admits `null`.
+ * (`allOfReadAsMember`) — or it is read as its reference only because
+ * another `$ref` adds nothing beside it (`holdsReferenceAddingNothing`;
+ * #733), the merge of the two it was — and every member that types it
+ * admits `null`.
  * The part of `declaresNull` that #676 added, asked on its own by the one
  * reader that must tell such a merge from a schema that says `null`
  * itself (`keptAsWritten`).
@@ -1683,7 +1703,10 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
   if (wrapsOwnType(schema)) return false;
   const bare = unwrapNullableSchema(schema);
   // No member the `allOf` is read as: one that types the schema is a merge.
-  if (bare.allOf === undefined || allOfReadAsMember(bare) !== undefined) return false;
+  // One read as its reference because another `$ref` adds nothing beside
+  // it was a merge of the two, and still admits `null` as one (#733).
+  if (bare.allOf === undefined) return false;
+  if (allOfReadAsMember(bare) !== undefined && !holdsReferenceAddingNothing(bare)) return false;
   return classifyInlineSchema(bare) === 'allOf' && allOfAdmitsNull(bare);
 }
 
@@ -1826,14 +1849,91 @@ export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set
 /**
  * Whether a value written where a schema goes is a Schema Object: a plain
  * object, the only value with keywords for a reader to ask and the only
- * one a memo can be keyed by. A JSON Schema boolean (`true`, `false`; OAS
+ * one a memo is keyed by. A JSON Schema boolean (`true`, `false`; OAS
  * 3.1) is none, and neither is anything else a document may hold there
- * (`null`, a number, a string, a list). `nullVote` asks it of every schema
- * it is handed, since the members of an `allOf` and the component a `$ref`
- * names are whatever the document wrote.
+ * (`null`, a number, a string, a list). A property, an array's `items`, a
+ * variant, a member, a body's or a parameter's `schema` and the component
+ * a `$ref` names are whatever the document wrote, so every reader that
+ * remembers what it read by the schema asks this first and answers a
+ * value that is none before anything is remembered for it:
+ * `foldSiblingProperties`, which every reader that strips a wrapper goes
+ * through (`unwrapNullableSchema`); `nullVote` and
+ * `wrapperDiscriminatorOf`; the named unions' plans and shapes
+ * (`planNamedUnion`, `namedUnionShapeKey`); `derivedCopy`; the pagination
+ * walk (`collectObjectProperties`) and the title walk
+ * (`markContestedTitles`). `combineDeclarations` asks what its own memo
+ * can hold. #728: only `nullVote` and `wrapperDiscriminatorOf` asked, so
+ * a boolean anywhere but among the members of an `allOf` failed the parse
+ * with `Invalid value used as weak map key`.
  */
-function isSchemaObject(value: unknown): value is SchemaObject {
+export function isSchemaObject(value: unknown): value is SchemaObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The keywords of a Schema Object that hold a list of schemas. */
+const SCHEMA_LIST_KEYWORDS = ['allOf', 'oneOf', 'anyOf'] as const;
+
+/** The keywords of a Schema Object that hold schemas by name. */
+const SCHEMA_MAP_KEYWORDS = ['properties', 'patternProperties'] as const;
+
+/** The keywords of a Schema Object that hold one schema. */
+const SCHEMA_KEYWORDS = ['items', 'additionalProperties', 'not'] as const;
+
+/** The keywords of a Schema Object that hold a list the readers iterate. */
+const LIST_KEYWORDS = ['enum', 'required'] as const;
+
+/**
+ * Whether a schema is one the readers that type it can read as written, at
+ * every depth: its `allOf`, `oneOf` and `anyOf` are lists; its `properties`
+ * and `patternProperties` objects; its `enum` and `required` lists; its
+ * `discriminator` an object, with a `mapping` of strings when it writes
+ * one; and every schema those keywords hold — a member, a variant, a
+ * property, `items`, `additionalProperties`, `not` — is readable in turn.
+ * A value that is no Schema Object (`isSchemaObject`) where a schema goes
+ * writes no keyword and is read where it stands, as `{}` is: a JSON Schema
+ * boolean (`anyOf: [{ $ref: Owner }, true]`, `items: true`), a number, a
+ * string, a list (workos/oagen#728). `null` is the one value no reader
+ * answers. Nothing is followed through a `$ref`: a component is read where
+ * it stands. A schema met again on the walk is read once.
+ *
+ * Asked before a schema is handed to a reader it did not reach before, so
+ * a document that parsed keeps parsing: the type builder reads every
+ * variant of a union and every keyword of each, where the merge of an
+ * `allOf` reads the object properties alone, so a keyword written as
+ * another kind of value under a variant (`enum: 'cat'`, `oneOf: {}`, a
+ * `mapping` entry that is no string) is read by the merge as nothing and
+ * fails the type builder. `readInlineAllOf` leaves an `allOf` whose union
+ * member is not readable to the reading it had (workos/oagen#732).
+ */
+export function isReadableSchema(schema: unknown): boolean {
+  const seen = new Set<unknown>();
+  const readable = (value: unknown): boolean => {
+    if (!isSchemaObject(value)) return value !== null && value !== undefined;
+    if (seen.has(value)) return true;
+    seen.add(value);
+    const written = value as Record<string, unknown>;
+    for (const keyword of SCHEMA_LIST_KEYWORDS) {
+      const members = written[keyword];
+      if (members !== undefined && !(Array.isArray(members) && members.every(readable))) return false;
+    }
+    for (const keyword of SCHEMA_MAP_KEYWORDS) {
+      const named = written[keyword];
+      if (named !== undefined && !(isSchemaObject(named) && Object.values(named).every(readable))) return false;
+    }
+    for (const keyword of SCHEMA_KEYWORDS) {
+      if (written[keyword] !== undefined && !readable(written[keyword])) return false;
+    }
+    for (const keyword of LIST_KEYWORDS) {
+      if (written[keyword] !== undefined && !Array.isArray(written[keyword])) return false;
+    }
+    const { discriminator } = written;
+    if (discriminator === undefined) return true;
+    if (!isSchemaObject(discriminator)) return false;
+    const { mapping } = discriminator as { mapping?: unknown };
+    if (mapping === undefined) return true;
+    return isSchemaObject(mapping) && Object.values(mapping).every((target) => typeof target === 'string');
+  };
+  return readable(schema);
 }
 
 /**
@@ -1875,7 +1975,8 @@ function writesNull(schema: SchemaObject): boolean {
   if (isNullSchema(schema)) return true;
   const kind = classifyInlineSchema(schema);
   if (kind === 'const') return schema.const === null;
-  if (kind === 'enum') return (schema.enum ?? []).includes(null);
+  // An `enum` that holds no list names no `null`, as `isNullSchema` reads it.
+  if (kind === 'enum') return Array.isArray(schema.enum) && schema.enum.includes(null);
   if (kind !== 'union') return false;
   if (unionFlaggedNullable(schema)) return true;
   if (!(schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema)) return false;
@@ -2047,12 +2148,56 @@ function leadsBackTo(schema: SchemaObject, host: SchemaObject, seen: Set<SchemaO
  * `referencedPinnedValues`). An `allOf` merged into one model admits
  * `null` by its members' votes instead (`allOfAdmitsNull`), where the same
  * `not` rejects it.
+ *
+ * So does an `allOf` read as its reference because another `$ref` adds
+ * nothing beside it (`holdsReferenceAddingNothing`; workos/oagen#733): it
+ * was a merge of the two, and whether it admits `null` is still what that
+ * merge said — its own `type` and every member's vote, the `$ref` that
+ * adds nothing among them — so the reference loses its `null` wherever
+ * the merge admitted none. `{ allOf: [{ $ref: Tag }, { $ref: TagOutput }]
+ * }` over a nullable `Tag` and `TagOutput: { allOf: [{ $ref: Tag }, …] }`
+ * is `nullable<TagOutput>`; with `type: 'object'` beside the `allOf`, a
+ * `not` that vetoes `null` among the members, or a `Tag` that admits none
+ * under a `TagOutput` that writes a nullable `type` of its own, it is
+ * `TagOutput`, as each was the bare merged model.
  */
 export function allOfVetoesNull(schema: SchemaObject): boolean {
+  // An `allOf` that holds a `$ref` adding nothing beside its reference was
+  // a merge of the two, and admits `null` as that merge did: by its own
+  // `type` and every member's vote, a `not` that vetoes it among them.
+  if (holdsReferenceAddingNothing(schema)) return !allOfAdmitsNull(schema);
   if (vetoesNull(schema)) return true;
   const read = allOfReferenceMember(schema) ?? writtenTypingMember(schema);
   const seen = new Set<SchemaObject>();
   return (spliceNestedAllOf(schema).allOf ?? []).some((member) => member !== read && conjoinsVeto(member, seen));
+}
+
+/**
+ * Whether `schema` is an `allOf` read as its reference because another
+ * `$ref` member adds nothing beside it (`typingReferences`;
+ * workos/oagen#733): it holds a `$ref` to a component another `$ref`
+ * member names too, or to one another's component extends, and is read as
+ * the one `$ref` that stands (`readInlineAllOf`: `'reference'`), where it
+ * was a merge of the two. Such an `allOf` admits `null` as that merge did,
+ * whichever reader asks: by its own `type` and every member's vote
+ * (`allOfAdmitsNull`, which reads the members as written, the `$ref` that
+ * adds nothing among them). So the `null` of `{ allOf: [{ $ref: Tag }, {
+ * $ref: TagOutput }] }` is what the conjunction of both gives, never what
+ * `TagOutput` gives alone: `nullable<TagOutput>` over two nullable
+ * components, `TagOutput` where `Tag` admits none, where a `type:
+ * 'object'` is written beside the `allOf`, and where a member vetoes
+ * `null`. The one test of the three readers of an `allOf`'s `null` that
+ * tell a merge from a member it is read as (`allOfVetoesNull`,
+ * `declaresNull`, `mergeDeclaresNull`). False for a component's own
+ * schema, whose `allOf` is read as it was, and for an `allOf` that is a
+ * merge for another member's sake, which votes as one already.
+ */
+function holdsReferenceAddingNothing(schema: SchemaObject): boolean {
+  const members: unknown = spliceNestedAllOf(schema).allOf;
+  if (!Array.isArray(members)) return false;
+  const refs = members.filter((member) => isSchemaObject(member) && member.$ref !== undefined);
+  if (refs.length < 2 || refs.length === typingReferences(members, undefined, schema).length) return false;
+  return readInlineAllOf(schema.allOf ?? [], schema) === 'reference';
 }
 
 /**
@@ -2127,9 +2272,14 @@ function membersNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVot
  * `declaresType` alone counts any `allOf` or union as a type (#676 review:
  * `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { allOf: [{ description }] }]
  * }` over two nullable components was the bare model for the wrapper's
- * sake, where the same members written flat were nullable).
+ * sake, where the same members written flat were nullable). Asked too by
+ * the reader that decides whether a `$ref` member of an `allOf` types it
+ * or only annotates it (`saysWhatInstanceIs`; #731), of the schema the
+ * `$ref` names and of what that schema composes, so the `$ref`s read as
+ * the keywords in their place are the ones that have no vote on `null`,
+ * or cast the veto of a `not` alone.
  */
-function typesItself(schema: SchemaObject): boolean {
+export function typesItself(schema: SchemaObject): boolean {
   const { allOf: _allOf, oneOf, anyOf, ...own } = schema;
   if (declaresType(own)) return true;
   return [oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants));
@@ -4064,7 +4214,9 @@ const TYPING_KEYWORDS: readonly string[] = [
  * model), a member declaring properties inline (a merged model —
  * `declaresInlineProperties`: its own `properties`, or those of a nested
  * `allOf` member or of a `oneOf`/`anyOf` variant, which `mergeAllOfMembers`
- * reads into the model), or exactly one member that types on its own
+ * reads into the model — or, where it is the one member that types the
+ * schema and carries a union, that union unwrapped: `readInlineAllOf`,
+ * #732), or exactly one member that types on its own
  * (`allOfTypingMember`, unwrapped) — alone, or beside members that declare
  * no type and only annotate or limit it: `allOf: [{ type: 'string', enum:
  * [...] }, { description }]` is the enum, as `allOf: [{ type: 'string',
@@ -4180,8 +4332,19 @@ export function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * the `allOf` of `{ properties: { id } }`, `{ $ref: Owner }` and `{ $ref:
  * Tag }`, as `{ properties: { id }, allOf: [{ $ref: Owner }, { $ref: Tag
  * }] }` does.
+ *
+ * A value that is no Schema Object (`isSchemaObject`) folds nothing and is
+ * returned as it stands, before anything is remembered for it: a JSON
+ * Schema boolean — a property `metadata: true`, `items: true`, a variant
+ * in `oneOf: [{ type: 'string' }, true]`, a body's `schema: true`, a
+ * component `Anything: true` — has no keyword to fold, and only an object
+ * can key the memo. So `true` is typed where it stands as `{}` is,
+ * `unknown` (#728: every schema handed here reached the memo, so since
+ * #597 a boolean anywhere but among the members of an `allOf` failed the
+ * parse with `Invalid value used as weak map key`).
  */
 export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
+  if (!isSchemaObject(schema)) return schema;
   let folded = foldedSchemas.get(schema);
   if (!folded) foldedSchemas.set(schema, (folded = foldAfresh(schema)));
   return folded;
@@ -6224,13 +6387,16 @@ function isPlainObjectSchema(schema: SchemaObject | undefined): boolean {
  * The plan for a named union component, or null for any other schema (see
  * `NamedUnionPlan`). Planned once per extraction (`activeNamedUnionMemo`):
  * the model and the extractor both read it, and building it reads every
- * component and every other union (`namedUnionClaimedShapes`).
+ * component and every other union (`namedUnionClaimedShapes`). A component
+ * that is no Schema Object (`isSchemaObject`: `Anything: true`) is no
+ * union, answered before the memo, which only an object can key.
  */
 function planNamedUnion(
   name: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
 ): NamedUnionPlan | null {
+  if (!isSchemaObject(schema)) return null;
   const memo = activeNamedUnionMemo?.plans.get(schema);
   if (memo && memo.name === name && memo.schemas === schemas) return memo.plan;
   const plan = buildNamedUnionPlan(name, schema, schemas);
@@ -6446,8 +6612,16 @@ function componentModelNames(): ReadonlySet<string> {
   return names;
 }
 
-/** `schemaShapeKey`, hashed once per extraction for the schemas the named-union plans compare. */
+/**
+ * `schemaShapeKey`, hashed once per extraction for the schemas the
+ * named-union plans compare. A component that is no Schema Object
+ * (`isSchemaObject`: `Anything: true`) is hashed each time it is asked,
+ * since only an object can key the memo (#728: a plan claims every
+ * component's shape, so a boolean component beside a named union failed
+ * the parse, referenced or not).
+ */
 function namedUnionShapeKey(schema: SchemaObject): string {
+  if (!isSchemaObject(schema)) return schemaShapeKey(schema);
   const cached = activeNamedUnionMemo?.shapes.get(schema);
   if (cached !== undefined) return cached;
   const key = schemaShapeKey(schema);
@@ -10889,9 +11063,15 @@ export function componentTypeRef(key: string): TypeRef {
   // const: 'cat' }`, `Tag: { type: ['string', 'integer'] }` and `Anything:
   // { description }` were fieldless models, and a `$ref` to each typed as
   // that model while the same schema inline was `'cat'`, `string |
-  // integer` and `unknown`).
+  // integer` and `unknown`). Whatever the component holds: a JSON Schema
+  // boolean declares no type and is a primitive component too
+  // (`Anything: true`, `Anything: false`), so the reference is `unknown`,
+  // asked by whether the key is one, never by whether its value is truthy
+  // (#728: `false` was no primitive here, so before #597, since which it
+  // failed the parse, a `$ref` to it was a reference to a model `Anything`
+  // that no pass builds).
   const primitive = activePrimitiveComponentKeys.has(key) ? component : undefined;
-  if (primitive) return schemaToTypeRef(primitive);
+  if (primitive !== undefined) return schemaToTypeRef(primitive);
   // An alias of an enum component is no model either (#560): the
   // reference is the enum it names, read through the alias as the same
   // schema written inline is — `PetKind: { allOf: [{ $ref: Kind }, {
@@ -11776,8 +11956,10 @@ function buildTypeRef(
   // a merged model — a `$ref` member augmented by an inline object member,
   // or inline members one of which declares properties, a `oneOf`/`anyOf`
   // member's inline object variants included — which `materializeMergedAllOf`
-  // builds under this very name; a lone member unwrapped; or a plain
-  // reference to the first `$ref` member.
+  // builds under this very name; a lone member, or the one member that
+  // types the schema beside members that only annotate or limit it — a
+  // union member included, whatever its variants declare (#732) —
+  // unwrapped; or a plain reference to the first `$ref` member.
   if (inlineKind === 'allOf' && schema.allOf) {
     const reading = readInlineAllOf(schema.allOf, schema);
     if (reading === 'merged') {
@@ -12303,6 +12485,7 @@ import {
   schemaShapeKey,
   spliceNestedAllOf,
   splicedAllOfMembers,
+  typingReferences,
   stableStringify,
   unsplicedAllOf,
 } from './inline-models.js';

@@ -669,22 +669,48 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
     });
 
     it('leaves what a primitive copy reads through a `$ref` member the component’s own, with or without the OAS 3.0 flag', async () => {
-      // The `string` copy reads `StrLimits` in the member's place; the list
-      // as a whole is the merge of the two components, which carries none.
+      // The `string` copy reads `Named` in the member's place; the list as
+      // a whole is the merge of the two components, which carries none.
+      const merge = { ...schemas, Named: { properties: { label: string }, minLength: 2 } };
       expect(
         await table(
           [
-            ['merged', { type: ['object', 'string'], allOf: [ref('Owner'), ref('StrLimits')] }],
+            ['merged', { type: ['object', 'string'], allOf: [ref('Owner'), ref('Named')] }],
+            ['merged, nullable', { type: ['object', 'string'], nullable: true, allOf: [ref('Owner'), ref('Named')] }],
+          ],
+          merge,
+        ),
+      ).toMatchInlineSnapshot(`
+        "merged: (NoteTags | string)
+        merged, nullable: (nullable<NoteTags> | nullable<string>)"
+      `);
+      // A `$ref` to a component of limits alone is no second `$ref`, and
+      // the list no merge (#731: it was `(NoteTags | string)`, a copy of
+      // `Owner`, the limit read by the `string` copy alone): `StrLimits`
+      // is read as the limit written in its place, so the `object` copy is
+      // the reference to `Owner` and the union carries the limit, as the
+      // same limit written as the member gives.
+      expect(
+        await table(
+          [
+            ['a `$ref` to limits', { type: ['object', 'string'], allOf: [ref('Owner'), ref('StrLimits')] }],
+            ['the limits inline', { type: ['object', 'string'], allOf: [ref('Owner'), { minLength: 2 }] }],
             [
-              'merged, nullable',
+              'a `$ref` to limits, nullable',
               { type: ['object', 'string'], nullable: true, allOf: [ref('Owner'), ref('StrLimits')] },
+            ],
+            [
+              'the limits inline, nullable',
+              { type: ['object', 'string'], nullable: true, allOf: [ref('Owner'), { minLength: 2 }] },
             ],
           ],
           schemas,
         ),
       ).toMatchInlineSnapshot(`
-        "merged: (NoteTags | string)
-        merged, nullable: (nullable<NoteTags> | nullable<string>)"
+        "a \`$ref\` to limits: (Owner | string) {"minLength":2}
+        the limits inline: (Owner | string) {"minLength":2}
+        a \`$ref\` to limits, nullable: (nullable<Owner> | nullable<string>) {"minLength":2}
+        the limits inline, nullable: (nullable<Owner> | nullable<string>) {"minLength":2}"
       `);
     });
   });
