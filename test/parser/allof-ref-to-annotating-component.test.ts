@@ -1129,6 +1129,62 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
       `);
       expect(warnings()).toEqual([]);
     });
+
+    it('reads a `$ref` to a component that is `true`, `false` or `{}` as that member in its place (#728)', async () => {
+      // Where this meets #728, which reads a boolean component. `true` and `{}` admit every instance and say
+      // nothing of what one is. `false` admits none, so it is no annotation, and it says nothing of what an
+      // instance is either: it stands in the `$ref`'s place as the other two do, and is read as the `false`
+      // member the document could have written there (the readers of an `allOf` read it as they read `true`, the
+      // parser having no type for a schema that admits nothing). The other reading, a second `$ref` that types
+      // the schema, is the copy of `Owner` the issue is about.
+      const Anything = ref('Anything');
+      const lines: string[] = [];
+      for (const value of [true, false, {}]) {
+        const written = JSON.stringify(value);
+        const schemas = { Anything: value, ...tag };
+        const rows: ReadonlyArray<readonly [string, unknown[], unknown[]]> = [
+          ['after the `$ref`', [Owner, Anything], [Owner, value]],
+          ['before the `$ref`', [Anything, Owner], [value, Owner]],
+          ['beside a text and a veto', [Owner, Anything, Described, NotNull], [Owner, value, text, notNull]],
+          ['under a wrapper', [Owner, { allOf: [Anything] }], [Owner, { allOf: [value] }]],
+          ['beside two typing `$ref`s', [Owner, Anything, Tag], [Owner, value, Tag]],
+        ];
+        for (const [label, byRef, inline] of rows) {
+          const spec = await expectOneIr(
+            ownerDoc(openapi, { allOf: byRef }, schemas),
+            ownerDoc(openapi, { allOf: inline }, schemas),
+            `${written} ${label}`,
+          );
+          lines.push(`${written} ${label}: ${ownerLine(spec)}`);
+        }
+        // Beside no member that names a schema that says what an instance is, the `$ref` is read as before.
+        lines.push(`${written} alone: ${await ownerOf(openapi, { allOf: [Anything] }, schemas)}`);
+        lines.push(`${written} as the field: ${await ownerOf(openapi, Anything, schemas)}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "true after the \`$ref\`: nullable<Owner>
+        true before the \`$ref\`: nullable<Owner>
+        true beside a text and a veto: Owner <description="Any owner.">
+        true under a wrapper: nullable<Owner>
+        true beside two typing \`$ref\`s: nullable<PetOwner> { name?, label? }
+        true alone: unknown
+        true as the field: unknown
+        false after the \`$ref\`: nullable<Owner>
+        false before the \`$ref\`: nullable<Owner>
+        false beside a text and a veto: Owner <description="Any owner.">
+        false under a wrapper: nullable<Owner>
+        false beside two typing \`$ref\`s: nullable<PetOwner> { name?, label? }
+        false alone: unknown
+        false as the field: unknown
+        {} after the \`$ref\`: nullable<Owner>
+        {} before the \`$ref\`: nullable<Owner>
+        {} beside a text and a veto: Owner <description="Any owner.">
+        {} under a wrapper: nullable<Owner>
+        {} beside two typing \`$ref\`s: nullable<PetOwner> { name?, label? }
+        {} alone: unknown
+        {} as the field: unknown"
+      `);
+    });
   });
 
   describe('`saysWhatInstanceIs`', () => {
@@ -1395,10 +1451,10 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
       // none of this test's.
       const all = [0, 1, 2, 3, 4, 5];
       const values: ReadonlyArray<readonly [string, unknown, readonly number[]]> = [
-        ['`true`', true, [2, 3, 4, 5]],
-        ['`false`', false, [2, 3, 4, 5]],
-        ['a number', 5, [2, 3, 4, 5]],
-        ['a string', 'x', [2, 3, 4, 5]],
+        ['`true`', true, all],
+        ['`false`', false, all],
+        ['a number', 5, all],
+        ['a string', 'x', all],
         ['a list', [], all],
         ['a list of schemas', [{ description: 'x' }], all],
         ['`{}`', {}, all],
@@ -1410,7 +1466,7 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
         ['an `allOf` of a list', { allOf: [[]] }, all],
         ['an `enum` that holds a number', { enum: 5 }, [4, 5]],
         ['a `required` that holds a string', { required: 'x' }, all],
-        ['`items: true`', { items: true }, [2, 3, 4, 5]],
+        ['`items: true`', { items: true }, all],
         ['`not: true`', { not: true }, all],
         ['a `not` that holds a number', { not: 5 }, all],
         ['a `description` that holds a number', { description: 5 }, all],
