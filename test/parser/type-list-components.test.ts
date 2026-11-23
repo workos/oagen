@@ -511,7 +511,7 @@ describe('#730 a component whose type list names `array` or `object` beside anot
       ).toMatchInlineSnapshot(`
         "object items: (XItem[] | string) ; XItem { a?: string, nested?: XItemNested } ; XItemNested { b?: string }
         object items beside an object: (XItem[] | X) ; X { name?: string } ; XItem { a?: string, nested?: XItemNested } ; XItemNested { b?: string }
-        object items beside an \`item\` property: (XArrayItem[] | X) ; X { item?: XItem } ; XArrayItem { a?: string } ; XItem { b?: string }
+        object items beside an \`item\` property: (XItemItem[] | X) ; X { item?: XItem } ; XItemItem { a?: string } ; XItem { b?: string }
         enum items: (enum XItem[] | string)
         $ref items: (Note[] | string)
         nested arrays: (XItem[][] | string) ; XItem { a?: string }
@@ -553,6 +553,30 @@ describe('#730 a component whose type list names `array` or `object` beside anot
         'TagsItem { other?: string }',
         'TagsItemItem { a?: string }',
       ]);
+      // And the items of a list that names `object` too, which are planned with them.
+      const beside = await parse({
+        Note: note(ref('Owner')),
+        Owner: { type: ['array', 'object'], items: { type: 'object', properties: { a: string } }, properties: named },
+        OwnerItem: { type: 'object', properties: { other: string } },
+      });
+      expect(beside.models.map(showModel).sort()).toEqual([
+        'Note { x?: (OwnerItemItem[] | Owner) }',
+        'Owner { name?: string }',
+        'OwnerItem { other?: string }',
+        'OwnerItemItem { a?: string }',
+      ]);
+      // A component of the items' own shape is shared, as an array component's items share one.
+      const shared = await parse({
+        Note: note(ref('Owner')),
+        Owner: { type: ['array', 'object'], items: { type: 'object', properties: { a: string } }, properties: named },
+        OwnerItem: { type: 'object', properties: { a: string } },
+      });
+      expect(shared.models.map(showModel).sort()).toEqual([
+        'Note { x?: (OwnerItem[] | Owner) }',
+        'Owner { name?: string }',
+        'OwnerItem { a?: string }',
+      ]);
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 
@@ -999,8 +1023,10 @@ describe('#730 a component whose type list names `array` or `object` beside anot
           "B { name?: string }",
         ]
       `);
+      // Each reaches itself through the other, and says so once.
       expect(warnings()).toEqual([
         '[oagen] Warning: Array component "A" refers to itself through its items — the inner reference is typed as unknown',
+        '[oagen] Warning: Component "B" refers to itself through the other types of its type list — the inner reference is typed as the model alone',
       ]);
       expectNoDanglingReference(spec);
     });

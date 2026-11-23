@@ -247,6 +247,16 @@ interface MultiTypeModelOwner {
   name: string;
   /** The schema whose type list names the types (`multiTypeModelDeclaration`): the component's own, or the member its `allOf` is read as. */
   declaration: SchemaObject;
+  /**
+   * The plan of the `array` the list names beside the object, when it names
+   * one: the array copy typed and extracted as an array component's schema
+   * is, under the model's name (`item`, so its inline items are `<Component>
+   * Item`), and planned with the array components (`extractSchemas`), so
+   * the items step around a name another entry holds for a different shape
+   * exactly as an array component's do. Absent until the plans are decided,
+   * when the member is typed under the context `variantMemberKeys` picks.
+   */
+  items?: ArrayComponentPlan;
   /** Set once the self-reference warning has been printed, so it is printed once per component. */
   warnedSelfReference: boolean;
 }
@@ -2570,15 +2580,35 @@ export function extractSchemas(
   // its const derives.
   activeDispatcherVariantPlans = new Map();
   activeDispatcherVariantPlans = planDispatcherVariants(schemas);
-  const arrayComponents = Object.entries(schemas)
-    .filter(([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas))
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  // Planned with them, as a tree of its own: the `array` a model component
+  // names beside its object (#730), whose items are named under the model
+  // as an array component's are under the component, and step around the
+  // same names. Its plan is the model's (`MultiTypeModelOwner.items`), not
+  // an array component's: a `$ref` to the key is the model beside its other
+  // types.
+  const memberOwners = new Map(
+    [...activeMultiTypeModels.values()].flatMap(({ owner }) => {
+      const member = multiTypeArrayMember(owner);
+      return member ? [[owner.key, { owner, member }] as const] : [];
+    }),
+  );
+  const arrayComponents = [
+    ...Object.entries(schemas).filter(
+      ([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas),
+    ),
+    ...[...memberOwners].map(([key, { member }]) => [key, member] as [string, SchemaObject]),
+  ].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (arrayComponents.length > 0) {
     const contexts = new Map(arrayComponents.map(([key]) => [key, 'item']));
+    const plan = (key: string, schema: SchemaObject): void => {
+      const planned = arrayComponentPlan(key, schema, contexts.get(key)!);
+      const owner = memberOwners.get(key)?.owner;
+      if (owner) owner.items = planned;
+      else activeArrayComponentPlans.set(key, planned);
+    };
     const register = (): void => {
-      activeArrayComponentPlans = new Map(
-        arrayComponents.map(([key, schema]) => [key, arrayComponentPlan(key, schema, contexts.get(key)!)] as const),
-      );
+      activeArrayComponentPlans = new Map();
+      for (const [key, schema] of arrayComponents) plan(key, schema);
     };
     let settled = false;
     for (let round = 0; round < MAX_ARRAY_COMPONENT_ROUNDS && !settled; round++) {
@@ -2603,7 +2633,7 @@ export function extractSchemas(
         if (context === contexts.get(key)) continue;
         settled = false;
         contexts.set(key, context);
-        activeArrayComponentPlans.set(key, arrayComponentPlan(key, schema, context));
+        plan(key, schema);
         current.set(key, arrayComponentMints(name, schema, schemas, context));
       }
     }
@@ -2741,6 +2771,11 @@ export function extractSchemas(
   for (const name of activeArrayComponentPlans.keys()) {
     const ref = arrayComponentTypeRef(name);
     if (ref) collectInlineEnumFromRef(ref, enums, new Set(enums.map((e) => e.name)));
+  }
+  // ...and from the other types of every model component that admits some
+  // beside its object, which no model holds either (#730).
+  for (const key of memberOwners.keys()) {
+    collectInlineEnumFromRef(componentTypeRef(key), enums, new Set(enums.map((e) => e.name)));
   }
 
   // NOTE: activeSchemaNameTransform is intentionally NOT cleared here.
@@ -4787,9 +4822,10 @@ export function warnOnUncarriedProperties(
  * name singularizes to `<Variant>Item`, blocks `item` as well.
  * This is the single source of these names for the TypeRef builder
  * (`multiTypeMembers`) and the extractors (`variantMemberSchemas`), for an
- * inline variant and for a component that is a model beside other types
- * alike (`multiTypeModelChain`; #730: `Owner: { type: ['array', 'object'],
- * items, properties }` types its items `OwnerItem`).
+ * inline variant — and for a component that is a model beside other types
+ * (`multiTypeModelChain`; #730), whose members that are no array are typed
+ * under `value` too, and whose `array` member under `item` until its plan
+ * is decided (`MultiTypeModelOwner.items`).
  */
 export function variantMemberKeys(variant: SchemaObject, variantName: string): { item: string; value: string } {
   const modelNameFor = (key: string): string => qualifyInlineModelName(toPascalCase(key), variantName);
@@ -5848,17 +5884,36 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
  * picks (`<Model>Item`), any other member under its `value` key — and
  * carries no limit, whichever level wrote it (`typeListVariants`; #711);
  * a type two members are typed alike as is one member (`dedupeTypeRefs`).
+ * A component's `array` member is typed from the plan the component's items
+ * were decided by (`items`: `MultiTypeModelOwner.items`), as an array
+ * component's reference is (`arrayComponentTypeRef`), so its items step
+ * around the names an array component's do; an inline variant has none.
  */
-function multiTypeMembers(schema: SchemaObject, modelName: string, modelRef: ModelRef): TypeRef {
+function multiTypeMembers(
+  schema: SchemaObject,
+  modelName: string,
+  modelRef: ModelRef,
+  items?: ArrayComponentPlan,
+): TypeRef {
   // The schema's limits are the union's, as a type list's are
   // (`schemaToTypeRef`; #545), so the other members carry none, whichever
   // level of the schema wrote them (`typeListVariants`; #711).
   const { variants: members } = typeListVariants(
-    multiTypeMemberSchemas(schema, modelName, true).map(([context, member]) =>
-      member === undefined ? modelRef : buildTypeRef(member, context, modelName),
-    ),
+    multiTypeMemberSchemas(schema, modelName, true).map(([context, member]) => {
+      if (member === undefined) return modelRef;
+      // A component's `array` member is typed from its plan, once it has one.
+      if (member.type === 'array' && items) {
+        return schemaToTypeRef(items.schema, items.context, items.name, items.properties);
+      }
+      return buildTypeRef(member, context, modelName);
+    }),
   );
   return members.length > 1 ? { kind: 'union', variants: members } : modelRef;
+}
+
+/** The `array` copy of the type list a model component admits other types by (`multiTypeMemberSchemas`), which its plan types and extracts (`MultiTypeModelOwner.items`); `undefined` when the list names no array. */
+function multiTypeArrayMember(owner: MultiTypeModelOwner): SchemaObject | undefined {
+  return multiTypeMemberSchemas(owner.declaration, owner.name).find(([, member]) => member?.type === 'array')?.[1];
 }
 
 /**
@@ -6628,9 +6683,7 @@ function typeListComponentCopies(schema: SchemaObject): SchemaObject[] | undefin
  * the component keeps its model — a document that parsed still parses,
  * read as it was — rather than the reading deciding from a list of the
  * shapes it could not make. A document those readers read is unaffected:
- * the rehearsal types nothing the extraction keeps, and a component's
- * report of a reference to itself is still to be made
- * (`warnedSelfReference`).
+ * the rehearsal types nothing the extraction keeps.
  */
 function markUnreadTypeLists(schemas: Record<string, SchemaObject>): boolean {
   let marked = false;
@@ -6656,7 +6709,6 @@ function markUnreadTypeLists(schemas: Record<string, SchemaObject>): boolean {
       marked = true;
     }
   }
-  for (const { owner } of activeMultiTypeModels.values()) owner.warnedSelfReference = false;
   return marked;
 }
 
@@ -6964,7 +7016,9 @@ function multiTypeMemberModels(key: string, schemas: Record<string, SchemaObject
   const owner = activeMultiTypeModels.get(key)?.owner;
   if (owner?.key !== key) return [];
   const models: Model[] = [];
+  if (owner.items) extractPlannedModels(owner.items, models, schemas);
   for (const [context, member] of multiTypeMemberSchemas(owner.declaration, owner.name)) {
+    if (member === undefined || (member.type === 'array' && owner.items)) continue;
     extractInlineModelsFromProperties({ properties: { [context]: member } }, models, owner.name, schemas);
   }
   return models;
@@ -7207,13 +7261,18 @@ function withoutArrayComponents<T>(fn: () => T): T {
 /**
  * Run `fn` as a rehearsal whose output is discarded: `console.warn` is
  * silenced, and the memory of which unions' fold warnings were already
- * reported is set aside and restored, so every warning the schema deserves
- * is printed once, by the extraction that keeps the models.
+ * reported is set aside and restored — as is that of the model components
+ * that reported a reference to themselves through their other types
+ * (`MultiTypeModelOwner.warnedSelfReference`; #730), which outlive a
+ * rehearsal where an array component's plan is replaced — so every warning
+ * the schema deserves is printed once, by the extraction that keeps the
+ * models.
  */
 export function rehearse<T>(fn: () => T): T {
   const warn = console.warn;
   const reported = reportedUncarriedProperties;
   const unread = reportedUnreadUnions;
+  const owners = new Map([...activeMultiTypeModels.values()].map(({ owner }) => [owner, owner.warnedSelfReference]));
   console.warn = () => {};
   reportedUncarriedProperties = new WeakSet();
   reportedUnreadUnions = new WeakSet();
@@ -7223,6 +7282,7 @@ export function rehearse<T>(fn: () => T): T {
     console.warn = warn;
     reportedUncarriedProperties = reported;
     reportedUnreadUnions = unread;
+    for (const [owner, warned] of owners) owner.warnedSelfReference = warned;
   }
 }
 
@@ -7285,7 +7345,6 @@ function componentMints(
       extractModel(name, schema, schemas),
       ...(dispatcherVariants ? extractDiscriminatedAllOfVariantModels(schema, name, schemas) : []),
       ...extractNamedUnionVariantModels(schema, name, schemas),
-      ...multiTypeMemberModels(key, schemas),
       ...extractInlineModelsFromSchemas({ [key]: schema }),
     ];
     for (const model of extract()) claim(model.name, modelShapeKey(model));
@@ -7336,6 +7395,12 @@ function extractArrayComponentModels(key: string, schemas: Record<string, Schema
   const plan = activeArrayComponentPlans.get(key);
   if (!plan) return [];
   const models: Model[] = [];
+  extractPlannedModels(plan, models, schemas);
+  return models;
+}
+
+/** Extract into `models` what `plan`'s synthetic property references: each of its trees, under the plan's name and the one sibling set its reference is typed with. */
+function extractPlannedModels(plan: ArrayComponentPlan, models: Model[], schemas: Record<string, SchemaObject>): void {
   for (const tree of plan.trees) {
     extractInlineModelsFromProperties(
       { properties: { [plan.context]: tree } },
@@ -7345,7 +7410,6 @@ function extractArrayComponentModels(key: string, schemas: Record<string, Schema
       plan.properties,
     );
   }
-  return models;
 }
 
 /**
@@ -10699,7 +10763,7 @@ function multiTypeModelTypeRef(key: string, modelRef: ModelRef): TypeRef {
   resolvingMultiTypeModels.add(owner.key);
   try {
     return withTypeConstraints(
-      multiTypeMembers(owner.declaration, owner.name, modelRef),
+      multiTypeMembers(owner.declaration, owner.name, modelRef, owner.items),
       multiTypeModelLimits(chain, activeComponentSchemas),
     );
   } finally {
