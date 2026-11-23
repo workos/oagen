@@ -1251,6 +1251,153 @@ describe('#730 a component whose type list names `array` or `object` beside anot
     });
   });
 
+  describe('beside a boolean schema, a `$ref` that annotates and an annotated union member', () => {
+    // Where this reading meets #728, #731 and #732.
+    const fields = (spec: ApiSpec): string[] =>
+      modelOf(spec, 'Note').fields.map(
+        (field) => `${field.name}: ${show(field.type)}${field.description ? ` "${field.description}"` : ''}`,
+      );
+
+    it('reads boolean `items`, a boolean property and a boolean member as the list in place does', async () => {
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            tags: ref('Tags'),
+            inPlace: { type: ['array', 'string'], items: true },
+            anyTags: ref('AnyTags'),
+            owner: ref('Owner'),
+            both: ref('Both'),
+            object: { type: 'object', allOf: [ref('Owner'), true] },
+            string: { type: 'string', allOf: [ref('Owner'), ref('Anything')] },
+            array: { type: 'array', allOf: [ref('Tags'), ref('Anything')] },
+            member: { allOf: [ref('Owner'), { type: 'string' }, true] },
+          },
+        },
+        Tags: { type: ['array', 'string'], items: true },
+        AnyTags: { type: ['array', 'string'], items: ref('Anything') },
+        Owner: { type: ['object', 'string'], properties: { name: true } },
+        Both: { type: ['array', 'object'], items: true, properties: named },
+        Anything: true,
+      });
+      expect(fields(spec)).toMatchInlineSnapshot(`
+        [
+          "tags: (unknown[] | string)",
+          "inPlace: (unknown[] | string)",
+          "anyTags: (unknown[] | string)",
+          "owner: (Owner | string)",
+          "both: (unknown[] | Both)",
+          "object: Owner",
+          "string: string",
+          "array: unknown[]",
+          "member: string",
+        ]
+      `);
+      expect(spec.models.filter(({ name }) => name !== 'Note').map(showModel)).toMatchInlineSnapshot(`
+        [
+          "Owner { name?: unknown }",
+          "Both { name?: string }",
+        ]
+      `);
+      expectNoDanglingReference(spec);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads `items: false` as an array component reads it', async () => {
+      const typed = async (x: unknown): Promise<string> => {
+        const spec = await parse({ Note: note(ref('X')), X: x });
+        return `${show(fieldOf(spec, 'Note', 'x').type)} / ${names(spec).join(', ')}`;
+      };
+      expect({
+        array: await typed({ type: 'array', items: false }),
+        list: await typed({ type: ['array', 'string'], items: false }),
+        'in place': show(
+          fieldOf(await parse({ Note: note({ type: ['array', 'string'], items: false }) }), 'Note', 'x').type,
+        ),
+      }).toMatchInlineSnapshot(`
+        {
+          "array": "unknown / Note",
+          "in place": "(unknown | string)",
+          "list": "(unknown | string) / Note",
+        }
+      `);
+    });
+
+    it('reads a `$ref` to an annotating component beside the reference as the annotation it is', async () => {
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            described: { allOf: [ref('Owner'), ref('Described')] },
+            object: { type: 'object', allOf: [ref('Owner'), ref('Described')] },
+            string: { type: 'string', allOf: [ref('Owner'), ref('Described')] },
+            empty: { allOf: [ref('Owner'), ref('Empty')] },
+            limited: { allOf: [ref('Tags'), ref('Limits')] },
+            array: { type: 'array', allOf: [ref('Tags'), ref('Limits')] },
+            alias: ref('DescribedAlias'),
+            aliasObject: ref('DescribedObject'),
+            aliasTags: ref('DescribedTags'),
+          },
+        },
+        Owner: OWNER,
+        Tags: TAGS,
+        Described: { description: 'From a component.' },
+        Limits: { minLength: 1 },
+        Empty: {},
+        DescribedAlias: { allOf: [ref('Owner'), ref('Described')] },
+        DescribedObject: { type: 'object', allOf: [ref('Owner'), ref('Described')] },
+        DescribedTags: { type: 'array', allOf: [ref('Tags'), ref('Described')] },
+      });
+      expect(fields(spec)).toMatchInlineSnapshot(`
+        [
+          "described: (Owner | string) "From a component."",
+          "object: Owner "From a component."",
+          "string: string "From a component."",
+          "empty: (Owner | string)",
+          "limited: (string[] | string) {"minLength":1}",
+          "array: string[] {"minLength":1}",
+          "alias: (DescribedAlias | string)",
+          "aliasObject: DescribedObject",
+          "aliasTags: string[] "From a component."",
+        ]
+      `);
+      expect(spec.models.filter(({ name }) => name !== 'Note').map(showModel)).toMatchInlineSnapshot(`
+        [
+          "Owner { name?: string }",
+          "DescribedAlias { name?: string } bases [Owner] "From a component."",
+          "DescribedObject { name?: string } bases [Owner] "From a component."",
+        ]
+      `);
+      expectNoDanglingReference(spec);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps the reference whole as a variant of a union member beside annotations', async () => {
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            union: { allOf: [{ anyOf: [ref('Owner'), { type: 'integer' }] }, { description: 'Either.' }] },
+            unionRef: { allOf: [{ anyOf: [ref('Owner'), { type: 'integer' }] }, ref('Described')] },
+            both: { allOf: [{ oneOf: [ref('Tags'), ref('Owner')] }, { description: 'Either.' }] },
+          },
+        },
+        Owner: OWNER,
+        Tags: TAGS,
+        Described: { description: 'From a component.' },
+      });
+      expect(fields(spec)).toMatchInlineSnapshot(`
+        [
+          "union: ((Owner | string) | integer) "Either."",
+          "unionRef: ((Owner | string) | integer) "From a component."",
+          "both: ((string[] | string) | (Owner | string)) "Either."",
+        ]
+      `);
+      expect(names(spec)).toEqual(['Note', 'Owner']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
   describe('a list envelope', () => {
     const envelope = (data: unknown) => ({
       '/pets': {
