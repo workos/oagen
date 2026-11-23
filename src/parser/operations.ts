@@ -148,7 +148,13 @@ import {
 } from './responses.js';
 import type { ResponseKey } from './responses.js';
 import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
-import { isResponseEntry, isResponsesObject, resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import {
+  isResponseEntry,
+  isResponsesObject,
+  resolveResponseRef,
+  responseHeadersOf,
+  type ReferenceObject,
+} from './response-refs.js';
 import { shapeWithEnumFlags } from './enum-members.js';
 import {
   materializeInlineSchema,
@@ -604,29 +610,42 @@ type RawHeaderObject = HeaderObject | { $ref: string; description?: string };
  * (OAS 3.1), the outermost with content winning along a chain, and is
  * ignored under `'ignore'` (OAS 3.0).
  *
+ * An entry that is no object — `"X-Rate": "integer"`, `null`, `7`, `true`
+ * or `[]` — is neither a Header Object nor a Reference Object, and nothing
+ * could be read from it: it is warned about once, naming the header, the
+ * operation and the value as JSON (`the response header "X-Rate" of
+ * listPets is not a Header Object ("integer"); skipping it.`), and
+ * `undefined` is returned for the caller to skip it, as a parameter that is
+ * no object is skipped (`resolveParameterRef`) — where every such value but
+ * an array failed the parse with a `TypeError` naming neither the operation
+ * nor the header, and an array was read as a header with no schema (#729).
+ * A chain that ends on a `components/headers` entry that is no object
+ * (`Rate: []`) is that same malformed entry behind a pointer, so it is read
+ * the same way, the warning naming the component (`components/headers/Rate
+ * (the response header "X-Rate" of listPets) is not a Header Object ([]);
+ * skipping it.`; #664), and the two spellings of one malformed header give
+ * one IR.
+ *
  * Unlike parameters and request bodies, a header whose ref leads to no
  * entry at all is warned about and dropped rather than failing the parse: a
  * response header is informational, so losing one costs an emitter a typed
  * accessor, not a wire contract, and should not block generating the rest
- * of the SDK. Each failure is named as what it is: a chain that ends on a
- * `components/headers` entry that is no object (`Rate: []`) as that
- * malformed entry (`components/headers/Rate (the response header "X-Rate"
- * of listPets) is not a Header Object ([]); skipping it.`, as a parameter's
- * is; #664), a `$ref` that is not a string as malformed, the value given as
- * JSON, and only a ref the section holds nothing under as one with `no
+ * of the SDK. Each failure is named as what it is: a `$ref` that is not a
+ * string as malformed, the value given as JSON, a chain that loops as
+ * circular, and only a ref the section holds nothing under as one with `no
  * matching entry`.
  */
 function resolveHeaderRef(
-  raw: RawHeaderObject,
+  raw: unknown,
   componentHeaders: Record<string, Record<string, unknown>> | undefined,
   headerName: string,
   operationContext: string,
   siblingDocs: SiblingDocs = 'override',
 ): HeaderObject | undefined {
+  const site = `the response header "${headerName}" of ${operationContext}`;
+  if (!isReferenceEntry(raw, 'headers', site)) return undefined;
   const followed = followReference<HeaderObject>(raw, 'headers', componentHeaders, siblingDocs);
-  if (endsOnNonObject(followed, 'headers', `the response header "${headerName}" of ${operationContext}`)) {
-    return undefined;
-  }
+  if (endsOnNonObject(followed, 'headers', site)) return undefined;
   if (followed.outcome === 'circular') {
     console.warn(
       `[oagen] Warning: Circular header $ref chain starting at "${followed.ref}" for response header ` +
@@ -6504,6 +6523,18 @@ function deferParameterModels(
  * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
  * survives so callers can leave the `headers` key off entirely.
  *
+ * The map is taken from the one check every reader of a `headers` asks
+ * (`responseHeadersOf`): a `headers` that is no object — `headers:
+ * "X-Rate-Limit"`, `['X-Rate-Limit']`, `[{ schema }]`, `7`, `null` — is no
+ * map and declares no header, as an absent one declares none, after one
+ * warning naming `responseSite` and the value; it is never read by the
+ * indexes of its characters or elements (#729). An entry of the map that is
+ * no object is no Header Object: it is warned about and skipped, the
+ * response read from its other headers (`resolveHeaderRef`). The key
+ * declares the header whatever it holds, so of two keys that differ in case
+ * alone the later is the declaration even when it is the one skipped, as it
+ * is when its `$ref` leads nowhere.
+ *
  * An object-shaped header schema (directly, inside an array, or as a oneOf
  * variant) becomes a `ModelRef`, so the model it names must be materialized
  * — otherwise the ref would dangle with nothing to emit. That naming waits
@@ -6533,17 +6564,22 @@ function deferParameterModels(
  * counts too; its `description` is the header's alone.
  */
 function extractResponseHeaders(
-  headers: Record<string, RawHeaderObject> | undefined,
+  headers: unknown,
   operationLabel: string,
   // A status code, or the label of a fallback response (`Default`, `ClientError`).
   statusCode: number | string,
   ctx: ResponseTypingContext,
   site: ResponseModelSite,
+  /** The response as a diagnostic names it, by its key as written (`the 200 response of listNotes`). */
+  responseSite: string,
 ): ResponseHeader[] | undefined {
-  if (!headers) return undefined;
+  // The map, or nothing for a `headers` that is no map — reported here,
+  // once, as the response's headers are read (`responseHeadersOf`; #729).
+  const declared = responseHeadersOf(headers, responseSite);
+  if (declared === undefined) return undefined;
 
-  const declarations = new Map<string, { name: string; raw: RawHeaderObject }>();
-  for (const [name, raw] of Object.entries(headers)) {
+  const declarations = new Map<string, { name: string; raw: unknown }>();
+  for (const [name, raw] of Object.entries(declared)) {
     const folded = foldHeaderName(name);
     const earlier = declarations.get(folded);
     if (earlier) {
@@ -8577,7 +8613,7 @@ function fillFallbackResponse(
     const own = contents.contents.find((content) => content.contentType === json?.contentType);
     if (own) targets.push(own);
   }
-  const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.ctx, site);
+  const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.ctx, site, `the ${responseSite}`);
   if (headers) entry.headers = headers;
   // The response's own `description`, read as for a success or error entry —
   // a sibling beside a `$ref` included only as `ctx.refSiblingDescriptions`
@@ -8995,7 +9031,8 @@ function extractResponses(
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
     // response, which no branch below keeps, declares none worth
     // materializing models for; a fallback response's were read above.
-    const headers = code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, ctx, site) : undefined;
+    const headers =
+      code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, ctx, site, responseSite) : undefined;
     // The response's own `description`, success or error alike. Blank text
     // counts as absent, the way an operation's summary is read, and the key is
     // only added when there is something to keep. A `$ref` into
