@@ -1185,6 +1185,93 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
         {} as the field: unknown"
       `);
     });
+
+    it('keeps a `required` list that reaches a `$ref` variant through a wrapper, beside such a `$ref` (#732)', async () => {
+      // Where this meets #732's reading of a `required` list beside the one union member of an `allOf`: the list
+      // makes the merge where a `$ref` variant's component reaches properties, whatever stands between the
+      // reference and the object — a nullable wrapper, a description around a `$ref`, an alias. A `$ref` member
+      // that says nothing, read in its place, leaves that reading to the union and the list: the merged model
+      // with `name` required, as with the keywords written inline, and the union where no list is written or the
+      // variant reaches no property (`Nick`, a string).
+      const object = { type: 'object', properties: { name: string } };
+      const legacy = openapi === '3.0.3';
+      const components = {
+        MaybeOwner: legacy ? { nullable: true, oneOf: [object] } : { oneOf: [object, { type: 'null' }] },
+        NullableOwner: legacy ? { nullable: true, allOf: [Owner] } : { anyOf: [Owner, { type: 'null' }] },
+        DescribedOwner: { description: 'An owner.', allOf: [Owner] },
+        OwnerAlias: Owner,
+        Nick: string,
+      };
+      const required = ['name'];
+      const union = (name: string) => ({ anyOf: [ref(name), string] });
+      const lines: string[] = [];
+      for (const name of ['Owner', 'MaybeOwner', 'NullableOwner', 'DescribedOwner', 'OwnerAlias', 'Nick']) {
+        const rows: ReadonlyArray<readonly [string, Doc, Doc]> = [
+          ['a text after', { allOf: [union(name), Described], required }, { allOf: [union(name), text], required }],
+          ['a text before', { allOf: [Described, union(name)], required }, { allOf: [text, union(name)], required }],
+          ['a veto', { allOf: [union(name), NotNull], required }, { allOf: [union(name), notNull], required }],
+          [
+            'the list on a member',
+            { allOf: [union(name), { required }, Described] },
+            { allOf: [union(name), { required }, text] },
+          ],
+          // Such a `$ref` as a variant of the union, beside the variant that reaches the properties.
+          [
+            'such a `$ref` a variant',
+            { allOf: [{ anyOf: [Described, ref(name)] }], required },
+            { allOf: [{ anyOf: [text, ref(name)] }], required },
+          ],
+          ['no list', { allOf: [union(name), Described] }, { allOf: [union(name), text] }],
+        ];
+        for (const [label, byRef, inline] of rows) {
+          const spec = await expectOneIr(
+            ownerDoc(openapi, byRef, components),
+            ownerDoc(openapi, inline, components),
+            `${name}, ${label}`,
+          );
+          lines.push(`${name}, ${label}: ${ownerLine(spec)}`);
+        }
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "Owner, a text after: PetOwner { name } "Any owner." <description="Any owner.">
+        Owner, a text before: PetOwner { name } "Any owner." <description="Any owner.">
+        Owner, a veto: PetOwner { name }
+        Owner, the list on a member: PetOwner { name } "Any owner." <description="Any owner.">
+        Owner, such a \`$ref\` a variant: PetOwner { name }
+        Owner, no list: (nullable<Owner> | string) <description="Any owner.">
+        MaybeOwner, a text after: PetOwner { name } "Any owner." <description="Any owner.">
+        MaybeOwner, a text before: PetOwner { name } "Any owner." <description="Any owner.">
+        MaybeOwner, a veto: PetOwner { name }
+        MaybeOwner, the list on a member: PetOwner { name } "Any owner." <description="Any owner.">
+        MaybeOwner, such a \`$ref\` a variant: PetOwner { name }
+        MaybeOwner, no list: (nullable<MaybeOwner> | string) <description="Any owner.">
+        NullableOwner, a text after: PetOwner { name } "Any owner." <description="Any owner.">
+        NullableOwner, a text before: PetOwner { name } "Any owner." <description="Any owner.">
+        NullableOwner, a veto: PetOwner { name }
+        NullableOwner, the list on a member: PetOwner { name } "Any owner." <description="Any owner.">
+        NullableOwner, such a \`$ref\` a variant: PetOwner { name }
+        NullableOwner, no list: (nullable<NullableOwner> | string) <description="Any owner.">
+        DescribedOwner, a text after: PetOwner { name } "Any owner." <description="Any owner.">
+        DescribedOwner, a text before: PetOwner { name } "Any owner." <description="Any owner.">
+        DescribedOwner, a veto: PetOwner { name }
+        DescribedOwner, the list on a member: PetOwner { name } "Any owner." <description="Any owner.">
+        DescribedOwner, such a \`$ref\` a variant: PetOwner { name }
+        DescribedOwner, no list: (nullable<DescribedOwner> | string) <description="Any owner.">
+        OwnerAlias, a text after: PetOwner { name } "Any owner." <description="Any owner.">
+        OwnerAlias, a text before: PetOwner { name } "Any owner." <description="Any owner.">
+        OwnerAlias, a veto: PetOwner { name }
+        OwnerAlias, the list on a member: PetOwner { name } "Any owner." <description="Any owner.">
+        OwnerAlias, such a \`$ref\` a variant: PetOwner { name }
+        OwnerAlias, no list: (nullable<OwnerAlias> | string) <description="Any owner.">
+        Nick, a text after: (string | string) <description="Any owner.">
+        Nick, a text before: (string | string) <description="Any owner.">
+        Nick, a veto: (string | string)
+        Nick, the list on a member: (string | string) <description="Any owner.">
+        Nick, such a \`$ref\` a variant: (unknown | string)
+        Nick, no list: (string | string) <description="Any owner.">"
+      `);
+      expect(warnings()).toEqual([]);
+    });
   });
 
   describe('`saysWhatInstanceIs`', () => {

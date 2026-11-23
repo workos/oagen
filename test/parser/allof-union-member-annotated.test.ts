@@ -718,6 +718,188 @@ describe.each(['3.1.0', '3.0.3'])(
         }
       });
 
+      describe('beside a union whose `$ref` variant reaches its properties through another schema (Greptile)', () => {
+        const owner = object({ name: str });
+        /** `Pet.contact` written as `schema` beside `schemas`: how the field is typed, and the merged model built for it. */
+        const reached = async (schemas: Record<string, unknown>, schema: unknown) => {
+          const { spec, warnings } = await read(petDoc({ contact: schema }, schemas));
+          const merged = spec.models
+            .filter((m) => m.name === 'PetContact')
+            .map((m) => `${m.name} { ${fieldsOf(m).join(', ')} }`);
+          return { type: show(model(spec, 'Pet').fields[0]?.type), merged, warnings };
+        };
+        /** Each spelling of the list beside a union of `Reached` and a primitive. */
+        const listed = (keyword: 'anyOf' | 'oneOf' = 'anyOf'): Array<[string, Doc]> => {
+          const union = { [keyword]: [ref('Reached'), str] };
+          return [
+            ['beside the lone member', { allOf: [union], ...named }],
+            ['beside the `allOf`, with a description member', { allOf: [union, D], ...named }],
+            ['in a member of its own', { allOf: [union, named] }],
+            ['in a member of its own, with a description member', { allOf: [union, named, D] }],
+            [
+              'the `$ref` under a nested union',
+              { allOf: [{ [keyword]: [{ oneOf: [ref('Reached'), int] }, str] }], ...named },
+            ],
+            [
+              'the `$ref` under an `allOf` of the variant',
+              { allOf: [{ [keyword]: [{ allOf: [ref('Reached')] }, str] }], ...named },
+            ],
+          ];
+        };
+
+        it('adds to the object, as it does beside a `$ref` to the object itself: the merged model, `name` required', async () => {
+          const wrapper = { oneOf: [owner, nullVariant] };
+          // Each component reaches `name`; the base merged every one of them, and the first cut of this fix
+          // asked the component as a `$ref` member's is, read no union, and dropped the list with the merge.
+          const reaching: Array<[string, Record<string, unknown>, string]> = [
+            ['the object itself', { Reached: owner }, 'PetContact { name: string }'],
+            ['a nullable wrapper around the object', { Reached: wrapper }, 'PetContact { name: string }'],
+            [
+              'the same wrapper with `anyOf`',
+              { Reached: { anyOf: [owner, nullVariant] } },
+              'PetContact { name: string }',
+            ],
+            ['the `null` variant first', { Reached: { oneOf: [nullVariant, owner] } }, 'PetContact { name: string }'],
+            [
+              '`nullable: true` beside a `oneOf` of one (OAS 3.0)',
+              { Reached: { oneOf: [owner], nullable: true } },
+              'PetContact { name: string }',
+            ],
+            ['a described wrapper', { Reached: { description: 'Maybe.', ...wrapper } }, 'PetContact { name: string }'],
+            [
+              'a nullable wrapper around a `$ref`',
+              { Reached: { oneOf: [ref('Owner'), nullVariant] } },
+              'PetContact { name: string }',
+            ],
+            ['an alias of the object', { Reached: ref('Owner') }, 'PetContact { name: string }'],
+            ['an `allOf` of one `$ref`', { Reached: { allOf: [ref('Owner')] } }, 'PetContact { name: string }'],
+            ['an alias of the wrapper', { Reached: ref('Wrapper'), Wrapper: wrapper }, 'PetContact { name: string }'],
+            [
+              'an `allOf` of one `$ref` to the wrapper',
+              { Reached: { allOf: [ref('Wrapper')] }, Wrapper: wrapper },
+              'PetContact { name: string }',
+            ],
+            ['an `allOf` around the wrapper', { Reached: { allOf: [wrapper] } }, 'PetContact { name: string }'],
+            [
+              'a union of `$ref`s',
+              { Reached: { oneOf: [ref('Owner'), ref('Shelter')] } },
+              'PetContact { name: string, shelterId?: string }',
+            ],
+            [
+              'a union of inline objects',
+              { Reached: { anyOf: [object({ name: str }), object({ id: str })] } },
+              'PetContact { name: string, id?: string }',
+            ],
+            ['a union of one `$ref`', { Reached: { oneOf: [ref('Owner')] } }, 'PetContact { name: string }'],
+            [
+              'a union of the object and a primitive',
+              { Reached: { oneOf: [owner, str] } },
+              'PetContact { name: string }',
+            ],
+            [
+              'a union that names the wrapper',
+              { Reached: { oneOf: [ref('Wrapper'), ref('Shelter')] }, Wrapper: wrapper },
+              'PetContact { name: string, shelterId?: string }',
+            ],
+            [
+              'a wrapper that names itself beside the object',
+              { Reached: { oneOf: [{ allOf: [ref('Reached'), owner] }, nullVariant] } },
+              'PetContact { name: string }',
+            ],
+          ];
+          for (const [label, schemas, merged] of reaching) {
+            for (const keyword of ['anyOf', 'oneOf'] as const) {
+              for (const [spelling, schema] of listed(keyword)) {
+                const beside = await reached(schemas, schema);
+                expect(beside.type, `${label}, ${spelling}`).toBe('PetContact');
+                expect(beside.merged, `${label}, ${spelling}`).toEqual([merged]);
+                expect(beside.warnings, `${label}, ${spelling}`).toEqual([]);
+              }
+            }
+            // With no list beside it the union is the union, with or without the description member.
+            const lone = await reached(schemas, { allOf: [{ anyOf: [ref('Reached'), str] }] });
+            const described = await reached(schemas, { allOf: [{ anyOf: [ref('Reached'), str] }, D] });
+            expect(lone.merged, label).toEqual([]);
+            expect(described.type, label).toBe(lone.type);
+            expect(described.merged, label).toEqual([]);
+          }
+        });
+
+        it('constrains nothing where the merge reads no property through the `$ref`, and the union stands', async () => {
+          const unreached: Array<[string, Record<string, unknown>, string]> = [
+            [
+              'a nullable wrapper around a primitive',
+              { Reached: { oneOf: [str, nullVariant] } },
+              '(nullable<string> | string)',
+            ],
+            ['an object that declares no property', { Reached: { type: 'object' } }, '(Reached | string)'],
+            [
+              'an object with empty `properties`',
+              { Reached: { type: 'object', properties: {} } },
+              '(Reached | string)',
+            ],
+            [
+              'a nullable wrapper around such an object',
+              { Reached: { oneOf: [{ type: 'object' }, nullVariant] } },
+              '(nullable<Reached> | string)',
+            ],
+            ['a union of primitives', { Reached: { oneOf: [str, int] } }, '(Reached | string)'],
+            ['an alias of a primitive', { Reached: ref('Nick') }, '(string | string)'],
+            [
+              'a wrapper that names only itself',
+              { Reached: { oneOf: [ref('Reached'), nullVariant] } },
+              '(nullable<Reached> | string)',
+            ],
+          ];
+          for (const [label, schemas, type] of unreached) {
+            for (const [spelling, schema] of listed().slice(0, 4)) {
+              const beside = await reached(schemas, schema);
+              // The base built `PetContact {  }` for each.
+              expect(beside.type, `${label}, ${spelling}`).toBe(type);
+              expect(beside.merged, `${label}, ${spelling}`).toEqual([]);
+            }
+          }
+        });
+
+        it('`readInlineAllOf` asks the reader the merge flattens a variant with', () => {
+          const schemas = {
+            Owner: owner,
+            Maybe: { oneOf: [owner, { type: 'null' }] },
+            MaybeString: { oneOf: [str, { type: 'null' }] },
+            Aliased: ref('Maybe'),
+            Chosen: { oneOf: [ref('Maybe'), ref('MaybeString')] },
+          } as unknown as Record<string, SchemaObject>;
+          const reading = (name: string, beside: SchemaObject[] = []) => {
+            const members = [{ anyOf: [ref(name), str] } as SchemaObject, ...beside];
+            return readInlineAllOf(members, { allOf: members, required: ['name'] }, schemas);
+          };
+          for (const name of ['Owner', 'Maybe', 'Aliased', 'Chosen']) {
+            expect(reading(name), name).toBe('merged');
+            expect(reading(name, [D]), name).toBe('merged');
+          }
+          expect(reading('MaybeString')).toBe('unwrapped');
+          expect(reading('MaybeString', [D])).toBe('unwrapped');
+          // A component no map answers declares nothing.
+          expect(reading('Missing')).toBe('unwrapped');
+        });
+
+        it('leaves a `$ref` under a union of one, under a nullable wrapper and as a member as the base read it', async () => {
+          // None is a `$ref` variant of a union of two or more: each asks the component as a `$ref` member's
+          // is asked (`contributesProperties`, which reads no union), on the base and here alike.
+          const schemas = { Reached: { oneOf: [owner, nullVariant] } };
+          const before: Array<[Doc, string]> = [
+            [{ allOf: [{ oneOf: [ref('Reached')] }], ...named }, '(nullable<Reached>)'],
+            [{ allOf: [{ oneOf: [ref('Reached'), nullVariant] }], ...named }, 'nullable<Reached>'],
+            [{ allOf: [ref('Reached')], ...named }, 'nullable<Reached>'],
+          ];
+          for (const [schema, type] of before) {
+            const beside = await reached(schemas, schema);
+            expect(beside.type, JSON.stringify(schema)).toBe(type);
+            expect(beside.merged, JSON.stringify(schema)).toEqual([]);
+          }
+        });
+      });
+
       it('the union member writes itself is the member’s own, read with it', async () => {
         const own = { ...contact, required: ['name'] };
         // The base merged the member for the list it writes itself, where the lone member was the union.

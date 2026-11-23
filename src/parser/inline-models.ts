@@ -2464,27 +2464,54 @@ function unionWalkGuard(): (schema: SchemaObject, underUnion: boolean) => boolea
  * `readInlineAllOf`; #732).
  */
 export function declaresInlineProperties(schema: SchemaObject): boolean {
-  return declaresProperties(schema, true);
+  return declaresProperties(schema, () => true);
 }
 
 /**
- * Whether a schema writes object properties itself: `properties` of its
- * own, or of a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
- * depth — `declaresInlineProperties` with no `$ref` counted, wherever it is
- * written. What a `required` list written beside the schema could name
- * without asking a component (`readInlineAllOf`, which asks each `$ref`
- * variant's component apart, `contributesProperties`): a `$ref` variant to
- * a primitive, an array, an enum or a union component declares no property
- * a `required` constrains (#732: the `$ref` counted whatever it named, so
- * `{ allOf: [{ anyOf: [{ $ref: Nick }, { type: 'integer' }] }], required:
- * [name] }` over a string `Nick` was a model with no fields).
+ * Whether a merge would read a property from a schema that declares them
+ * inline as `declaresInlineProperties` reads it — `properties` of its own,
+ * of a nested `allOf` member or of a `oneOf`/`anyOf` variant, at any depth
+ * — with each `$ref` variant of a union of two or more variants counted by
+ * what the merge reads through it (`variantDeclaresProperties`), not
+ * whatever it names. What a `required` list written beside the schema has
+ * to add to (`readInlineAllOf`): a `$ref` variant to a primitive, an
+ * array, an enum, a union of none but those or an object with no property
+ * declares nothing a `required` constrains (#732: the `$ref` counted
+ * whatever it named, so `{ allOf: [{ anyOf: [{ $ref: Nick }, { type:
+ * 'integer' }] }], required: [name] }` over a string `Nick` was a model
+ * with no fields), while one to a component that reaches its properties
+ * through a nullable wrapper, a union or an alias declares them as the
+ * object itself does: `{ allOf: [{ anyOf: [{ $ref: MaybeOwner }, { type:
+ * 'string' }] }], required: [name] }` over `MaybeOwner: { oneOf: [{
+ * properties: { name } }, { type: 'null' }] }` is the merged model with
+ * `name` required, as over `Owner` (Greptile, #732 review: the component
+ * was asked as a `$ref` member's is, `contributesProperties`, which reads
+ * no union, so the list was dropped with the merge).
  */
-function writesInlineProperties(schema: SchemaObject): boolean {
-  return declaresProperties(schema, false);
+function declaresMergedProperties(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  return declaresProperties(schema, (reference) => variantDeclaresProperties(reference, componentSchemas));
 }
 
-/** The one walk `declaresInlineProperties` and `writesInlineProperties` make; `branchReferences` says whether a `$ref` variant of a union of two or more variants counts. */
-function declaresProperties(schema: SchemaObject, branchReferences: boolean): boolean {
+/**
+ * Whether a merge reads a property from `variant`, a `oneOf`/`anyOf`
+ * variant: so when the reader the merge flattens a variant with
+ * (`readVariant`, through `declareVariant`) declares one — the variant's
+ * own, its `allOf` members', those of a nullable wrapper's one variant and
+ * of each branch of a union nested in it, and, through a `$ref`, the
+ * variant itself or one met under it, those the component it names
+ * declares, read the same way. Asked by running that reader, so the two
+ * cannot disagree on what a component reached through a wrapper, a union
+ * or a chain of aliases declares. The component is the document's where no
+ * map is handed in (`documentComponentSchemas`), as the merge reads it.
+ */
+function variantDeclaresProperties(variant: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  const declared = new Map<string, PropertyDeclarations>();
+  readVariant(declared, variant, componentSchemas ?? documentComponentSchemas(), new Set(), new Set());
+  return declared.size > 0;
+}
+
+/** The one walk `declaresInlineProperties` and `declaresMergedProperties` make; `countsReference` says whether a `$ref` variant of a union of two or more variants counts. */
+function declaresProperties(schema: SchemaObject, countsReference: (reference: SchemaObject) => boolean): boolean {
   const enter = unionWalkGuard();
   // `onBranch`: under a variant of a union of two or more non-null
   // variants, where a `$ref` declares what its component declares — the
@@ -2502,8 +2529,9 @@ function declaresProperties(schema: SchemaObject, branchReferences: boolean): bo
     if (!enter(s, onBranch)) return false;
     // On a branch a `$ref` declares what its component declares: nothing,
     // for one to a schema that says nothing of what an instance is, which
-    // brings no object to a merge (`referenceReadInPlace`; #731).
-    if (s.$ref) return branchReferences && onBranch && referenceReadInPlace(s) === undefined;
+    // brings no object to a merge (`referenceReadInPlace`; #731), whatever
+    // the caller counts a `$ref` as.
+    if (s.$ref) return onBranch && referenceReadInPlace(s) === undefined && countsReference(s);
     if (s.properties) return true;
     if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
     return unionAxesOf(s).some((axis) => {
@@ -2684,8 +2712,9 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     adds to it, typed and extracted as the schema itself
  *     (`unwrappedAllOfMember`, which carries the wrapper's limits, flag and
  *     link onto it). A `required` list the wrapper writes beside a lone
- *     member that declares properties (`writesInlineProperties`: its own,
- *     a nested member's or a variant's) adds to
+ *     member the merge would read properties from (`declaresMergedProperties`:
+ *     its own, a nested member's or a variant's, a `$ref` variant's
+ *     component's included) adds to
  *     it: the schema is then the merged model, which reads both lists
  *     (workos/oagen#359 review: the unwrap carried the member's `required`
  *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
@@ -2803,7 +2832,13 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * `{ anyOf: [{ $ref: Nick }, { type: 'integer' }] }` over a string `Nick`
  * it constrains nothing, alone or beside such members (#732: the `$ref`
  * variant counted whatever it named, and the schema was a model with no
- * fields).
+ * fields). What the merge reads through a `$ref` variant of a union of two
+ * or more is asked of the reader it flattens the variant with
+ * (`variantDeclaresProperties`), so a component that reaches its
+ * properties through a nullable wrapper (`MaybeOwner: { oneOf: [{
+ * properties: { name } }, { type: 'null' }] }`, OAS 3.0 `nullable: true`
+ * beside the `oneOf`), a union of its own or a chain of aliases keeps the
+ * list, and the merge, as the object itself does.
  *
  * A `$ref` member to a schema that says nothing of what an instance is
  * (`saysWhatInstanceIs`) — `Described: { description: 'Any owner.' }`,
@@ -2877,20 +2912,70 @@ export function readInlineAllOf(
   // spliced open (`splicedAllOfMembers`; #675), with the `required` such a
   // member writes read as `wrapper`'s own, which carries it once spliced.
   const spliced = splicedAllOfMembers(members, componentSchemas);
-  members = spliced.members;
+  const refs = typingReferences(spliced.members, componentSchemas, wrapper);
+  return readSplicedAllOf(spliced, refs, wrapper, componentSchemas);
+}
+
+/**
+ * How `schema`'s `allOf` is read (`readInlineAllOf`) with, for a
+ * `'reference'`, the `$ref` member it is the reference to
+ * (`allOfReferenceMember`) — both by `componentSchemas`, from one reading
+ * of the members: for a walker that is handed a component map
+ * (`resolveBareSchema`, `componentEntries`), which may be another than the
+ * document's, or one handed where no document is being read.
+ * `allOfReferenceMember` reads the document's components alone, as the
+ * reading made beside it does where no map is handed, so beside a reading
+ * made by another map it named the member that map had ruled out: `{
+ * allOf: [{ $ref: Tag }, { $ref: TagOutput }] }` is the reference to
+ * `TagOutput` by the map in which `TagOutput` extends `Tag` (#733), and
+ * was then read as `Tag`, the first `$ref` written, so a data path under
+ * what `TagOutput` adds resolved to nothing (Greptile, #733 review). The
+ * same goes for a `$ref` read as the keywords in its place (#731): `{
+ * allOf: [{ $ref: Described }, { $ref: Owner }] }` is `Owner` here by the
+ * map that says so. `reference` is `undefined` for any other reading, and
+ * for a `'reference'` that holds no `$ref` (no reading at all).
+ */
+export function readAllOfReference(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): { reading: InlineAllOfReading; reference: SchemaObject | undefined } {
+  const spliced = splicedAllOfMembers(schema.allOf ?? [], componentSchemas);
+  const refs = typingReferences(spliced.members, componentSchemas, schema);
+  const reading = readSplicedAllOf(spliced, refs, schema, componentSchemas);
+  return { reading, reference: reading === 'reference' ? refs[0] : undefined };
+}
+
+/**
+ * `readInlineAllOf`, of members already read as every reader reads them
+ * (`spliced`: `splicedAllOfMembers`) and the `$ref` members among them that
+ * type the schema (`refs`: `typingReferences`), so a reader that names the
+ * reference too (`readAllOfReference`) names the one this reading weighed.
+ */
+function readSplicedAllOf(
+  spliced: ReturnType<typeof splicedAllOfMembers>,
+  refs: readonly SchemaObject[],
+  wrapper: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): InlineAllOfReading {
+  const { members } = spliced;
   const wrapperRequires = (wrapper?.required?.length ?? 0) > 0 || spliced.required.length > 0;
   const conjoins = (member: SchemaObject): boolean => conjoinsObjectMember(member, componentSchemas);
   // A `required` list adds to a member that is no `$ref` as it adds to one:
-  // when the member writes properties itself (`writesInlineProperties`), or
-  // what it composes, or a component its union names, declares properties
-  // the merge would read (`contributesProperties`). A `$ref` variant to a
-  // component that declares none — a primitive, an array, an enum, a union
-  // — gives the list nothing to constrain, whatever union it sits in
-  // (#732) — in a member the readers can read as written
-  // (`isReadableSchema`): one they cannot is left to the reading it had,
-  // where such a variant counted (`declaresInlineProperties`).
+  // when the merge would read a property from it — one it writes itself,
+  // or one a variant of a union of two or more reaches through its `$ref`,
+  // whatever stands between the reference and the object, a nullable
+  // wrapper, a union or an alias (`declaresMergedProperties`) — or what it
+  // composes, or a component its union of one names, declares properties
+  // (`contributesProperties`). A `$ref` variant to a component the merge
+  // reads none from — a primitive, an array, an enum, a union of those —
+  // gives the list nothing to constrain (#732), in a member the readers
+  // can read as written (`isReadableSchema`): one they cannot is left to
+  // the reading it had, where such a variant counted whatever it named
+  // (`declaresInlineProperties`).
   const requiredAddsTo = (member: SchemaObject): boolean =>
-    (isReadableSchema(member) ? writesInlineProperties(member) : declaresInlineProperties(member)) ||
+    (isReadableSchema(member)
+      ? declaresMergedProperties(member, componentSchemas)
+      : declaresInlineProperties(member)) ||
     composesObjectMember(member, componentSchemas) ||
     unionReferencesOf(member).some((reference) => contributesProperties(reference, componentSchemas));
   const requires = wrapperRequires || members.some((s) => (s.required?.length ?? 0) > 0);
@@ -2899,7 +2984,6 @@ export function readInlineAllOf(
   // was read above as the keywords in its place and is none of them (#731),
   // and neither is one to a component another of them already is — the
   // component it names too, or one that extends it (#733).
-  const refs = typingReferences(members, componentSchemas, wrapper);
   if (refs.length > 0) {
     if (members.some(isInlineAllOfMember) || refs.length > 1 || members.some(conjoins)) return 'merged';
     return requires && contributesProperties(refs[0]!, componentSchemas) ? 'merged' : 'reference';
@@ -4347,7 +4431,10 @@ export function splicedAllOfMembers(
  * it (`typingReferences`; #733), so `{ allOf: [{ $ref: Tag }, { $ref:
  * TagOutput }] }` over `TagOutput: { allOf: [{ $ref: Tag }, …] }` names
  * `TagOutput`. A component's own schema names its first `$ref` member, as
- * it did. `undefined` for a schema whose `allOf` holds none.
+ * it did. `undefined` for a schema whose `allOf` holds none. Read by the
+ * document's components, as `readInlineAllOf` reads where it is handed no
+ * map: a walker that is handed one asks `readAllOfReference`, which names
+ * the member by the map it read the `allOf` by.
  */
 export function allOfReferenceMember(schema: SchemaObject): SchemaObject | undefined {
   return typingReferences(spliceNestedAllOf(schema).allOf ?? [], undefined, schema)[0];
