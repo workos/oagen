@@ -41,6 +41,7 @@ import {
   derivedCopy,
   isInlineObjectSchema,
   isNullSchema,
+  isSchemaObject,
   nullableAxisBranch,
   unionFlaggedNullable,
   unwrapNullableField,
@@ -1166,7 +1167,7 @@ export function markContestedTitles(document: unknown): void {
   if (!isRecord(document)) return;
   const components = isRecord(document['components']) ? document['components'] : undefined;
   const schemas = components?.['schemas'];
-  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord));
+  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaObject));
   // What a merged `allOf`'s `$ref` members resolve against: this document's
   // components only, none when it declares none.
   const componentSchemas = isRecord(schemas) ? (schemas as Record<string, SchemaObject>) : {};
@@ -1176,11 +1177,6 @@ export function markContestedTitles(document: unknown): void {
 /** A plain object: the only value that can be a schema or a container of them. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** `isRecord`, typed as a schema for the walks below. */
-function isSchemaRecord(value: unknown): value is SchemaObject {
-  return isRecord(value);
 }
 
 /**
@@ -1221,7 +1217,7 @@ function schemaRootsOf(
   if (document['paths'] && isRecord(responses)) {
     for (const name of Object.keys(responses)) {
       const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
-      if (isSchemaRecord(body)) roots.add(body);
+      if (isSchemaObject(body)) roots.add(body);
     }
   }
   return [...roots];
@@ -1410,7 +1406,9 @@ function markContestedTitlesUnderRoot(
     if (merged) {
       ancestors.add(schema);
       for (const property of merged) {
-        if (mergedRead.has(property)) continue;
+        // A property that is no Schema Object (`metadata: true`) holds no
+        // union to read, and only an object can be remembered as read.
+        if (!isSchemaObject(property) || mergedRead.has(property)) continue;
         mergedRead.add(property);
         walk(property);
       }
@@ -1437,8 +1435,8 @@ function markContestedTitlesUnderRoot(
     for (const [keyword, value] of Object.entries(schema)) {
       if ((keyword === 'properties' || keyword === 'patternProperties') && isRecord(value)) {
         const inherited = keyword === 'patternProperties' ? claims : undefined;
-        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub, inherited);
-      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaRecord(value)) {
+        for (const sub of Object.values(value)) if (isSchemaObject(sub)) walk(sub, inherited);
+      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaObject(value)) {
         walk(value, claims);
       } else if ((keyword === 'allOf' || keyword === 'oneOf' || keyword === 'anyOf') && Array.isArray(value)) {
         // An `allOf`'s members are the ones every reader reads
@@ -1450,7 +1448,7 @@ function markContestedTitlesUnderRoot(
           keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && members.length === 1)
             ? claims
             : undefined;
-        for (const sub of members) if (isSchemaRecord(sub)) walk(sub, inherited);
+        for (const sub of members) if (isSchemaObject(sub)) walk(sub, inherited);
       }
     }
     ancestors.delete(schema);
@@ -3128,13 +3126,34 @@ export function resetCombinedDeclarations(): void {
  * (`sourceDeclaration`) — (workos/oagen#551 memoized the title walk alone;
  * workos/oagen#566: the extractor still got a new object from every merge,
  * and re-entered it without end).
+ *
+ * A declaration the memo cannot hold (`keysMemo`) — a JSON Schema boolean,
+ * `meta: true` beside another member's `meta: { type: 'string' }` — writes
+ * no keyword and adds nothing: the combination is the other declaration
+ * itself, as it is with `{}` in its place, and two of them are the first
+ * (workos/oagen#728: each was handed to the memo, so a property a boolean
+ * declares beside another declaration of it failed the parse with `Invalid
+ * value used as weak map key`).
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  if (!keysMemo(next)) return held;
+  if (!keysMemo(held)) return next;
   let byNext = combinedDeclarations.get(held);
   if (!byNext) combinedDeclarations.set(held, (byNext = new WeakMap()));
   let combined = byNext.get(next);
   if (!combined) byNext.set(next, (combined = combineAfresh(held, next)));
   return combined;
+}
+
+/**
+ * Whether a declaration can key `combinedDeclarations`: any object. A JSON
+ * Schema boolean cannot, nor can a number or a string, and each adds
+ * nothing to the declaration it meets (`combineDeclarations`). A list
+ * written where a schema goes is no Schema Object either (`isSchemaObject`)
+ * but is an object, so it is remembered and combined as it always was.
+ */
+function keysMemo(declaration: unknown): boolean {
+  return typeof declaration === 'object' && declaration !== null;
 }
 
 /** What `combineDeclarations` returns, built anew on every call. */

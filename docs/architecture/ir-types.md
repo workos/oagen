@@ -188,6 +188,40 @@ The `format` field on `PrimitiveType` carries additional type information:
 | `boolean` | (none)      | Boolean           |
 | `unknown` | (none)      | Unknown/any type  |
 
+### Boolean schemas
+
+OAS 3.1 allows a JSON Schema boolean wherever a schema goes: `true` admits every instance, as `{}` does, and `false` admits none. A boolean has no keyword for a reader to ask and is never remembered by one: every reader that keeps what it read by the schema first asks whether the value is a Schema Object at all (`isSchemaObject` in `src/parser/schemas.ts`), so a boolean does not fail the parse wherever it is written, in an OAS 3.0 document too (#728: since #597 every schema was handed to a memo only an object can key, and `true` anywhere but among the members of an `allOf` failed the parse with `Invalid value used as weak map key`).
+
+**`true` is read as `{}` is, wherever it stands**, to the same IR and the same warnings: typed `{ kind: "primitive", type: "unknown" }` where a type is asked of it, and adding nothing where it is one of several declarations.
+
+| `true` written as                                                          | Read as                                                                                                                                                                                              |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a property (`metadata: true`)                                              | the field `metadata: unknown`                                                                                                                                                                        |
+| an array's `items` (`{ type: array, items: true }`)                        | `unknown[]`                                                                                                                                                                                          |
+| a map's values (`{ type: object, additionalProperties: true }`)            | `map<unknown>`                                                                                                                                                                                       |
+| a `oneOf`/`anyOf` variant (`oneOf: [{ type: string }, true]`)              | the variant `unknown` (`string \| unknown`); the only variant, `unknown`; beside a `null` variant, `nullable<unknown>`                                                                               |
+| an `allOf` member                                                          | a member that gives the merged model no field and no limit and has no vote on `null` (see Inline `allOf`)                                                                                            |
+| a property another `allOf` member declares too                             | nothing added: the other declaration types the field                                                                                                                                                 |
+| a request or response body, a webhook or callback payload (`schema: true`) | `unknown`                                                                                                                                                                                            |
+| a parameter's or a response header's `schema`                              | `unknown`                                                                                                                                                                                            |
+| a component (`Anything: true`)                                             | a primitive component (see Primitive components): no model, and every `$ref` to it `unknown` — from a field, `items`, a variant, a body, a parameter — with no vote where an `allOf` member names it |
+
+So `oagen diff` between a document that writes `true` and the same document with `{}` in its place reports nothing.
+
+**`false` is read as it was before #597.** The parser has no type for a schema that admits nothing. A reader that first asks whether a schema is written at all reads `false` as none written; a reader that is handed it for a type reads it as it reads `true`:
+
+| `false` written as                                         | Read as                                                                                                                                                                                                                               |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a property (`metadata: false`)                             | no field, `required` or not                                                                                                                                                                                                           |
+| an array's `items`                                         | `items` not written: on a field, `{ type: array, items: false }` is `unknown`, with the warning an array with no `items` gets                                                                                                         |
+| a request body's, a webhook or callback payload's `schema` | no body                                                                                                                                                                                                                               |
+| a response's `schema`                                      | no body type: `unknown` for the primary response, none for an error, `default` or range response                                                                                                                                      |
+| a parameter's or a response header's `schema`              | `string`, as one that writes no `schema`                                                                                                                                                                                              |
+| a `oneOf`/`anyOf` variant, an `allOf` member               | as `true`, one case apart: the one variant beside a `null` one of a union component (`Value: { oneOf: [false, { type: 'null' }] }`) leaves `Value` the named union of that variant, where `true` there makes it a primitive component |
+| a component (`Anything: false`)                            | as `true`: no model, and every `$ref` to it `unknown`                                                                                                                                                                                 |
+
+A number or a string written where a schema goes is no schema; it does not fail the parse either, and is read as `true` is (`0` and `''` as `false`). A JSON Pointer `$ref` that lands on a boolean (`#/components/schemas/Pet/properties/metadata` over `metadata: true`) names no schema and is typed `unknown` with the unresolved-reference warning (see Schema references).
+
 ### LiteralType
 
 ```typescript
