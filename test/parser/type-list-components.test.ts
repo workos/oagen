@@ -1217,6 +1217,25 @@ describe('#730 a component whose type list names `array` or `object` beside anot
         items: { type: 'object', properties: named, required: 5 },
       },
       'a format that names the component': { type: ['array', 'string'], items: string, format: ref('X') },
+      // No reader throws on these: the items are typed as a model the field
+      // extractor builds for no schema, in a component or in place, so read
+      // as the union the document would name a model it does not hold.
+      'items that are a type list of an array of inline objects': {
+        type: ['array', 'string'],
+        items: { type: ['array', 'integer'], items: { type: 'object', properties: named } },
+      },
+      'items, beside an object, that are a type list of a map of inline objects': {
+        type: ['array', 'object'],
+        properties: named,
+        items: { type: ['object', 'integer'], additionalProperties: { type: 'object', properties: named } },
+      },
+      'items whose property is a type list of an array of inline objects': {
+        type: ['array', 'string'],
+        items: {
+          type: 'object',
+          properties: { tags: { type: ['array', 'string'], items: { type: 'object', properties: named } } },
+        },
+      },
     };
 
     it.each(Object.entries(unread))('leaves %s the model it was', async (_label, x) => {
@@ -1224,6 +1243,26 @@ describe('#730 a component whose type list names `array` or `object` beside anot
       const type = fieldOf(spec, 'Note', 'x').type;
       expect(type.kind === 'nullable' ? type.inner : type).toEqual({ kind: 'model', name: 'X' });
       expect(names(spec)).toEqual(['Note', 'X']);
+      expectNoDanglingReference(spec);
+    });
+
+    it('reads the same items whole once nothing under them is left unbuilt', async () => {
+      // The nested list with primitive items, and the nested array with object items, are read.
+      expect(
+        await table({
+          'a nested list of primitives': {
+            type: ['array', 'string'],
+            items: { type: ['array', 'integer'], items: string },
+          },
+          'a nested array of objects': {
+            type: ['array', 'string'],
+            items: { type: 'array', items: { type: 'object', properties: named } },
+          },
+        }),
+      ).toMatchInlineSnapshot(`
+        "a nested list of primitives: ((string[] | integer)[] | string)
+        a nested array of objects: (XItem[][] | string) ; XItem { name?: string }"
+      `);
     });
 
     it.each([

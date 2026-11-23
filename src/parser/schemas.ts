@@ -6638,10 +6638,11 @@ function typesOf(copies: readonly SchemaObject[]): ReadonlySet<unknown> {
  *     as an array component must declare them): `schemaToTypeRef` types
  *     that copy as unknown, with a warning, so the component stays the
  *     model it was rather than warning at every reference;
- *   - a list whose copies the readers cannot read (`unreadTypeLists`,
+ *   - a list whose copies the readers cannot read whole (`unreadTypeLists`,
  *     decided once per document by `markUnreadTypeLists`): a keyword of
  *     the wrong kind under the array copy's `items`, say, which no reader
- *     was handed while the component was a model;
+ *     was handed while the component was a model, or `items` the readers
+ *     type as a model they do not build;
  *   - a list no entry of which the schema's composition admits
  *     (`typeListCopies` reads that one as written).
  *
@@ -6672,23 +6673,30 @@ function typeListComponentCopies(schema: SchemaObject): SchemaObject[] | undefin
  * so no reader was ever handed what its list's other types carry — the
  * copies themselves, the `items` of its array copy and everything under
  * them — and a document that writes there what those readers do not read
- * (a keyword of the wrong kind at any depth: `items: { enum: true }`,
- * `items: { type: 'object', required: 5 }`, a `format` that is a `$ref`
- * back to the component) parsed all the same. So each candidate's reading
- * is rehearsed here once, silently and leaving no trace (`rehearse`), with
- * the kinds of the document's components decided as every other rehearsal
- * finds them (`decideComponentKinds`): the list is typed as the union of
- * its copies, and every copy that is no object extracted, as each will be,
- * under the component's name. One the readers throw on is recorded, and
- * the component keeps its model — a document that parsed still parses,
- * read as it was — rather than the reading deciding from a list of the
- * shapes it could not make. A document those readers read is unaffected:
- * the rehearsal types nothing the extraction keeps.
+ * parsed all the same: a keyword of the wrong kind at any depth, which
+ * they throw on (`items: { enum: true }`, `items: { type: 'object',
+ * required: 5 }`, a `format` that is a `$ref` back to the component), or
+ * a schema they type without building what it references (`readsWhole`:
+ * `items` that are themselves a type list of an array of inline objects,
+ * whose item model the field extractor builds for no schema, in a
+ * component or in place). So each candidate's reading is rehearsed here
+ * once, silently and leaving no trace (`rehearse`), with the kinds of the
+ * document's components decided as every other rehearsal finds them
+ * (`decideComponentKinds`): the list is typed as the union of its copies,
+ * and every copy that is no object typed and extracted, as each will be,
+ * under the component's name. One the readers throw on, or leave naming a
+ * model nobody builds, is recorded, and the component keeps its model — a
+ * document that parsed still parses, read as it was, with no reference to
+ * a model it does not hold — rather than the reading deciding from a list
+ * of the shapes it could not make. A document those readers read is
+ * unaffected: the rehearsal types nothing the extraction keeps.
  */
 function markUnreadTypeLists(schemas: Record<string, SchemaObject>): boolean {
   let marked = false;
+  const components = new Set(Object.keys(schemas).map((key) => resolveSchemaName(key)));
   for (const [key, schema] of Object.entries(schemas)) {
     let listed: SchemaObject | undefined;
+    let read = false;
     try {
       listed = isSchemaObject(schema) ? typeListSchemaOf(schema) : undefined;
       if (!listed) continue;
@@ -6696,20 +6704,64 @@ function markUnreadTypeLists(schemas: Record<string, SchemaObject>): boolean {
       const copies = typeListComponentCopies(list);
       if (!copies) continue;
       const name = resolveSchemaName(key);
-      rehearse(() => {
+      read = rehearse(() => {
         schemaToTypeRef(list, 'item', name);
-        for (const copy of copies) {
-          if (copy.type === 'object') continue;
-          extractInlineModelsFromProperties({ properties: { item: copy } }, [], name, schemas);
-        }
+        return readsWhole(
+          copies.filter((copy) => copy.type !== 'object'),
+          name,
+          schemas,
+          components,
+        );
       });
     } catch {
-      if (!listed) continue;
-      unreadTypeLists.add(sourceDeclaration(listed));
-      marked = true;
+      read = false;
     }
+    if (read || !listed) continue;
+    unreadTypeLists.add(sourceDeclaration(listed));
+    marked = true;
   }
   return marked;
+}
+
+/**
+ * Whether the readers read `copies` — per-type copies of a component's type
+ * list, typed and extracted as the synthetic property `item` of `name` —
+ * whole: every model the types name, or the models built for them name in
+ * turn, is one the extraction builds (`markUnreadTypeLists`). Read with no
+ * array component and no model component's other types registered
+ * (`withoutArrayComponents`), so a `$ref` to any component is the plain
+ * reference to it: only the names this reading mints are asked about. A
+ * reference to a component (`isComponentModelRef`, or a name a component
+ * resolves to, which a discriminator's mapping can redirect an inline
+ * variant to), one copied from a component's own field
+ * (`isInheritedModelRef`) and one the settle has yet to type
+ * (`isPendingSchemaRef`) name models other passes build.
+ */
+function readsWhole(
+  copies: readonly SchemaObject[],
+  name: string,
+  schemas: Record<string, SchemaObject>,
+  components: ReadonlySet<string>,
+): boolean {
+  return withoutArrayComponents(() => {
+    const models: Model[] = [];
+    const types: TypeRef[] = [];
+    for (const copy of copies) {
+      types.push(schemaToTypeRef(copy, 'item', name));
+      extractInlineModelsFromProperties({ properties: { item: copy } }, models, name, schemas);
+    }
+    const built = new Set(models.map((model) => model.name));
+    let whole = true;
+    for (const type of [...types, ...models.flatMap((model) => collectModelTypeRefs(model))]) {
+      walkTypeRef(type, {
+        model: (ref) => {
+          const elsewhere = isComponentModelRef(ref) || isInheritedModelRef(ref) || isPendingSchemaRef(ref);
+          if (!elsewhere && !built.has(ref.name) && !components.has(ref.name)) whole = false;
+        },
+      });
+    }
+    return whole;
+  });
 }
 
 /**
@@ -11950,6 +12002,7 @@ import {
   extractInlineModelsFromSchemas,
   firstFreeElementContext,
   isContestedTitle,
+  isInheritedModelRef,
   LIFTED_DECLARATION_KEYWORDS,
   mapValueSchema,
   markContestedTitles,
