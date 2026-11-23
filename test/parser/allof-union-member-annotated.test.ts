@@ -936,56 +936,43 @@ describe.each(['3.1.0', '3.0.3'])(
 
     describe('a union member the type builder cannot read as written', () => {
       // The merge reads the object properties of a union's variants and nothing else of them; the type
-      // builder reads every variant and every keyword. So a member it cannot read keeps the reading it had,
-      // and each of these documents parses as it did: the merged model, the unreadable variant unread.
+      // builder reads every variant and every keyword of each. So a member one of whose keywords is
+      // written as another kind of value keeps the reading it had, and each of these documents parses
+      // as it did: the merged model, the unreadable variant unread.
       const kept = ['PetContact { name?: string }'];
 
-      it('keeps the merge for a variant that is no Schema Object, and for a keyword written as another kind of value', async () => {
+      it('keeps the merge for a keyword written as another kind of value, at any depth', async () => {
         const unreadable: Array<[string, Doc]> = [
-          ['a number as a variant', { anyOf: [ref('Owner'), 1] }],
-          ['a string as a variant', { anyOf: [ref('Owner'), 'x'] }],
-          ['a list as a variant', { anyOf: [ref('Owner'), []] }],
           ['an `enum` that is no list', { anyOf: [ref('Owner'), { type: 'string', enum: 'cat' }] }],
+          [
+            'an `enum` that is no list, under the items of a variant',
+            { anyOf: [ref('Owner'), { type: 'array', items: { type: 'string', enum: 'cat' } }] },
+          ],
           ['an `allOf` that is no list, beside a `$ref` variant', { anyOf: [{ ...ref('Owner'), allOf: {} }, str] }],
           [
             '`properties` that are no object, on a variant',
             { anyOf: [ref('Owner'), { type: 'string', properties: [] }] },
           ],
-          ['`items` that are no schema, under a variant', { anyOf: [ref('Owner'), { type: 'array', items: 1 }] }],
           [
             'a `mapping` entry that is no string',
             { oneOf: [ref('Owner'), str], discriminator: { propertyName: 'kind', mapping: { cat: 1 } } },
           ],
         ];
         for (const [label, union] of unreadable) {
+          expect(isReadableSchema(union), label).toBe(false);
           expect(readInlineAllOf([union as SchemaObject, D]), label).toBe('merged');
           const beside = await contactOf({ allOf: [union, D] });
           expect(beside.type, label).toBe('PetContact');
           expect(beside.minted, label).toEqual(kept);
         }
+        // A `required` that is no list on an inline variant, which the merge never read.
+        const inline = { oneOf: [object({ a: str }, { required: true }), str] };
+        expect(readInlineAllOf([inline as SchemaObject, D])).toBe('merged');
+        expect((await contactOf({ allOf: [inline, D] })).minted).toEqual(['PetContact { a?: string }']);
       });
 
-      it.runIf(openapi === '3.1.0')(
-        'keeps it for a boolean schema among the variants, or under one (#728)',
-        async () => {
-          for (const union of [
-            { anyOf: [ref('Owner'), true] },
-            { anyOf: [ref('Owner'), false] },
-            { anyOf: [ref('Owner'), { type: 'array', items: true }] },
-          ]) {
-            expect(readInlineAllOf([union as SchemaObject, D]), JSON.stringify(union)).toBe('merged');
-            const beside = await contactOf({ allOf: [union, D] });
-            expect(beside.type, JSON.stringify(union)).toBe('PetContact');
-            expect(beside.minted, JSON.stringify(union)).toEqual(kept);
-          }
-          // A boolean the readers read where it stands is no obstacle.
-          const closed = { anyOf: [ref('Owner'), { type: 'object', additionalProperties: false }] };
-          expect(readInlineAllOf([closed as SchemaObject, D])).toBe('unwrapped');
-        },
-      );
-
       it('keeps the merge a `required` list made of such a member, alone or beside an annotation', async () => {
-        const union = { anyOf: [ref('Nick'), 1] } as unknown as SchemaObject;
+        const union = { anyOf: [ref('Nick'), { type: 'string', enum: 'cat' }] } as unknown as SchemaObject;
         expect(readInlineAllOf([union], { allOf: [union], required: ['name'] })).toBe('merged');
         expect(readInlineAllOf([union, D], { allOf: [union, D], required: ['name'] })).toBe('merged');
         // Readable, the same union names no object, and the list constrains nothing.
@@ -1000,6 +987,44 @@ describe.each(['3.1.0', '3.0.3'])(
           expect(beside.minted).toEqual(['PetContact {  }']);
         }
       });
+
+      it('reads a variant that is no Schema Object where it stands, as the lone member does (#728)', async () => {
+        // A JSON Schema boolean, or anything else a document holds where a schema goes, writes no keyword
+        // and is `unknown`: the union is readable, and is the union.
+        const variants: Array<[string, Doc, string]> = [
+          ['`true` as a variant', { anyOf: [ref('Owner'), true] }, '(Owner | unknown)'],
+          ['`false` as a variant', { anyOf: [ref('Owner'), false] }, '(Owner | unknown)'],
+          [
+            '`items: true` under a variant',
+            { anyOf: [ref('Owner'), { type: 'array', items: true }] },
+            '(Owner | unknown[])',
+          ],
+          [
+            '`true` under a nested union',
+            { anyOf: [ref('Owner'), { oneOf: [str, true] }] },
+            '(Owner | (string | unknown))',
+          ],
+          ['a property `true` of an inline variant', { oneOf: [object({ a: true }), str] }, '(PetContact | string)'],
+          ['a number as a variant', { anyOf: [ref('Owner'), 1] }, '(Owner | unknown)'],
+          ['a list as a variant', { anyOf: [ref('Owner'), []] }, '(Owner | unknown)'],
+        ];
+        for (const [label, union, type] of variants) {
+          expect(isReadableSchema(union), label).toBe(true);
+          expect(readInlineAllOf([union as SchemaObject, D]), label).toBe('unwrapped');
+          // The base merged each: `PetContact { name? }`, the variant unread.
+          expect((await contactOf({ allOf: [union, D] })).type, label).toBe(type);
+          await expectSameReading(
+            petDoc({ contact: { allOf: [union, D] } }),
+            petDoc({ contact: { allOf: [union], ...D } }),
+            label,
+          );
+        }
+        // A boolean beside the union is a member that says nothing.
+        await expectSameReading(
+          petDoc({ contact: { allOf: [contact, true] } }),
+          petDoc({ contact: { allOf: [contact] } }),
+        );
+      });
     });
   },
 );
@@ -1007,7 +1032,7 @@ describe.each(['3.1.0', '3.0.3'])(
 describe('#732 `isReadableSchema`', () => {
   const owner = ref('Owner');
 
-  it('is true of a Schema Object whose schemas are Schema Objects at every depth', () => {
+  it('is true of a schema whose keywords hold what the readers ask of them, at every depth', () => {
     for (const schema of [
       {},
       str,
@@ -1021,6 +1046,18 @@ describe('#732 `isReadableSchema`', () => {
       { type: 'string', not: { type: 'null' } },
       { oneOf: [owner, str], discriminator: { propertyName: 'kind' } },
       { oneOf: [owner, str], discriminator: { propertyName: 'kind', mapping: { cat: '#/components/schemas/Owner' } } },
+      // A value that is no Schema Object where a schema goes is read as `{}` is (#728).
+      true,
+      false,
+      1,
+      'x',
+      [],
+      { anyOf: [owner, true] },
+      { allOf: [1] },
+      { properties: { a: true } },
+      { type: 'array', items: true },
+      { type: 'object', additionalProperties: 1 },
+      { not: [] },
     ]) {
       expect(isReadableSchema(schema), JSON.stringify(schema)).toBe(true);
     }
@@ -1030,29 +1067,24 @@ describe('#732 `isReadableSchema`', () => {
     expect(isReadableSchema(loop)).toBe(true);
   });
 
-  it('is false of anything else, wherever it is written', () => {
+  it('is false of a keyword written as another kind of value, and of `null` where a schema goes, wherever it is written', () => {
     for (const schema of [
-      true,
-      false,
       null,
-      1,
-      'x',
-      [],
-      { anyOf: [owner, true] },
+      undefined,
       { anyOf: [owner, null] },
       { anyOf: {} },
       { oneOf: 'x' },
-      { allOf: [1] },
-      { allOf: [{ anyOf: [owner, { oneOf: [str, false] }] }] },
+      { allOf: true },
+      { allOf: [{ anyOf: [owner, { oneOf: [str, null] }] }] },
       { properties: null },
       { properties: [] },
-      { properties: { a: true } },
-      { patternProperties: { '^x-': 1 } },
-      { type: 'array', items: true },
-      { type: 'array', items: [] },
+      { properties: 'x' },
+      { properties: { a: null } },
+      { patternProperties: 1 },
+      { type: 'array', items: null },
       { type: 'array', items: { enum: 1 } },
-      { type: 'object', additionalProperties: 1 },
-      { not: [] },
+      { type: 'object', additionalProperties: { required: 'a' } },
+      { not: { anyOf: 1 } },
       { type: 'string', enum: 'cat' },
       { type: 'object', required: true },
       { oneOf: [owner, str], discriminator: 'kind' },
@@ -1061,9 +1093,9 @@ describe('#732 `isReadableSchema`', () => {
     ]) {
       expect(isReadableSchema(schema), JSON.stringify(schema)).toBe(false);
     }
-    // One schema that is not, anywhere under a schema that holds itself.
+    // One keyword that is not, anywhere under a schema that holds itself.
     const loop: SchemaObject = { anyOf: [] };
-    loop.anyOf!.push(loop, { type: 'array', items: true as unknown as SchemaObject });
+    loop.anyOf!.push(loop, { type: 'string', enum: 'cat' } as unknown as SchemaObject);
     expect(isReadableSchema(loop)).toBe(false);
   });
 });

@@ -1196,10 +1196,11 @@ const derivedFrom = new WeakMap<SchemaObject, SchemaObject>();
  * (`sourceDeclaration`; see `derivedFrom`): the one call a reader makes
  * where it spreads a schema into a copy, so the copy is read as that
  * declaration wherever identity decides. Nothing is recorded when `copy`
- * is `source` itself.
+ * is `source` itself, or is no Schema Object (`isSchemaObject`), which
+ * only stands for itself and cannot key the record.
  */
 export function derivedCopy(copy: SchemaObject, source: SchemaObject): SchemaObject {
-  if (copy !== source) derivedFrom.set(copy, sourceDeclaration(source));
+  if (copy !== source && isSchemaObject(copy)) derivedFrom.set(copy, sourceDeclaration(source));
   return copy;
 }
 
@@ -1237,6 +1238,10 @@ export function sourceDeclaration(schema: SchemaObject): SchemaObject {
  * keyword of theirs survives without it. Every copy made here stands for
  * the schema it was spread from (`derivedCopy`), so a reader that guards by
  * identity reads it as that declaration (`sourceDeclaration`).
+ *
+ * A value that is no Schema Object (`isSchemaObject`: a JSON Schema
+ * boolean, `metadata: true`) writes no wrapper and is returned as it
+ * stands, as it folds nothing (`foldSiblingProperties`; #728).
  */
 export function unwrapNullableSchema(
   schema: SchemaObject,
@@ -1693,11 +1698,22 @@ export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set
 /**
  * Whether a value written where a schema goes is a Schema Object: a plain
  * object, the only value with keywords for a reader to ask and the only
- * one a memo can be keyed by. A JSON Schema boolean (`true`, `false`; OAS
+ * one a memo is keyed by. A JSON Schema boolean (`true`, `false`; OAS
  * 3.1) is none, and neither is anything else a document may hold there
- * (`null`, a number, a string, a list). `nullVote` asks it of every schema
- * it is handed, since the members of an `allOf` and the component a `$ref`
- * names are whatever the document wrote.
+ * (`null`, a number, a string, a list). A property, an array's `items`, a
+ * variant, a member, a body's or a parameter's `schema` and the component
+ * a `$ref` names are whatever the document wrote, so every reader that
+ * remembers what it read by the schema asks this first and answers a
+ * value that is none before anything is remembered for it:
+ * `foldSiblingProperties`, which every reader that strips a wrapper goes
+ * through (`unwrapNullableSchema`); `nullVote` and
+ * `wrapperDiscriminatorOf`; the named unions' plans and shapes
+ * (`planNamedUnion`, `namedUnionShapeKey`); `derivedCopy`; the pagination
+ * walk (`collectObjectProperties`) and the title walk
+ * (`markContestedTitles`). `combineDeclarations` asks what its own memo
+ * can hold. #728: only `nullVote` and `wrapperDiscriminatorOf` asked, so
+ * a boolean anywhere but among the members of an `allOf` failed the parse
+ * with `Invalid value used as weak map key`.
  */
 export function isSchemaObject(value: unknown): value is SchemaObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1709,40 +1725,39 @@ const SCHEMA_LIST_KEYWORDS = ['allOf', 'oneOf', 'anyOf'] as const;
 /** The keywords of a Schema Object that hold schemas by name. */
 const SCHEMA_MAP_KEYWORDS = ['properties', 'patternProperties'] as const;
 
-/** The keywords of a Schema Object that hold one schema, which may be a JSON Schema boolean the readers read (`additionalProperties: false`, `not: true`). */
-const SCHEMA_OR_BOOLEAN_KEYWORDS = ['additionalProperties', 'not'] as const;
+/** The keywords of a Schema Object that hold one schema. */
+const SCHEMA_KEYWORDS = ['items', 'additionalProperties', 'not'] as const;
 
 /** The keywords of a Schema Object that hold a list the readers iterate. */
 const LIST_KEYWORDS = ['enum', 'required'] as const;
 
 /**
  * Whether a schema is one the readers that type it can read as written, at
- * every depth: a Schema Object (`isSchemaObject`) whose every keyword that
- * holds schemas holds Schema Objects of the same kind — the members of its
- * `allOf`, `oneOf` and `anyOf`, each a list; its `properties` and
- * `patternProperties`, each an object of them; its `items`; its
- * `additionalProperties` and `not`, which may be a boolean instead — whose
- * `enum` and `required` are lists, and whose `discriminator` is an object
- * with a `mapping` of strings when it writes one. Nothing is followed
- * through a `$ref`: a component is read where it stands. A schema met
- * again on the walk is read once.
+ * every depth: its `allOf`, `oneOf` and `anyOf` are lists; its `properties`
+ * and `patternProperties` objects; its `enum` and `required` lists; its
+ * `discriminator` an object, with a `mapping` of strings when it writes
+ * one; and every schema those keywords hold — a member, a variant, a
+ * property, `items`, `additionalProperties`, `not` — is readable in turn.
+ * A value that is no Schema Object (`isSchemaObject`) where a schema goes
+ * writes no keyword and is read where it stands, as `{}` is: a JSON Schema
+ * boolean (`anyOf: [{ $ref: Owner }, true]`, `items: true`), a number, a
+ * string, a list (workos/oagen#728). `null` is the one value no reader
+ * answers. Nothing is followed through a `$ref`: a component is read where
+ * it stands. A schema met again on the walk is read once.
  *
  * Asked before a schema is handed to a reader it did not reach before, so
  * a document that parsed keeps parsing: the type builder reads every
  * variant of a union and every keyword of each, where the merge of an
- * `allOf` reads the object properties alone, so a variant that is no
- * Schema Object — a JSON Schema boolean (`anyOf: [{ $ref: Owner }, true]`,
- * `items: true` under a variant), which fails the parse wherever the type
- * builder meets one (workos/oagen#728), or anything else a document may
- * hold there — or a keyword written as another kind of value (`enum:
- * 'cat'`, `oneOf: {}`) is read by the merge as nothing and by the type
- * builder not at all. `readInlineAllOf` leaves an `allOf` whose union
+ * `allOf` reads the object properties alone, so a keyword written as
+ * another kind of value under a variant (`enum: 'cat'`, `oneOf: {}`, a
+ * `mapping` entry that is no string) is read by the merge as nothing and
+ * fails the type builder. `readInlineAllOf` leaves an `allOf` whose union
  * member is not readable to the reading it had (workos/oagen#732).
  */
-export function isReadableSchema(schema: unknown): schema is SchemaObject {
+export function isReadableSchema(schema: unknown): boolean {
   const seen = new Set<unknown>();
   const readable = (value: unknown): boolean => {
-    if (!isSchemaObject(value)) return false;
+    if (!isSchemaObject(value)) return value !== null && value !== undefined;
     if (seen.has(value)) return true;
     seen.add(value);
     const written = value as Record<string, unknown>;
@@ -1754,10 +1769,8 @@ export function isReadableSchema(schema: unknown): schema is SchemaObject {
       const named = written[keyword];
       if (named !== undefined && !(isSchemaObject(named) && Object.values(named).every(readable))) return false;
     }
-    if (written.items !== undefined && !readable(written.items)) return false;
-    for (const keyword of SCHEMA_OR_BOOLEAN_KEYWORDS) {
-      const held = written[keyword];
-      if (held !== undefined && typeof held !== 'boolean' && !readable(held)) return false;
+    for (const keyword of SCHEMA_KEYWORDS) {
+      if (written[keyword] !== undefined && !readable(written[keyword])) return false;
     }
     for (const keyword of LIST_KEYWORDS) {
       if (written[keyword] !== undefined && !Array.isArray(written[keyword])) return false;
@@ -4048,8 +4061,19 @@ export function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * the `allOf` of `{ properties: { id } }`, `{ $ref: Owner }` and `{ $ref:
  * Tag }`, as `{ properties: { id }, allOf: [{ $ref: Owner }, { $ref: Tag
  * }] }` does.
+ *
+ * A value that is no Schema Object (`isSchemaObject`) folds nothing and is
+ * returned as it stands, before anything is remembered for it: a JSON
+ * Schema boolean — a property `metadata: true`, `items: true`, a variant
+ * in `oneOf: [{ type: 'string' }, true]`, a body's `schema: true`, a
+ * component `Anything: true` — has no keyword to fold, and only an object
+ * can key the memo. So `true` is typed where it stands as `{}` is,
+ * `unknown` (#728: every schema handed here reached the memo, so since
+ * #597 a boolean anywhere but among the members of an `allOf` failed the
+ * parse with `Invalid value used as weak map key`).
  */
 export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
+  if (!isSchemaObject(schema)) return schema;
   let folded = foldedSchemas.get(schema);
   if (!folded) foldedSchemas.set(schema, (folded = foldAfresh(schema)));
   return folded;
@@ -6019,13 +6043,16 @@ function isPlainObjectSchema(schema: SchemaObject | undefined): boolean {
  * The plan for a named union component, or null for any other schema (see
  * `NamedUnionPlan`). Planned once per extraction (`activeNamedUnionMemo`):
  * the model and the extractor both read it, and building it reads every
- * component and every other union (`namedUnionClaimedShapes`).
+ * component and every other union (`namedUnionClaimedShapes`). A component
+ * that is no Schema Object (`isSchemaObject`: `Anything: true`) is no
+ * union, answered before the memo, which only an object can key.
  */
 function planNamedUnion(
   name: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
 ): NamedUnionPlan | null {
+  if (!isSchemaObject(schema)) return null;
   const memo = activeNamedUnionMemo?.plans.get(schema);
   if (memo && memo.name === name && memo.schemas === schemas) return memo.plan;
   const plan = buildNamedUnionPlan(name, schema, schemas);
@@ -6241,8 +6268,16 @@ function componentModelNames(): ReadonlySet<string> {
   return names;
 }
 
-/** `schemaShapeKey`, hashed once per extraction for the schemas the named-union plans compare. */
+/**
+ * `schemaShapeKey`, hashed once per extraction for the schemas the
+ * named-union plans compare. A component that is no Schema Object
+ * (`isSchemaObject`: `Anything: true`) is hashed each time it is asked,
+ * since only an object can key the memo (#728: a plan claims every
+ * component's shape, so a boolean component beside a named union failed
+ * the parse, referenced or not).
+ */
 function namedUnionShapeKey(schema: SchemaObject): string {
+  if (!isSchemaObject(schema)) return schemaShapeKey(schema);
   const cached = activeNamedUnionMemo?.shapes.get(schema);
   if (cached !== undefined) return cached;
   const key = schemaShapeKey(schema);
@@ -10168,9 +10203,15 @@ export function componentTypeRef(key: string): TypeRef {
   // const: 'cat' }`, `Tag: { type: ['string', 'integer'] }` and `Anything:
   // { description }` were fieldless models, and a `$ref` to each typed as
   // that model while the same schema inline was `'cat'`, `string |
-  // integer` and `unknown`).
+  // integer` and `unknown`). Whatever the component holds: a JSON Schema
+  // boolean declares no type and is a primitive component too
+  // (`Anything: true`, `Anything: false`), so the reference is `unknown`,
+  // asked by whether the key is one, never by whether its value is truthy
+  // (#728: `false` was no primitive here, so before #597, since which it
+  // failed the parse, a `$ref` to it was a reference to a model `Anything`
+  // that no pass builds).
   const primitive = activePrimitiveComponentKeys.has(key) ? component : undefined;
-  if (primitive) return schemaToTypeRef(primitive);
+  if (primitive !== undefined) return schemaToTypeRef(primitive);
   // An alias of an enum component is no model either (#560): the
   // reference is the enum it names, read through the alias as the same
   // schema written inline is — `PetKind: { allOf: [{ $ref: Kind }, {

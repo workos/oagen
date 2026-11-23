@@ -20,6 +20,7 @@ import {
   declaresNull,
   isArraySchema,
   isNullSchema,
+  isSchemaObject,
   nullableAxisBranch,
   resolveComponentSchemaRef,
   resolveSchemaName,
@@ -1029,7 +1030,11 @@ export function collectObjectProperties(
     inherited: CollectedUnion['origin'],
     wrapperDiscriminator?: SchemaObject['discriminator'],
   ): void => {
-    if (seenNodes.has(s)) return;
+    // A node that is no Schema Object (`isSchemaObject`: a JSON Schema
+    // boolean as the body, a member, a variant's branch or a field read in
+    // turn) declares no property and no union, as `{}` declares none, and
+    // only an object can be remembered as read (workos/oagen#728).
+    if (!isSchemaObject(s) || seenNodes.has(s)) return;
     seenNodes.add(s);
     const followed = seenRefs.size;
     // A member's references are followed here first, recorded as the
