@@ -2877,7 +2877,52 @@ export function readInlineAllOf(
   // spliced open (`splicedAllOfMembers`; #675), with the `required` such a
   // member writes read as `wrapper`'s own, which carries it once spliced.
   const spliced = splicedAllOfMembers(members, componentSchemas);
-  members = spliced.members;
+  const refs = typingReferences(spliced.members, componentSchemas, wrapper);
+  return readSplicedAllOf(spliced, refs, wrapper, componentSchemas);
+}
+
+/**
+ * How `schema`'s `allOf` is read (`readInlineAllOf`) with, for a
+ * `'reference'`, the `$ref` member it is the reference to
+ * (`allOfReferenceMember`) — both by `componentSchemas`, from one reading
+ * of the members: for a walker that is handed a component map
+ * (`resolveBareSchema`, `componentEntries`), which may be another than the
+ * document's, or one handed where no document is being read.
+ * `allOfReferenceMember` reads the document's components alone, as the
+ * reading made beside it does where no map is handed, so beside a reading
+ * made by another map it named the member that map had ruled out: `{
+ * allOf: [{ $ref: Tag }, { $ref: TagOutput }] }` is the reference to
+ * `TagOutput` by the map in which `TagOutput` extends `Tag` (#733), and
+ * was then read as `Tag`, the first `$ref` written, so a data path under
+ * what `TagOutput` adds resolved to nothing (Greptile, #733 review). The
+ * same goes for a `$ref` read as the keywords in its place (#731): `{
+ * allOf: [{ $ref: Described }, { $ref: Owner }] }` is `Owner` here by the
+ * map that says so. `reference` is `undefined` for any other reading, and
+ * for a `'reference'` that holds no `$ref` (no reading at all).
+ */
+export function readAllOfReference(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): { reading: InlineAllOfReading; reference: SchemaObject | undefined } {
+  const spliced = splicedAllOfMembers(schema.allOf ?? [], componentSchemas);
+  const refs = typingReferences(spliced.members, componentSchemas, schema);
+  const reading = readSplicedAllOf(spliced, refs, schema, componentSchemas);
+  return { reading, reference: reading === 'reference' ? refs[0] : undefined };
+}
+
+/**
+ * `readInlineAllOf`, of members already read as every reader reads them
+ * (`spliced`: `splicedAllOfMembers`) and the `$ref` members among them that
+ * type the schema (`refs`: `typingReferences`), so a reader that names the
+ * reference too (`readAllOfReference`) names the one this reading weighed.
+ */
+function readSplicedAllOf(
+  spliced: ReturnType<typeof splicedAllOfMembers>,
+  refs: readonly SchemaObject[],
+  wrapper: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): InlineAllOfReading {
+  const { members } = spliced;
   const wrapperRequires = (wrapper?.required?.length ?? 0) > 0 || spliced.required.length > 0;
   const conjoins = (member: SchemaObject): boolean => conjoinsObjectMember(member, componentSchemas);
   // A `required` list adds to a member that is no `$ref` as it adds to one:
@@ -2899,7 +2944,6 @@ export function readInlineAllOf(
   // was read above as the keywords in its place and is none of them (#731),
   // and neither is one to a component another of them already is — the
   // component it names too, or one that extends it (#733).
-  const refs = typingReferences(members, componentSchemas, wrapper);
   if (refs.length > 0) {
     if (members.some(isInlineAllOfMember) || refs.length > 1 || members.some(conjoins)) return 'merged';
     return requires && contributesProperties(refs[0]!, componentSchemas) ? 'merged' : 'reference';
@@ -4347,7 +4391,10 @@ export function splicedAllOfMembers(
  * it (`typingReferences`; #733), so `{ allOf: [{ $ref: Tag }, { $ref:
  * TagOutput }] }` over `TagOutput: { allOf: [{ $ref: Tag }, …] }` names
  * `TagOutput`. A component's own schema names its first `$ref` member, as
- * it did. `undefined` for a schema whose `allOf` holds none.
+ * it did. `undefined` for a schema whose `allOf` holds none. Read by the
+ * document's components, as `readInlineAllOf` reads where it is handed no
+ * map: a walker that is handed one asks `readAllOfReference`, which names
+ * the member by the map it read the `allOf` by.
  */
 export function allOfReferenceMember(schema: SchemaObject): SchemaObject | undefined {
   return typingReferences(spliceNestedAllOf(schema).allOf ?? [], undefined, schema)[0];

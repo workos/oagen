@@ -6754,8 +6754,9 @@ function componentEntries(
   };
   if (bare.$ref) return aliasOf(bare.$ref);
   if (classifyInlineSchema(bare) !== 'allOf' || !bare.allOf) return undefined;
-  const reading = readInlineAllOf(bare.allOf, bare, schemas);
-  if (reading === 'reference') return aliasOf(allOfReferenceMember(bare)?.$ref);
+  // The reference named by `schemas`, the map the `allOf` is read by.
+  const { reading, reference } = readAllOfReference(bare, schemas);
+  if (reading === 'reference') return aliasOf(reference?.$ref);
   if (reading !== 'unwrapped') return undefined;
   const entries = componentEntries(unwrappedAllOfMember(bare), schemas, declares, seen);
   return entries && [schema, ...entries.slice(1)];
@@ -11481,6 +11482,7 @@ import {
   mapValueSchema,
   markContestedTitles,
   materializingMergedAllOfName,
+  readAllOfReference,
   readInlineAllOf,
   unionOfDeclarations,
   unwrappedAllOfMember,

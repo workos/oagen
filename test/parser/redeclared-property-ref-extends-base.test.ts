@@ -9,6 +9,7 @@ import {
   clearSchemaNameTransform,
   declaresNull,
   extractSchemas,
+  isArrayComponentEntry,
   mergeDeclaresNull,
   schemaAdmitsNull,
   schemaToTypeRef,
@@ -18,9 +19,11 @@ import {
   allOfReferenceMember,
   combineDeclarations,
   extendsComponent,
+  readAllOfReference,
   readInlineAllOf,
   typingReferences,
 } from '../../src/parser/inline-models.js';
+import { collectObjectProperties, resolveBareSchema, resolveDataPathArray } from '../../src/parser/pagination.js';
 import type { ApiSpec, Field, Model, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -1717,6 +1720,183 @@ describe('#733 components that share bases many ways are read once', () => {
     // The components themselves are read as they were, every `$ref` member a base.
     expect(modelOf(spec, `A${depth}`)!.bases?.map(show)).toEqual([`A${depth - 1}`]);
     expect(modelOf(spec, `L${depth}`)!.bases?.map(show)).toEqual([`L${depth - 1}`, `R${depth - 1}`]);
+  });
+});
+
+describe('#733 a walker handed a component map names the reference by that map', () => {
+  // Greptile, #733 review: `resolveBareSchema` read the `allOf` by the map it
+  // was handed and then named its `$ref` by the document's components
+  // (`allOfReferenceMember`). Where no document was being read, or one with
+  // other components, an envelope `allOf: [Wide, Narrow]` was the reference
+  // by the map and `Wide`, the first `$ref` written, by the picker — so a
+  // `dataPath` under what `Narrow` adds resolved to nothing, where the two
+  // had been merged and the path found.
+  const Pet = { type: 'object', required: ['id'], properties: { id: string } };
+  const Wide = { type: 'object', properties: { id: string } };
+  const page = { items: { type: 'array', items: ref('Pet') }, has_more: { type: 'boolean' } };
+  const Narrow = all(ref('Wide'), { properties: page });
+  const Described = { description: 'A page.' };
+  const WideName = { description: 'Another name.', ...all(ref('Wide')) };
+  const Pets = { type: 'array', items: ref('Pet') };
+  const map = { Pet, Wide, Narrow, Described, WideName, Pets } as Record<string, SchemaObject>;
+  /** Components by which `Narrow` composes nothing: `Wide` and `Narrow` are two components to merge. */
+  const apart = { ...map, Narrow: { type: 'object', properties: page } } as Record<string, SchemaObject>;
+  const of = (...members: unknown[]) => all(...members) as SchemaObject;
+  /** Envelopes that are `Narrow` by `map`, however `Wide` is written beside it. */
+  const envelopes = (): ReadonlyArray<readonly [string, SchemaObject]> => [
+    ['[Wide, Narrow]', of(at('Wide'), at('Narrow'))],
+    ['[Narrow, Wide]', of(at('Narrow'), at('Wide'))],
+    ['[Wide, Wide, Narrow]', of(at('Wide'), at('Wide'), at('Narrow'))],
+    ['[Narrow, Narrow]', of(at('Narrow'), at('Narrow'))],
+    ['[WideName, Narrow]', of(at('WideName'), at('Narrow'))],
+    ['[Narrow, WideName]', of(at('Narrow'), at('WideName'))],
+    ['[{ allOf: [Wide] }, Narrow]', of(of(at('Wide')), at('Narrow'))],
+    ['[{ allOf: [Wide, Narrow] }]', of(of(at('Wide'), at('Narrow')))],
+    ['[Wide, Narrow], described', { description: 'A page.', ...of(at('Wide'), at('Narrow')) }],
+    ['[Described, Wide, Narrow]', of(at('Described'), at('Wide'), at('Narrow'))],
+    // #731's `$ref` read as the keywords in its place, named by the map as well.
+    ['[Described, Narrow]', of(at('Described'), at('Narrow'))],
+    ['[Narrow, Described]', of(at('Narrow'), at('Described'))],
+  ];
+  const nullable = (): SchemaObject => ({ oneOf: [of(at('Wide'), at('Narrow')), { type: 'null' }] });
+  const expectNarrow = (envelope: SchemaObject, label: string): void => {
+    expect(resolveBareSchema(envelope, map), label).toBe(map.Narrow);
+    expect(resolveDataPathArray(envelope, 'items', map), label).toEqual({ items: Pets.items });
+    expect(Object.keys(collectObjectProperties(envelope, map).properties).sort(), label).toEqual([
+      'has_more',
+      'id',
+      'items',
+    ]);
+  };
+
+  it('with no document being read: the envelope is `Narrow`, and a path under what it adds resolves', () => {
+    for (const [label, envelope] of envelopes()) expectNarrow(envelope, label);
+    expectNarrow(nullable(), 'nullable');
+  });
+
+  it('with another document being read: by the map handed, whichever of the two says one extends the other', () => {
+    within(structuredClone(apart), () => {
+      for (const [label, envelope] of envelopes()) expectNarrow(envelope, label);
+      expectNarrow(nullable(), 'nullable');
+    });
+    // The other way about: the document says `Narrow` extends `Wide` and
+    // the map handed that it does not, so the two are merged as written.
+    within(structuredClone(map), () => {
+      for (const envelope of [of(at('Wide'), at('Narrow')), of(at('Narrow'), at('Wide'))]) {
+        expect(readInlineAllOf(envelope.allOf!, envelope, apart)).toBe('merged');
+        expect(resolveBareSchema(envelope, apart)).toBe(envelope);
+        expect(resolveDataPathArray(envelope, 'items', apart)).toEqual({ items: page.items.items });
+        expect(Object.keys(collectObjectProperties(envelope, apart).properties).sort()).toEqual([
+          'has_more',
+          'id',
+          'items',
+        ]);
+      }
+    });
+  });
+
+  it('`readAllOfReference` names the member the reading weighed, by the map it read by', () => {
+    const named = (schema: SchemaObject, components?: Record<string, SchemaObject>): string => {
+      const { reading, reference } = readAllOfReference(schema, components);
+      return reference ? `${reading} to ${String(reference.$ref).split('/').pop()}` : reading;
+    };
+    expect(named(of(at('Wide'), at('Narrow')), map)).toBe('reference to Narrow');
+    expect(named(of(at('Narrow'), at('Wide')), map)).toBe('reference to Narrow');
+    expect(named(of(at('Wide'), at('Wide')), map)).toBe('reference to Wide');
+    expect(named(of(at('WideName'), at('Narrow')), map)).toBe('reference to Narrow');
+    expect(named(of(of(at('Wide')), at('Narrow')), map)).toBe('reference to Narrow');
+    expect(named(of(at('Described'), at('Narrow')), map)).toBe('reference to Narrow');
+    expect(named(of(at('Described'), at('Wide'), at('Narrow')), map)).toBe('reference to Narrow');
+    // The member itself, as the document writes it.
+    const envelope = of(at('Wide'), at('Narrow'));
+    expect(readAllOfReference(envelope, map).reference).toBe(envelope.allOf![1]);
+    // By components that say otherwise, and by none, the two are a merge and name no reference.
+    expect(named(of(at('Wide'), at('Narrow')), apart)).toBe('merged');
+    expect(named(of(at('Wide'), at('Narrow')))).toBe('merged');
+    expect(named(of(at('Wide'), at('Pet')), map)).toBe('merged');
+    // A component's own `allOf` composes a model of its own (`typingReferences`).
+    const components = { ...map, Both: of(at('Wide'), at('Narrow')) };
+    expect(named(components.Both, components)).toBe('merged');
+    // No reference is named for a member read as the schema, nor where no member is a `$ref`.
+    expect(named(of({ type: 'string' }), map)).toBe('unwrapped');
+    expect(named(of(of(at('Wide'), at('Narrow'))), map)).toBe('unwrapped');
+    expect(named(of({ type: 'string' }, { type: 'integer' }), map)).toBe('reference');
+  });
+
+  it('agrees with `readInlineAllOf` and `allOfReferenceMember` where the map is the document’s', () => {
+    within(map, () => {
+      const rows: ReadonlyArray<readonly [string, SchemaObject]> = [
+        ...envelopes(),
+        ['[Wide, Pet]', of(at('Wide'), at('Pet'))],
+        ['[Pets, Pets]', of(at('Pets'), at('Pets'))],
+        ['[string]', of({ type: 'string' })],
+        ['[string, integer]', of({ type: 'string' }, { type: 'integer' })],
+        ['[Narrow], required', { required: ['id'], ...of(at('Narrow')) }],
+      ];
+      for (const [label, schema] of rows) {
+        const reading = readInlineAllOf(schema.allOf!, schema);
+        const reference = reading === 'reference' ? allOfReferenceMember(schema) : undefined;
+        for (const read of [readAllOfReference(schema), readAllOfReference(schema, map)]) {
+          expect(read.reading, label).toBe(reading);
+          expect(read.reference, label).toBe(reference);
+        }
+      }
+    });
+  });
+
+  it('so does the walk through a component’s aliases, which names what an alias is an alias of', () => {
+    // By `map`, `[Described, Pets]` is the reference to `Pets` (#731), and the alias of an array.
+    expect(isArrayComponentEntry(of(at('Described'), at('Pets')), map)).toBe(true);
+    expect(isArrayComponentEntry(of(at('Pets'), at('Described')), map)).toBe(true);
+    within(structuredClone(apart), () => {
+      expect(isArrayComponentEntry(of(at('Described'), at('Pets')), map)).toBe(true);
+    });
+    // Two `$ref`s one of which the other already is name an object: no array either way.
+    expect(isArrayComponentEntry(of(at('Wide'), at('Narrow')), map)).toBe(false);
+    expect(isArrayComponentEntry(of(at('Narrow'), at('Wide')), map)).toBe(false);
+  });
+
+  describe.each(VERSIONS)('OpenAPI %s', (openapi) => {
+    const list = (schema: unknown) => ({
+      '/things': {
+        get: {
+          operationId: 'listThings',
+          parameters: [{ name: 'page', in: 'query', schema: { type: 'integer' } }],
+          'x-pagination': {
+            strategy: 'page',
+            dataPath: 'items',
+            endOfIteration: { kind: 'hasMore', path: 'has_more' },
+          },
+          responses: { '200': { description: 'OK', ...json(schema) } },
+        },
+      },
+    });
+
+    it('a list operation whose envelope is written as both is paged by what the narrower adds', async () => {
+      const lines: string[] = [];
+      for (const [label, envelope] of envelopes()) {
+        const [operation] = operations(await parse(document(openapi, list(envelope), map)));
+        const paging = operation!.pagination;
+        lines.push(
+          `${label}: ${show(operation!.response)}, ${paging?.strategy} over ${paging?.dataPath} of ${show(paging?.itemType)}`,
+        );
+      }
+      expect(warnings()).toEqual([]);
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "[Wide, Narrow]: Narrow, page over items of Pet
+        [Narrow, Wide]: Narrow, page over items of Pet
+        [Wide, Wide, Narrow]: Narrow, page over items of Pet
+        [Narrow, Narrow]: Narrow, page over items of Pet
+        [WideName, Narrow]: Narrow, page over items of Pet
+        [Narrow, WideName]: Narrow, page over items of Pet
+        [{ allOf: [Wide] }, Narrow]: Narrow, page over items of Pet
+        [{ allOf: [Wide, Narrow] }]: Narrow, page over items of Pet
+        [Wide, Narrow], described: Narrow, page over items of Pet
+        [Described, Wide, Narrow]: Narrow, page over items of Pet
+        [Described, Narrow]: Narrow, page over items of Pet
+        [Narrow, Described]: Narrow, page over items of Pet"
+      `);
+    });
   });
 });
 

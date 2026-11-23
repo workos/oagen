@@ -34,11 +34,10 @@ import {
 } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
 import {
-  allOfReferenceMember,
   annotatedTypingMember,
   combineDeclarations,
   declareVariant,
-  readInlineAllOf,
+  readAllOfReference,
   schemaShapeKey,
   unionOfDeclarations,
   type PropertyDeclarations,
@@ -847,20 +846,14 @@ export function resolveBareSchema(
     return branch;
   });
   if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen, through);
-  const reading =
-    bare.allOf && classifyInlineSchema(bare) === 'allOf'
-      ? readInlineAllOf(bare.allOf, bare, componentSchemas)
-      : undefined;
+  const read =
+    bare.allOf && classifyInlineSchema(bare) === 'allOf' ? readAllOfReference(bare, componentSchemas) : undefined;
   // The member the type builder types the `allOf` as: the one unwrapped —
   // a lone member, or the one typing member beside members that only
   // annotate or limit it (`annotatedTypingMember`; #555) — or the `$ref`
-  // member of a plain reference, whatever is written beside it.
-  const lone =
-    reading === 'unwrapped'
-      ? annotatedTypingMember(bare)
-      : reading === 'reference'
-        ? allOfReferenceMember(bare)
-        : undefined;
+  // member of a plain reference, whatever is written beside it, named by
+  // the components the `allOf` was read by (`readAllOfReference`).
+  const lone = read?.reading === 'unwrapped' ? annotatedTypingMember(bare) : read?.reference;
   if (!lone) return bare;
   through?.(bare);
   return resolveBareSchema(lone, componentSchemas, seen, through);
