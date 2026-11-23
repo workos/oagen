@@ -41,7 +41,7 @@ import {
   type SchemaOrContent,
 } from './operations.js';
 import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
-import { isResponseEntry, resolveResponseRef } from './response-refs.js';
+import { isResponseEntry, resolveResponseRef, responseHeadersOf } from './response-refs.js';
 import { classifyResponseKey } from './responses.js';
 import type { SchemaObject } from './schemas.js';
 
@@ -142,18 +142,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * only a site that is stepped over references (`103: { $ref:
  * '#/components/responses/Hints' }`), is no site of this walk.
  *
- * **A `content` that is no map.** A `content` is read through the readers'
- * own check (`mediaTypesOf`): one that is no object — an array, a string —
- * declares no media type, to the readers and to this walk alike, so
- * `content: [{ schema }]` is a site of neither (#710: the readers typed a
- * media type `0` from it, which this walk left out).
+ * **A `content` or a `headers` that is no map.** A `content` is read
+ * through the readers' own check (`mediaTypesOf`), and so is a response's
+ * `headers` (`responseHeadersOf`): one that is no object — an array, a
+ * string — declares no media type, or no header, to the readers and to this
+ * walk alike, so `content: [{ schema }]` and `headers: [{ schema }]` are
+ * sites of neither (#710, #729: the readers typed a media type `0` and a
+ * header `0` from them, which this walk left out).
  *
  * **Not followed: any other map written as an array.** Every other map is
  * read here as an object that is no array. The readers that iterate
- * `paths`, a `headers` map or a `components` section without asking what it
- * is read one written as an array by its indexes (`headers: [{ schema }]`
- * types a header `0`); this walk leaves such a map out, as both walks it
- * replaces did.
+ * `paths` or a `components` section without asking what it is read one
+ * written as an array by its indexes (`paths: [{ get }]` reads an operation
+ * at the path `0`, `components: { schemas: [{ … }] }` a model `0`); this
+ * walk leaves such a map out, as both walks it replaces did.
  */
 export function readSchemaSites(
   document: Record<string, unknown>,
@@ -283,12 +285,16 @@ export function readSchemaSites(
    * alone the later declaration is the header (#295), and a `Content-Type`
    * header, which OpenAPI says to ignore, is skipped by its key, whatever
    * its `$ref` leads to (`isIgnoredResponseHeader`, #540). Nothing types the
-   * dropped declaration or the ignored header.
+   * dropped declaration or the ignored header. A `headers` that is no
+   * object is no map and declares no header, as to the reader
+   * (`responseHeadersOf`, #729), and an entry that is no object is no
+   * Header Object, which the reader skips and `follow` reads nothing from.
    */
   const responseHeaders = (headers: unknown): void => {
-    if (!isRecord(headers)) return;
+    const map = responseHeadersOf(headers);
+    if (map === undefined) return;
     const declared = new Map<string, unknown>();
-    for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
+    for (const [name, header] of Object.entries(map)) declared.set(foldHeaderName(name), header);
     for (const [name, header] of declared) {
       if (isIgnoredResponseHeader(name)) continue;
       const resolved = follow(header, 'headers');
