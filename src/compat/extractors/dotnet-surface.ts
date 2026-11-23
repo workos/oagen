@@ -13,7 +13,7 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { CSharpClass, CSharpEnum } from './dotnet-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Surface builder
@@ -50,8 +50,7 @@ export function buildSurface(
           passingStyle: 'named' as const,
         }));
 
-        if (!methods[method.name]) methods[method.name] = [];
-        methods[method.name].push({
+        overloadsOf(methods, method.name).push({
           name: method.name,
           params,
           returnType: method.returnType,

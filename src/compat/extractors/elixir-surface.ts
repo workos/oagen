@@ -9,7 +9,7 @@
 
 import type { ApiClass, ApiMethod, ApiParam, ApiInterface, ApiField, ApiEnum } from '../types.js';
 import type { ElixirStruct, ElixirFunction, ElixirEnumModule, ElixirTypeSpec } from './elixir-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -143,8 +143,7 @@ export function buildSurface(
         passingStyle: func.paramStyles[i] ?? ('positional' as const),
       }));
 
-      if (!methods[func.name]) methods[func.name] = [];
-      methods[func.name].push({
+      overloadsOf(methods, func.name).push({
         name: func.name,
         params,
         returnType: 'any',

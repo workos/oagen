@@ -17,7 +17,7 @@ import type {
 import type { CompatSnapshot } from '../ir.js';
 import { apiSurfaceToSnapshot } from '../ir.js';
 import { nodeHints } from '../language-hints.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, overloadsOf } from './shared.js';
 
 export const nodeExtractor: Extractor = {
   language: 'node',
@@ -278,10 +278,10 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
     const callSignatures = propType.getCallSignatures();
 
     if (callSignatures.length > 0) {
-      if (!methods[prop.name]) methods[prop.name] = [];
+      const overloads = overloadsOf(methods, prop.name);
       // Extract ALL overloads, not just the first
       for (const sig of callSignatures) {
-        methods[prop.name].push({
+        overloads.push({
           name: prop.name,
           params: sig.getParameters().map((p) => extractParam(p, checker)),
           returnType: checker.typeToString(sig.getReturnType()),

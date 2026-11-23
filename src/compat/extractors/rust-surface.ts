@@ -20,7 +20,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { RustStruct, RustEnum, RustFunc, RustTrait, RustTypeAlias as RustTypeAliasType } from './rust-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,8 +93,7 @@ export function buildSurface(
           passingStyle: 'positional' as const,
         }));
         const returnType = unwrapResultType(fn.returnType);
-        if (!apiMethods[fn.name]) apiMethods[fn.name] = [];
-        apiMethods[fn.name].push({
+        overloadsOf(apiMethods, fn.name).push({
           name: fn.name,
           params,
           returnType: rustTypeToString(returnType),
@@ -154,8 +153,7 @@ export function buildSurface(
         optional: p.type.startsWith('Option<'),
       }));
       const returnType = unwrapResultType(fn.returnType);
-      if (!apiMethods[fn.name]) apiMethods[fn.name] = [];
-      apiMethods[fn.name].push({
+      overloadsOf(apiMethods, fn.name).push({
         name: fn.name,
         params,
         returnType: rustTypeToString(returnType),
