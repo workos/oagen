@@ -1196,6 +1196,33 @@ describe('#728 what stays as it was', () => {
     expect(render((await read(pointer({}))).spec)).toBe(render(reading.spec));
   });
 
+  it('types a header whose `schema` is a boolean beside a header that is one itself, which is no Header Object (#729)', async () => {
+    // Where the two fixes meet: a boolean where a Header Object goes is skipped with a warning (#729), and a
+    // boolean where the header's schema goes is the schema.
+    const reading = await read({
+      openapi: '3.1.0',
+      info: { title: 'Repro', version: '1.0.0' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: {
+              '200': {
+                description: 'OK',
+                ...json({ type: 'array', items: true }),
+                headers: { 'X-Skipped': true, 'X-Any': { schema: true }, 'X-None': { schema: false } },
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(render(reading.spec)).toBe('listPets() -> unknown[] headers[X-Any: unknown, X-None: string]');
+    expect(reading.warnings).toEqual([
+      '[oagen] Warning: the response header "X-Skipped" of listPets is not a Header Object (true); skipping it.',
+    ]);
+  });
+
   it('reads `null` as a property as it reads `false` there: no field', async () => {
     expect(render(await parse(document({ Pet: pet({ metadata: null }) })))).toBe('Pet { name?: string }');
   });
