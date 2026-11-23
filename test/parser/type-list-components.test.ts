@@ -1394,7 +1394,7 @@ describe('#730 a component whose type list names `array` or `object` beside anot
   });
 
   describe('beside a boolean schema, a `$ref` that annotates and an annotated union member', () => {
-    // Where this reading meets #728, #731 and #732.
+    // Where this reading meets #728, #731, #732 and #733.
     const fields = (spec: ApiSpec): string[] =>
       modelOf(spec, 'Note').fields.map(
         (field) => `${field.name}: ${show(field.type)}${field.description ? ` "${field.description}"` : ''}`,
@@ -1512,6 +1512,59 @@ describe('#730 a component whose type list names `array` or `object` beside anot
       `);
       expectNoDanglingReference(spec);
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('stays the merge where a second `$ref` names a component the first already is', async () => {
+      // #733 reads `{ allOf: [{ $ref: Alias }, { $ref: Base }] }` as the
+      // reference to `Alias` over plain objects alone. Over a component that
+      // admits another type it is the merge it was: the model the merge
+      // builds and nothing more, as any `allOf` that merges the component is.
+      const spec = await parse({
+        Note: {
+          type: 'object',
+          properties: {
+            plain: { allOf: [ref('PlainAlias'), ref('Plain')] },
+            twice: { allOf: [ref('OwnerAlias'), ref('Owner')] },
+            // Two `$ref`s to an array component merge into a fieldless model, a type list or not.
+            tagsTwice: { allOf: [ref('TagsAlias'), ref('Tags')] },
+            arrayTwice: { allOf: [ref('NamesAlias'), ref('Names')] },
+            component: ref('Twice'),
+            alias: ref('OwnerAlias'),
+          },
+        },
+        Plain: { type: 'object', properties: named },
+        PlainAlias: { allOf: [ref('Plain')] },
+        Owner: OWNER,
+        OwnerAlias: { allOf: [ref('Owner')] },
+        Tags: TAGS,
+        TagsAlias: { allOf: [ref('Tags')] },
+        Names: { type: 'array', items: string },
+        NamesAlias: { allOf: [ref('Names')] },
+        Twice: { allOf: [ref('OwnerAlias'), ref('Owner')] },
+      });
+      expect(fields(spec)).toMatchInlineSnapshot(`
+        [
+          "plain: PlainAlias",
+          "twice: NoteTwice",
+          "tagsTwice: NoteTagsTwice",
+          "arrayTwice: NoteArrayTwice",
+          "component: Twice",
+          "alias: (OwnerAlias | string)",
+        ]
+      `);
+      expect(spec.models.filter(({ name }) => name !== 'Note').map(showModel)).toMatchInlineSnapshot(`
+        [
+          "Plain { name?: string }",
+          "PlainAlias { name?: string } bases [Plain]",
+          "Owner { name?: string }",
+          "OwnerAlias { name?: string } bases [Owner]",
+          "Twice { name?: string } bases [OwnerAlias, Owner]",
+          "NoteTwice { name?: string }",
+          "NoteTagsTwice {  }",
+          "NoteArrayTwice {  }",
+        ]
+      `);
+      expectNoDanglingReference(spec);
     });
 
     it('keeps the reference whole as a variant of a union member beside annotations', async () => {
