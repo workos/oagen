@@ -12,7 +12,7 @@ import { phpExtractor } from '../../../src/compat/extractors/php.js';
 import { pythonExtractor } from '../../../src/compat/extractors/python.js';
 import { rubyExtractor } from '../../../src/compat/extractors/ruby.js';
 import { rustExtractor } from '../../../src/compat/extractors/rust.js';
-import { overloadsOf } from '../../../src/compat/extractors/shared.js';
+import { overloadsOf, sortRecord } from '../../../src/compat/extractors/shared.js';
 
 /**
  * Every object inherits `toString`, `valueOf` and `constructor`, and all three
@@ -360,5 +360,69 @@ describe('overloadsOf', () => {
     overloadsOf(methods, 'describe').push('third');
 
     expect(methods).toEqual({ toString: ['first', 'second'], describe: ['third'] });
+  });
+});
+
+/**
+ * `__proto__` is a legal method name too, and the one key that assignment
+ * cannot add to a record: `record['__proto__'] = value` goes to a setter every
+ * object inherits, which replaces the record's prototype and adds no key.
+ *
+ * PHP and Python are absent: their parsers drop the name before any method is
+ * grouped. PHP's skips every method that starts with `__` except
+ * `__construct`, and Python's every method that starts with `_` except
+ * `__init__`.
+ */
+const protoLanguages = ['dotnet', 'elixir', 'ios', 'kotlin', 'node', 'ruby', 'rust'];
+
+/** The same sources, with the method called `from` called `to` instead. */
+function renameMethod(files: Record<string, string>, from: string, to: string): Record<string, string> {
+  return Object.fromEntries(Object.entries(files).map(([path, source]) => [path, source.replaceAll(from, to)]));
+}
+
+/** Each of the record's own method names with the names of its overloads, in key order. */
+function overloadNames(methods: Record<string, { name: string }[]>): [string, string[]][] {
+  return Object.entries(methods).map(([name, overloads]) => [name, overloads.map((overload) => overload.name)]);
+}
+
+describe('a method called __proto__', () => {
+  it.each(protoLanguages)('%s: extracts it as an own key that the written surface keeps', async (language) => {
+    const { extractor, classes, files } = sdks[language];
+    const surface = await extractor.extract(writeSdk(language, renameMethod(files, 'valueOf', '__proto__')));
+    const written = JSON.parse(JSON.stringify(surface)) as typeof surface;
+
+    const expected = [
+      ['__proto__', ['__proto__']],
+      ['describe', ['describe']],
+      ['toString', ['toString']],
+    ];
+    for (const className of classes) {
+      expect(overloadNames(surface.classes[className].methods)).toEqual(expected);
+      expect(overloadNames(written.classes[className].methods)).toEqual(expected);
+    }
+  });
+
+  it('overloadsOf starts its list under an own key and leaves the prototype alone', () => {
+    const methods: Record<string, string[]> = {};
+
+    overloadsOf(methods, '__proto__').push('first');
+    overloadsOf(methods, '__proto__').push('second');
+
+    expect(Object.entries(methods)).toEqual([['__proto__', ['first', 'second']]]);
+    expect(Object.getPrototypeOf(methods)).toBe(Object.prototype);
+  });
+
+  it('sortRecord keeps the key and its value, in sorted order', () => {
+    // JSON.parse gives the record an own `__proto__` key, as reading a written surface does.
+    const record = JSON.parse('{"zeta":["z"],"__proto__":["p"],"alpha":["a"]}') as Record<string, string[]>;
+
+    const sorted = sortRecord(record);
+
+    expect(Object.entries(sorted)).toEqual([
+      ['__proto__', ['p']],
+      ['alpha', ['a']],
+      ['zeta', ['z']],
+    ]);
+    expect(Object.getPrototypeOf(sorted)).toBe(Object.prototype);
   });
 });
