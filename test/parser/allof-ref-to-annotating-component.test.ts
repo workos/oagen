@@ -446,6 +446,78 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
       `);
     });
 
+    it('reads a schema two `$ref`s under one wrapper name where the document first reaches it', async () => {
+      // A schema stands once under a wrapper, and what stands first is what the inline spelling writes first:
+      // the members in order, each wrapper opened before the member after it. (Greptile, #739 review: the
+      // members of a wrapper were all placed before the first was opened, so the `D` under `B` found `D`
+      // standing and `B`'s text and pattern came first, where the same members written out give `D`'s.)
+      const D = { description: 'D', pattern: '^D' };
+      const b = { description: 'B', pattern: '^B' };
+      const c = { description: 'C', pattern: '^C' };
+      const rows: ReadonlyArray<readonly [string, Doc, unknown[], unknown[]]> = [
+        [
+          'a wrapper first, then the schema it names',
+          { D, B: { allOf: [ref('D'), b] }, A: { allOf: [ref('B'), ref('D')] } },
+          [Owner, ref('A')],
+          [Owner, { allOf: [{ allOf: [D, b] }, D] }],
+        ],
+        [
+          'the schema first, then a wrapper that names it',
+          { D, B: { allOf: [b, ref('D')] }, A: { allOf: [ref('D'), ref('B')] } },
+          [Owner, ref('A')],
+          [Owner, { allOf: [D, { allOf: [b, D] }] }],
+        ],
+        [
+          'two wrappers that name it',
+          { D, B: { allOf: [b, ref('D')] }, C: { allOf: [ref('D'), c] }, A: { allOf: [ref('B'), ref('C')] } },
+          [Owner, ref('A')],
+          [Owner, { allOf: [{ allOf: [b, D] }, { allOf: [D, c] }] }],
+        ],
+        [
+          'two wrappers that name it, the other way round',
+          { D, B: { allOf: [b, ref('D')] }, C: { allOf: [ref('D'), c] }, A: { allOf: [ref('C'), ref('B')] } },
+          [Owner, ref('A')],
+          [Owner, { allOf: [{ allOf: [D, c] }, { allOf: [b, D] }] }],
+        ],
+        [
+          'beside the `$ref`, not under a wrapper',
+          { D, B: { allOf: [ref('D'), b] } },
+          [Owner, ref('B'), ref('D')],
+          [Owner, { allOf: [D, b] }, D],
+        ],
+        [
+          'under a wrapper written inline',
+          { D, B: { allOf: [ref('D'), b] } },
+          [Owner, { allOf: [ref('B'), ref('D')] }],
+          [Owner, { allOf: [{ allOf: [D, b] }, D] }],
+        ],
+        [
+          'through an alias of the wrapper',
+          { D, B: { allOf: [ref('D'), b] }, Alias: ref('B'), A: { allOf: [ref('Alias'), ref('D')] } },
+          [Owner, ref('A')],
+          [Owner, { allOf: [{ allOf: [D, b] }, D] }],
+        ],
+      ];
+      const lines: string[] = [];
+      for (const [label, schemas, byRef, inline] of rows) {
+        const spec = await expectOneIr(
+          ownerDoc(openapi, { allOf: byRef }, schemas),
+          ownerDoc(openapi, { allOf: inline }, schemas),
+          label,
+        );
+        lines.push(`${label}: ${ownerLine(spec)}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "a wrapper first, then the schema it names: nullable<Owner> <description="D" constraints={"pattern":"^D"}>
+        the schema first, then a wrapper that names it: nullable<Owner> <description="D" constraints={"pattern":"^D"}>
+        two wrappers that name it: nullable<Owner> <description="B" constraints={"pattern":"^B"}>
+        two wrappers that name it, the other way round: nullable<Owner> <description="D" constraints={"pattern":"^D"}>
+        beside the \`$ref\`, not under a wrapper: nullable<Owner> <description="D" constraints={"pattern":"^D"}>
+        under a wrapper written inline: nullable<Owner> <description="D" constraints={"pattern":"^D"}>
+        through an alias of the wrapper: nullable<Owner> <description="D" constraints={"pattern":"^D"}>"
+      `);
+    });
+
     it('reads it so wherever it stands among the members, and however many there are', async () => {
       const schemas = { Limits: { minProperties: 1 } };
       expect(
@@ -1275,6 +1347,11 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
         { description: 'Outer.' },
         { minProperties: 1 },
       ]);
+      // …where the document first reaches it: a wrapper is opened before the member after it.
+      const inlineOfLimits: SchemaObject = { pattern: '^B' };
+      components.First = { allOf: [at('Described'), inlineOfLimits] };
+      components.Both = { allOf: [at('First'), at('Described')] };
+      expect(spliced([at('Pet'), at('Both')]).members).toEqual([at('Pet'), Described, inlineOfLimits]);
       // Where no member names a schema that says what an instance is, nothing is read in place.
       const alone = [at('Described'), { deprecated: true }];
       expect(spliced(alone)).toEqual({ members: alone, required: [], spliced: false });

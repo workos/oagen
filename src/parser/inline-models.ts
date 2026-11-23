@@ -3970,20 +3970,12 @@ let referencesInPlace = new WeakMap<SchemaObject, readonly SchemaObject[] | null
  * (`annotatingAllOfMembers`) asks the schema such a `$ref` names what it
  * asks a member written inline.
  *
- * `standing`, where given, holds the schemas already standing in place
- * under the member being opened (`bareAllOfParts`), and each is placed
- * once there: JSON Schema applies `{ allOf: [X, X] }` as it applies `{
- * allOf: [X] }`, so a schema two `$ref`s under one wrapper name — two of
- * its members, or two wrappers on the way — adds nothing the second time.
- * So opening a member is as long as the schemas it reaches are many,
- * however they name each other: `A1: { allOf: [{ $ref: A0 }, { $ref: A0 }]
- * }`, `A2` the same over `A1`, and so on is read once per component, not
- * twice per level.
+ * Each `$ref` is read by itself here, so a schema two of the members name
+ * stands in each one's place, as the same keywords written twice do.
  */
 function referencesReadInPlace(
   members: readonly SchemaObject[],
   componentSchemas: Record<string, SchemaObject> | undefined,
-  standing?: Set<SchemaObject>,
 ): readonly SchemaObject[] {
   // An `allOf` that holds no list has no member to read in place, and is left to the readers as it was.
   if (!Array.isArray(members)) return members;
@@ -3991,16 +3983,7 @@ function referencesReadInPlace(
   members.forEach((member, index) => {
     const parts = referenceReadInPlace(member, componentSchemas);
     if (parts !== undefined) read ??= members.slice(0, index);
-    if (read === undefined) return;
-    if (parts === undefined) {
-      read.push(member);
-      return;
-    }
-    for (const part of parts) {
-      if (standing?.has(part)) continue;
-      standing?.add(part);
-      read.push(part);
-    }
+    read?.push(...(parts ?? [member]));
   });
   return read ?? members;
 }
@@ -4028,6 +4011,29 @@ function referencesReadInPlace(
  * members of a bare `allOf`": a conjunction of two declarations reads its
  * parts by it (`conjunctionMembers`), and every reader of an inline
  * `allOf` its members (`splicedAllOfMembers`; workos/oagen#675).
+ *
+ * Where a member of the `allOf` being read names a schema that says what
+ * an instance is (`inPlace`: `namesTypedSchema`, decided once for that
+ * `allOf` and handed down), a `$ref` among the members of a wrapper being
+ * opened to a schema that says nothing of it is the keywords written in
+ * its place (`referenceReadInPlace`; workos/oagen#731), a wrapper among
+ * them opened in turn. `standing` holds the schemas already standing in
+ * place under the member being opened, and each stands there once, where
+ * the document first reaches it, members in order and each wrapper before
+ * the member after it: JSON Schema applies `{ allOf: [X, X] }` as it
+ * applies `{ allOf: [X] }`, so a schema two `$ref`s under one wrapper name
+ * — two of its members, or two wrappers on the way — adds nothing the
+ * second time. So opening a member is as long as the schemas it reaches
+ * are many, however they name each other (`A1: { allOf: [{ $ref: A0 }, {
+ * $ref: A0 }] }`, `A2` the same over `A1`, and so on is read once per
+ * component, not twice per level), and what stands first is what the
+ * inline spelling writes first: with `D: { description: 'D' }`, `B: {
+ * allOf: [{ $ref: D }, { description: 'B' }] }` and `A: { allOf: [{ $ref:
+ * B }, { $ref: D }] }`, a `$ref` to `A` reads `D`'s text, then `B`'s, as
+ * `allOf: [{ allOf: [D, { description: 'B' }] }, D]` written out does
+ * (Greptile, #739 review: the members of a wrapper were all placed before
+ * the first of them was opened, so the `D` under `B` found `D` standing
+ * already and `B`'s text came first).
  */
 function bareAllOfParts(
   members: readonly SchemaObject[],
@@ -4038,39 +4044,43 @@ function bareAllOfParts(
 ): { members: SchemaObject[]; required: string[]; spliced: boolean } {
   const out: SchemaObject[] = [];
   const required: string[] = [];
-  // Where a member of the `allOf` being read names a schema that says
-  // what an instance is (`inPlace`: `namesTypedSchema`, decided once for
-  // that `allOf` and handed down), a `$ref` to a schema that says nothing
-  // of it is the keywords written in its place (`referencesReadInPlace`;
-  // #731), a wrapper among them opened as one written here is, and the
-  // `$ref`s under it read the same way.
-  const read = inPlace ? referencesReadInPlace(members, componentSchemas, standing) : members;
-  let spliced = read !== members;
+  let spliced = false;
   const requires = (names: readonly string[] | undefined): void => {
     for (const name of names ?? []) if (!required.includes(name)) required.push(name);
   };
-  for (const member of read) {
-    // What comes to stand in place under one member, each schema once
-    // (`referencesReadInPlace`): the set of the member being opened above,
-    // or one of this member's own.
-    const under = inPlace ? (standing ?? new Set<SchemaObject>()) : undefined;
-    const placed = under?.size ?? 0;
-    const inner = splicesOpen(member)
-      ? bareAllOfParts(member.allOf ?? [], opens, componentSchemas, inPlace, under)
-      : undefined;
-    if (inner === undefined || !opens(member, inner.members)) {
-      // A wrapper left closed keeps what its own `allOf` reads to itself:
-      // nothing under it stands in the member being opened.
-      if (under && under.size > placed) for (const schema of [...under].slice(placed)) under.delete(schema);
-      out.push(member);
-      continue;
+  for (const written of members) {
+    // A `$ref` to a schema that says nothing of what an instance is: the
+    // parts written in its place, each read before the member after it.
+    const parts = inPlace ? referenceReadInPlace(written, componentSchemas) : undefined;
+    if (parts !== undefined) spliced = true;
+    for (const member of parts ?? [written]) {
+      // A part that stands under the member being opened already adds
+      // nothing more; one that does not stands from here on.
+      if (parts !== undefined && standing !== undefined) {
+        if (standing.has(member)) continue;
+        standing.add(member);
+      }
+      // What comes to stand under this member: the set of the member
+      // being opened above, or one of this member's own.
+      const under = inPlace ? (standing ?? new Set<SchemaObject>()) : undefined;
+      const placed = under?.size ?? 0;
+      const inner = splicesOpen(member)
+        ? bareAllOfParts(member.allOf ?? [], opens, componentSchemas, inPlace, under)
+        : undefined;
+      if (inner === undefined || !opens(member, inner.members)) {
+        // A wrapper left closed keeps what its own `allOf` reads to
+        // itself: nothing under it stands in the member being opened.
+        if (under && under.size > placed) for (const schema of [...under].slice(placed)) under.delete(schema);
+        out.push(member);
+        continue;
+      }
+      spliced = true;
+      requires(member.required);
+      const keywords = declarationKeywords(member);
+      if (Object.keys(keywords).length > 0) out.push(keywords);
+      out.push(...inner.members);
+      requires(inner.required);
     }
-    spliced = true;
-    requires(member.required);
-    const keywords = declarationKeywords(member);
-    if (Object.keys(keywords).length > 0) out.push(keywords);
-    out.push(...inner.members);
-    requires(inner.required);
   }
   return { members: out, required, spliced };
 }
