@@ -227,6 +227,8 @@ describe('#715 an `allOf` member that is a `$ref` to a component that only annot
         ['a union of bare limits', { anyOf: [{ required: ['name'] }, { maxProperties: 9 }] }],
         ['`items` that say nothing', { items: {} }],
       ];
+      // Since #731 the `$ref` is read as the component's keywords for everything they say, so the two spellings
+      // agree on the limit as well (the limit stayed on the component, and `oagen diff` exited 1 for those rows).
       const lines: string[] = [];
       for (const [label, component] of components) {
         // Both documents hold the component; only the member's spelling differs.
@@ -241,13 +243,13 @@ describe('#715 an `allOf` member that is a `$ref` to a component that only annot
       expect(lines.join('\n')).toMatchInlineSnapshot(`
         "a \`description\`: nullable<PetOwner>, diff exits 0 and 0
         a \`required\` list: nullable<PetOwner>, diff exits 0 and 0
-        a \`minProperties\` limit: nullable<PetOwner>, diff exits 1 and 1
+        a \`minProperties\` limit: nullable<PetOwner>, diff exits 0 and 0
         an empty schema: nullable<PetOwner>, diff exits 0 and 0
         a \`title\` and an \`example\`: nullable<PetOwner>, diff exits 0 and 0
         \`nullable: true\` with no \`type\`: nullable<PetOwner>, diff exits 0 and 0
         a wrapper around a \`description\`: nullable<PetOwner>, diff exits 0 and 0
-        a wrapper around a wrapper around a limit: nullable<PetOwner>, diff exits 1 and 1
-        a documented wrapper around a limit: nullable<PetOwner>, diff exits 1 and 1
+        a wrapper around a wrapper around a limit: nullable<PetOwner>, diff exits 0 and 0
+        a documented wrapper around a limit: nullable<PetOwner>, diff exits 0 and 0
         an empty \`allOf\`: nullable<PetOwner>, diff exits 0 and 0
         a union of bare limits: nullable<PetOwner>, diff exits 0 and 0
         \`items\` that say nothing: nullable<PetOwner>, diff exits 0 and 0"
@@ -311,6 +313,7 @@ describe('#715 an `allOf` member that is a `$ref` to a component that only annot
           ['in the middle', { allOf: [Owner, Described, Tag] }],
           ['last', { allOf: [Owner, Tag, Described] }],
           ['twice', { allOf: [Described, Owner, Described, Tag] }],
+          // The `allOf` is read as its one other `$ref` (#731: it was a merge, `PetOwner { name }`).
           ['beside one nullable `$ref`', { allOf: [Owner, Described] }],
           ['beside one nullable `$ref`, first', { allOf: [Described, Owner] }],
           ['beside a nullable inline object', { allOf: [nullableObject(openapi, 'extra'), Described] }],
@@ -323,8 +326,8 @@ describe('#715 an `allOf` member that is a `$ref` to a component that only annot
         in the middle: nullable<PetOwner> { name, label }
         last: nullable<PetOwner> { name, label }
         twice: nullable<PetOwner> { name, label }
-        beside one nullable \`$ref\`: nullable<PetOwner> { name }
-        beside one nullable \`$ref\`, first: nullable<PetOwner> { name }
+        beside one nullable \`$ref\`: nullable<Owner>
+        beside one nullable \`$ref\`, first: nullable<Owner>
         beside a nullable inline object: nullable<PetOwner> { extra }
         beside an inline member that only annotates: nullable<PetOwner> { name, label }
         beside \`required\` on the \`allOf\`: nullable<PetOwner> { name }
@@ -796,6 +799,7 @@ describe('#715 `nullVote`', () => {
   it('ends on a schema that names itself, which rejects `null` from wherever it is read', () => {
     const schemas: Record<string, SchemaObject> = {
       Owner: nullableInline('name'),
+      Tag: nullableInline('label'),
       Described: { description: 'Any owner.' },
       // Bare `$ref`s that only name each other, and one that names itself.
       A: { $ref: '#/components/schemas/B' },
@@ -825,7 +829,14 @@ describe('#715 `nullVote`', () => {
       for (const name of loops) {
         expect(declaresNull({ allOf: [owner, { $ref: `#/components/schemas/${name}` }] }), name).toBe(false);
       }
-      expect(declaresNull({ allOf: [owner, described, { ...described }] })).toBe(true);
+      const tag: SchemaObject = { $ref: '#/components/schemas/Tag' };
+      expect(declaresNull({ allOf: [owner, tag, described, { ...described }] })).toBe(true);
+      // Beside one `$ref` the `allOf` is that reference (#731: it was a merge, and declared the `null` itself),
+      // whose `null` is its component's to carry: `declaresNull` leaves it to the reference, and the type has it.
+      const one: SchemaObject = { allOf: [owner, described, { ...described }] };
+      expect(declaresNull(one)).toBe(false);
+      expect(schemaAdmitsNull(one)).toBe(true);
+      expect(schemaToTypeRef(one, 'owner')).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Owner' } });
     });
   });
 
