@@ -990,30 +990,72 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
     });
 
     it('reads it in place beside a member that names a component through a union', async () => {
-      // Each is one IR with the keywords written in the `$ref`'s place, whatever that reading is.
-      for (const [label, typing] of [
-        ['a union of one `$ref`', { oneOf: [Owner] }],
-        ['a nullable wrapper around a `$ref`', { anyOf: [Tag, { type: 'null' }] }],
-        ['a union of a `$ref` and a primitive', { anyOf: [Owner, string] }],
-        ['a union of two `$ref`s', { oneOf: [Owner, Tag] }],
-      ] as const) {
-        for (const [byRef, inline] of [
-          [
-            [typing, Described],
-            [typing, text],
-          ],
-          [
-            [NotNull, typing],
-            [notNull, typing],
-          ],
-        ]) {
-          await expectOneIr(ownerDoc(openapi, { allOf: byRef }, tag), ownerDoc(openapi, { allOf: inline }, tag), label);
-        }
+      // Where the one member that types the `allOf` is a union (#732), the `$ref` beside it only annotates it,
+      // as the same keywords written inline do: the `allOf` is that union, and no merge of its variants. (Each
+      // `$ref` spelling was the merged `PetOwner`, the second `$ref` making a merge of what #732 reads as the
+      // union.)
+      const Nick = { Nick: string, ...tag };
+      const rows: ReadonlyArray<readonly [string, unknown[], unknown[]]> = [
+        [
+          'a union of a `$ref` and a primitive',
+          [{ anyOf: [Owner, string] }, Described],
+          [{ anyOf: [Owner, string] }, text],
+        ],
+        ['the same, the `$ref` first', [Described, { anyOf: [Owner, string] }], [text, { anyOf: [Owner, string] }]],
+        ['the same beside a veto', [{ anyOf: [Owner, string] }, NotNull], [{ anyOf: [Owner, string] }, notNull]],
+        ['a union of two `$ref`s', [{ oneOf: [Owner, Tag] }, Described], [{ oneOf: [Owner, Tag] }, text]],
+        [
+          'a union of two `$ref`s beside a veto and a text',
+          [{ oneOf: [Owner, Tag] }, NotNull, Described],
+          [{ oneOf: [Owner, Tag] }, notNull, text],
+        ],
+        [
+          'a union of a primitive component and a primitive',
+          [{ anyOf: [ref('Nick'), { type: 'integer' }] }, Described],
+          [{ anyOf: [ref('Nick'), { type: 'integer' }] }, text],
+        ],
+        // A union of one `$ref` is the union of one variant it is beside the inline member (#445, #555).
+        ['a union of one `$ref`', [{ oneOf: [Owner] }, Described], [{ oneOf: [Owner] }, text]],
+        [
+          'a nullable wrapper around a `$ref`',
+          [{ anyOf: [Tag, { type: 'null' }] }, Described],
+          [{ anyOf: [Tag, { type: 'null' }] }, text],
+        ],
+        // What still makes a merge beside the union: a `required` list, and a second member that types the schema.
+        [
+          'a `required` list on the `allOf`',
+          [{ anyOf: [Owner, string] }, Described],
+          [{ anyOf: [Owner, string] }, text],
+        ],
+        [
+          'a second typing `$ref`',
+          [{ anyOf: [Owner, string] }, Described, Tag],
+          [{ anyOf: [Owner, string] }, text, Tag],
+        ],
+      ];
+      const lines: string[] = [];
+      for (const [label, byRef, inline] of rows) {
+        const beside = label === 'a `required` list on the `allOf`' ? { required: ['name'] } : {};
+        const spec = await expectOneIr(
+          ownerDoc(openapi, { allOf: byRef, ...beside }, Nick),
+          ownerDoc(openapi, { allOf: inline, ...beside }, Nick),
+          label,
+        );
+        lines.push(`${label}: ${ownerLine(spec)}`);
       }
-      // A union of one `$ref` beside it is the union of one variant it is beside the inline member (#445, #555).
-      expect(await ownerOf(openapi, { allOf: [{ oneOf: [Owner] }, Described] })).toBe(
-        '(nullable<Owner>) <description="Any owner.">',
-      );
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "a union of a \`$ref\` and a primitive: (nullable<Owner> | string) <description="Any owner.">
+        the same, the \`$ref\` first: (nullable<Owner> | string) <description="Any owner.">
+        the same beside a veto: (Owner | string)
+        a union of two \`$ref\`s: (nullable<Owner> | nullable<Tag>) <description="Any owner.">
+        a union of two \`$ref\`s beside a veto and a text: (Owner | Tag) <description="Any owner.">
+        a union of a primitive component and a primitive: (string | integer) <description="Any owner.">
+        a union of one \`$ref\`: (nullable<Owner>) <description="Any owner.">
+        a nullable wrapper around a \`$ref\`: nullable<Tag> <description="Any owner.">
+        a \`required\` list on the \`allOf\`: PetOwner { name } "Any owner." <description="Any owner.">
+        a second typing \`$ref\`: PetOwner { name?, label? } "Any owner." <description="Any owner.">"
+      `);
+      expect(warnings()).toEqual([]);
     });
   });
 
@@ -1161,25 +1203,33 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
     });
 
     it('reads a `$ref` to a JSON Schema boolean as the boolean in its place', () => {
-      // `Anything: true` admits every instance, as `{}` does, and says nothing of what one is.
-      for (const value of [true, false]) {
-        const components = { Pet, Toy, Anything: value as unknown as SchemaObject };
-        expect(readInlineAllOf([at('Pet'), at('Anything')], undefined, components)).toBe(
-          readInlineAllOf([at('Pet'), value as unknown as SchemaObject], undefined, components),
+      // `Anything: true` admits every instance, as `{}` does, and says nothing of what one is. A number, a string
+      // and a list written where a schema goes are read as a boolean member is (#728), and stand in place too.
+      for (const value of [true, false, 1.5, 0, 'x', '', []]) {
+        const label = JSON.stringify(value);
+        const written = value as unknown as SchemaObject;
+        const components = { Pet, Toy, Anything: written };
+        expect(readInlineAllOf([at('Pet'), at('Anything')], undefined, components), label).toBe(
+          readInlineAllOf([at('Pet'), written], undefined, components),
         );
-        expect(readInlineAllOf([at('Pet'), at('Anything')], undefined, components)).toBe('reference');
-        expect(readInlineAllOf([at('Anything'), at('Pet'), at('Toy')], undefined, components)).toBe('merged');
-        expect(splicedAllOfMembers([at('Pet'), at('Anything')], components).members).toEqual([at('Pet'), value]);
+        expect(readInlineAllOf([at('Pet'), at('Anything')], undefined, components), label).toBe('reference');
+        expect(readInlineAllOf([at('Anything'), at('Pet'), at('Toy')], undefined, components), label).toBe('merged');
+        expect(splicedAllOfMembers([at('Pet'), at('Anything')], components).members, label).toEqual([at('Pet'), value]);
+        // Under a union it names no component a merge conjoins either (asked of the document's components).
+        within(components, () => {
+          expect(unionReferencesOf({ oneOf: [at('Anything')] }), label).toEqual([]);
+          expect(readInlineAllOf([at('Pet'), { oneOf: [at('Anything')] }]), label).toBe('reference');
+        });
       }
     });
 
-    it('leaves a `$ref` to a value nothing reads the `$ref` it was', () => {
-      for (const value of [null, 5, 'x', []]) {
-        const components = { Pet, Value: value as unknown as SchemaObject };
-        const members = [at('Pet'), at('Value')];
-        expect(splicedAllOfMembers(members, components).members, JSON.stringify(value)).toBe(members);
-        expect(readInlineAllOf(members, undefined, components), JSON.stringify(value)).toBe('merged');
-      }
+    it('leaves a `$ref` to `null` the `$ref` it was', () => {
+      // No reader of a member reads `null` written as one, so the `$ref` to it is not read in its place.
+      const components = { Pet, Value: null as unknown as SchemaObject };
+      const members = [at('Pet'), at('Value')];
+      expect(splicedAllOfMembers(members, components).members).toBe(members);
+      expect(readInlineAllOf(members, undefined, components)).toBe('merged');
+      expect(saysWhatInstanceIs(at('Value'), components)).toBe(false);
     });
 
     it('`splicedAllOfMembers` writes what the `$ref` names in its place, an alias’s own text first', () => {

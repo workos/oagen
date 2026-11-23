@@ -3800,7 +3800,7 @@ export function saysWhatInstanceIs(schema: SchemaObject, componentSchemas?: Reco
   const verdicts = kept ? instanceVerdicts : new WeakMap<SchemaObject, boolean>();
   const path = new Set<SchemaObject>();
   const says = (s: SchemaObject): boolean => {
-    if (!isRecord(s)) return false;
+    if (!isSchemaObject(s)) return false;
     const settled = verdicts.get(s);
     if (settled !== undefined) return settled;
     if (path.has(s)) return true;
@@ -3862,7 +3862,7 @@ function namesTypedSchema(
 ): boolean {
   const seen = new Set<SchemaObject>();
   const names = (s: SchemaObject): boolean => {
-    if (!isRecord(s) || seen.has(s)) return false;
+    if (!isSchemaObject(s) || seen.has(s)) return false;
     seen.add(s);
     if (s.$ref !== undefined) return saysWhatInstanceIs(s, componentSchemas);
     const under = [s.allOf, s.oneOf, s.anyOf].flatMap((list): SchemaObject[] => (Array.isArray(list) ? list : []));
@@ -3903,19 +3903,21 @@ function namesTypedSchema(
  * nearer text first, as a bare `$ref` to `Alias` reads it. A schema that
  * wraps annotating members in an `allOf` of its own stands in the member's
  * place as that wrapper, which the splice opens as it opens one written
- * there (`bareAllOfParts`). A JSON Schema boolean stands in it as written
- * (`Anything: true`), as the same boolean written as the member does.
+ * there (`bareAllOfParts`). A value that is no Schema Object stands in it
+ * as written — a JSON Schema boolean (`Anything: true`), or a number, a
+ * string or a list, which the readers read as one (#728) — as the same
+ * value written as the member does.
  *
  * `undefined` for a member that is no `$ref`, and for a `$ref` that stays
  * the reference it is: one to a schema that says what an instance is, to
- * a schema that reaches itself, or to none at all — and one to a value
- * that is neither a Schema Object nor a boolean, which nothing reads.
+ * a schema that reaches itself, or to none at all — and one to `null`,
+ * which no reader of a member reads.
  */
 function referenceReadInPlace(
   member: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): readonly SchemaObject[] | undefined {
-  if (!isRecord(member) || member.$ref === undefined) return undefined;
+  if (!isSchemaObject(member) || member.$ref === undefined) return undefined;
   const kept = componentSchemas === undefined || componentSchemas === documentComponentSchemas();
   const settled = kept ? referencesInPlace.get(member) : undefined;
   if (settled !== undefined) return settled ?? undefined;
@@ -3924,19 +3926,25 @@ function referenceReadInPlace(
   return parts;
 }
 
-/** The parts of a `$ref` to a schema that says nothing of what an instance is (`referenceReadInPlace`), an alias followed to what it names; `undefined` where the chain ends at a value nothing reads. Such a chain never returns to a schema it has read: one that does says what an instance is (`saysWhatInstanceIs`). */
+/**
+ * The parts of a `$ref` to a schema that says nothing of what an instance
+ * is (`referenceReadInPlace`), an alias followed to what it names. A value
+ * that is no Schema Object (`isSchemaObject`) stands in the `$ref`'s place
+ * as it is written — a JSON Schema boolean (`Anything: true`), and a
+ * number, a string or a list, which the readers of an `allOf` read as they
+ * read a boolean member (#728) — so the `$ref` to it reads as the same
+ * value written as the member does. `undefined` where the chain ends at
+ * `null`, which no reader of a member reads: that `$ref` stays the `$ref`
+ * it was. Such a chain never returns to a schema it has read: one that
+ * does says what an instance is (`saysWhatInstanceIs`).
+ */
 function partsInPlace(
   reference: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): SchemaObject[] | undefined {
-  const target: unknown = componentSchemaOf(reference.$ref!, componentSchemas);
-  const named = isRecord(target)
-    ? target.$ref !== undefined
-      ? partsInPlace(target as SchemaObject, componentSchemas)
-      : [target as SchemaObject]
-    : typeof target === 'boolean'
-      ? [target as unknown as SchemaObject]
-      : undefined;
+  const target: SchemaObject | null | undefined = componentSchemaOf(reference.$ref!, componentSchemas);
+  if (target === undefined || target === null) return undefined;
+  const named = isSchemaObject(target) && target.$ref !== undefined ? partsInPlace(target, componentSchemas) : [target];
   if (named === undefined) return undefined;
   const keywords = declarationKeywords(reference);
   return Object.keys(keywords).length > 0 ? [keywords, ...named] : named;
