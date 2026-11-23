@@ -4703,9 +4703,15 @@ export function mergeAllOfMembers(
     if (s.$ref) {
       const key = componentKeyOf(s.$ref);
       const target = schemaRefTarget(s.$ref, componentSchemas);
-      const refs = target ? resolvedRefs : unresolvedRefs;
+      // Answered by whether a component is there, never by whether it is
+      // truthy: `Anything: false` is a component, one that declares
+      // nothing, as `Anything: true` is (workos/oagen#728: its `$ref` was
+      // listed as one no component answers, so a response body merging it
+      // with an inline member was typed by the reference alone, `unknown`,
+      // the member's fields lost).
+      const refs = target !== undefined ? resolvedRefs : unresolvedRefs;
       if (!refs.includes(s.$ref)) refs.push(s.$ref);
-      if (!target) return;
+      if (target === undefined) return;
       // The component the properties belong to is the one whose own model
       // carries them under its name. A ref inside an `allOf` component's own
       // chain stays that component's: its model inherits through its
