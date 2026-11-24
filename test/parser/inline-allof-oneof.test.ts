@@ -681,15 +681,50 @@ describe('the one reading of an inline allOf', () => {
   it('schemaToTypeRef, mintedInlineNameEntries and the field extractor agree that a oneOf member mints the merged model', () => {
     const refPlusUnion: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, union] };
     const unionPlusLimits: SchemaObject = { allOf: [union, { maxProperties: 3 }] };
-    for (const schema of [basePlusVariants, refPlusUnion, unionPlusLimits]) {
-      // The union has a `null` variant, so a merge it alone types admits `null` (#676); beside an object it does not.
-      const merged = schema === unionPlusLimits ? { kind: 'nullable', inner: model('HolderPet') } : model('HolderPet');
-      expect(schemaToTypeRef(schema, 'pet', 'Holder')).toEqual(merged);
+    for (const schema of [basePlusVariants, refPlusUnion]) {
+      expect(schemaToTypeRef(schema, 'pet', 'Holder')).toEqual(model('HolderPet'));
       expect(mintedInlineNameEntries('pet', schema, 'Holder').map((e) => e.name)).toEqual(['HolderPet']);
       const results: Model[] = [];
       extractInlineModelsFromProperties({ properties: { pet: schema } }, results, 'Holder', components);
       expect(results.map((m) => m.name)).toEqual(['HolderPet']);
     }
+    // The union beside a member that only limits it is the one member that
+    // types the `allOf`, so the three agree on the union the member alone is,
+    // nullable by its `null` variant, and on a model per inline variant
+    // (#732: it was the merged `HolderPet`, the variants flattened into it).
+    const unionType = {
+      kind: 'nullable',
+      inner: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [model('HolderPet'), model('HolderPetVariant2'), model('Other')],
+        constraints: { maxProperties: 3 },
+      },
+    };
+    expect(schemaToTypeRef(unionPlusLimits, 'pet', 'Holder')).toEqual(unionType);
+    expect(schemaToTypeRef({ allOf: [union], maxProperties: 3 }, 'pet', 'Holder')).toEqual(unionType);
+    expect(mintedInlineNameEntries('pet', unionPlusLimits, 'Holder').map((e) => e.name)).toEqual([
+      'HolderPet',
+      'HolderPetVariant2',
+    ]);
+    const variants: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { pet: unionPlusLimits } }, variants, 'Holder', components);
+    expect(variants.map((m) => [m.name, fieldsOf(m)])).toEqual([
+      ['HolderPet', ['ownerId: string']],
+      ['HolderPetVariant2', ['shelterId?: string']],
+    ]);
+    // A `required` list beside the union adds to the objects it names, so the
+    // union is still the merged model, and the three agree on it. The union
+    // has a `null` variant, so a merge it alone types admits `null` (#676).
+    const unionPlusRequired: SchemaObject = { allOf: [union, { required: ['ownerId'] }] };
+    expect(schemaToTypeRef(unionPlusRequired, 'pet', 'Holder')).toEqual({
+      kind: 'nullable',
+      inner: model('HolderPet'),
+    });
+    expect(mintedInlineNameEntries('pet', unionPlusRequired, 'Holder').map((e) => e.name)).toEqual(['HolderPet']);
+    const merged: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { pet: unionPlusRequired } }, merged, 'Holder', components);
+    expect(merged.map((m) => m.name)).toEqual(['HolderPet']);
     // A `$ref` member beside members that declare nothing inline stays a reference.
     const refOnly: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, { description: 'doc' }] };
     expect(schemaToTypeRef(refOnly, 'pet', 'Holder')).toEqual(model('Base'));
@@ -1667,22 +1702,66 @@ describe('round 3: a model is built exactly when the reading names one', () => {
       },
     });
     const models = modelsByName(ir);
-    expect(fieldsOf(models['Holder'])).toEqual(['pet?: HolderPet']);
-    // Built with no fields; the `description` is the member's, which declares
-    // no type and so is part of the wrapper, as the model reads it (#555 review).
-    expect(models['HolderPet']).toMatchObject({ fields: [], description: 'Pet' });
+    // The union of one beside a member that only documents it is the one
+    // member that types the `allOf`, so it is the union of one variant the
+    // member alone is (#732: it was the merged model, the variant flattened
+    // into it), and the empty model is the variant's, built with no fields.
+    const unionOfOne = (name: string) => ({ kind: 'union', compositionKind: 'oneOf', variants: [model(name)] });
+    expect(models['Holder']?.fields).toMatchObject([
+      { name: 'pet', type: unionOfOne('HolderPet'), description: 'Pet' },
+    ]);
+    // The `description` is the member's, which declares no type and so is
+    // part of the wrapper (#555 review): the field's, as the same text
+    // written beside the `allOf` is, the variant's model keeping its own (#445).
+    expect(models['HolderPet']).toMatchObject({ fields: [] });
+    expect(models['HolderPet']?.description).toBeUndefined();
     expect(fieldsOf(models['CreatePetRequest'])).toEqual([
       'sole?: CreatePetRequestSole',
       'besideRef?: CreatePetRequestBesideRef',
-      'outer?: CreatePetRequestOuter',
+      'outer?: union',
     ]);
+    expect(models['CreatePetRequest']?.fields[2]?.type).toEqual(unionOfOne('CreatePetRequestOuter'));
     expect(fieldsOf(models['CreatePetRequestSole'])).toEqual(['name: string']);
     expect(fieldsOf(models['CreatePetRequestBesideRef'])).toEqual(['name: string', 'ownerId?: string']);
-    expect(fieldsOf(models['CreatePetRequestOuter'])).toEqual(['inner?: CreatePetRequestOuterInner']);
+    expect(models['CreatePetRequestOuter']?.fields).toMatchObject([
+      { name: 'inner', required: false, type: unionOfOne('CreatePetRequestOuterInner') },
+    ]);
     expect(models['CreatePetRequestOuterInner']?.fields).toEqual([]);
-    expect(opsOf(ir)['createPet']?.response).toEqual(model('CreatePetResponse'));
+    expect(opsOf(ir)['createPet']?.response).toEqual(unionOfOne('CreatePetResponse'));
     expect(models['CreatePetResponse']?.fields).toEqual([]);
     expectSound(ir, ['Holder', 'Owner']);
+
+    // The empty object written as the member itself, beside the same
+    // documentation-only member, is still the merged model: built with no
+    // fields, and the `description` the member's, as the model reads it
+    // (#555 review) — at a field, nested under a field, and as a response body.
+    const emptyPlusDoc: SchemaObject = { allOf: [emptyObject, { description: 'Pet' }] };
+    const merged = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({
+              type: 'object',
+              properties: { outer: { allOf: [{ properties: { inner: emptyPlusDoc } }, { description: 'Outer' }] } },
+            }),
+            responses: { '200': jsonResponse(emptyPlusDoc) },
+          },
+        },
+      },
+      components: { schemas: { Holder: { type: 'object', properties: { pet: emptyPlusDoc } } } },
+    });
+    const mergedModels = modelsByName(merged);
+    expect(fieldsOf(mergedModels['Holder'])).toEqual(['pet?: HolderPet']);
+    expect(mergedModels['HolderPet']).toMatchObject({ fields: [], description: 'Pet' });
+    expect(fieldsOf(mergedModels['CreatePetRequest'])).toEqual(['outer?: CreatePetRequestOuter']);
+    expect(fieldsOf(mergedModels['CreatePetRequestOuter'])).toEqual(['inner?: CreatePetRequestOuterInner']);
+    expect(mergedModels['CreatePetRequestOuterInner']?.fields).toEqual([]);
+    expect(opsOf(merged)['createPet']?.response).toEqual(model('CreatePetResponse'));
+    expect(mergedModels['CreatePetResponse']?.fields).toEqual([]);
+    expectSound(merged, ['Holder']);
   });
 
   /** A discriminated component whose `node.created` variant carries `data`. */
@@ -1782,10 +1861,19 @@ describe('round 3: a model is built exactly when the reading names one', () => {
     expect(readInlineAllOf([ref, { type: 'object' }])).toBe('merged');
     expect(readInlineAllOf([ref, { oneOf: [emptyObject] }])).toBe('merged');
     expect(readInlineAllOf([base])).toBe('unwrapped');
-    expect(readInlineAllOf([{ oneOf: [emptyObject] }, { description: 'Pet' }])).toBe('merged');
+    // The one member that types the `allOf`, a union: the member itself (#732: it was `'merged'`).
+    expect(readInlineAllOf([{ oneOf: [emptyObject] }, { description: 'Pet' }])).toBe('unwrapped');
+    expect(readInlineAllOf([emptyObject, { description: 'Pet' }])).toBe('merged');
     expect(readInlineAllOf([{ minProperties: 1 }, { description: 'doc' }])).toBe('reference');
     expect(schemaToTypeRef({ allOf: [ref, { description: 'doc' }] }, 'pet', 'Holder')).toEqual(model('Base'));
-    expect(schemaToTypeRef(emptyUnionPlusDoc, 'pet', 'Holder')).toEqual(model('HolderPet'));
+    expect(schemaToTypeRef(emptyUnionPlusDoc, 'pet', 'Holder')).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [model('HolderPet')],
+    });
+    expect(schemaToTypeRef({ allOf: [emptyObject, { description: 'Pet' }] }, 'pet', 'Holder')).toEqual(
+      model('HolderPet'),
+    );
     const results: Model[] = [];
     extractInlineModelsFromProperties({ properties: { pet: emptyUnionPlusDoc } }, results, 'Holder', {});
     expect(results.map((m) => [m.name, m.fields.length])).toEqual([['HolderPet', 0]]);
