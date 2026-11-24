@@ -8,7 +8,7 @@ import Ruby from 'tree-sitter-ruby';
 import type { SyntaxNode } from 'tree-sitter';
 import type { ApiClass, ApiEnum, ApiMethod, ApiParam, ApiProperty } from '../types.js';
 import { safeParse as safeParseWith } from '../../utils/tree-sitter.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Shared parser instance
@@ -71,8 +71,7 @@ export function extractClasses(source: string): ApiClass[] {
         if (method.name === 'initialize') {
           constructorParams.push(...method.params);
         } else {
-          if (!methods[method.name]) methods[method.name] = [];
-          methods[method.name].push(method);
+          overloadsOf(methods, method.name).push(method);
         }
       }
     }
@@ -114,8 +113,7 @@ export function extractServiceModules(source: string): ApiClass[] {
     // Extract methods from the singleton class body
     const extractedMethods = extractMethodsFromBody(singletonBody);
     for (const method of extractedMethods) {
-      if (!methods[method.name]) methods[method.name] = [];
-      methods[method.name].push(method);
+      overloadsOf(methods, method.name).push(method);
     }
 
     // Extract constants as properties

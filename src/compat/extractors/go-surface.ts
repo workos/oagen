@@ -15,7 +15,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -166,8 +166,12 @@ export function buildSurface(
             optional: false,
             passingStyle: 'positional' as const,
           }));
-        if (!apiMethods[fn.name]) apiMethods[fn.name] = [];
-        apiMethods[fn.name].push({ name: fn.name, params, returnType: buildReturnType(fn.returnTypes), async: false });
+        overloadsOf(apiMethods, fn.name).push({
+          name: fn.name,
+          params,
+          returnType: buildReturnType(fn.returnTypes),
+          async: false,
+        });
       }
 
       classes[qName] = {

@@ -13,7 +13,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { KotlinDataClass, KotlinClass, KotlinEnum, KotlinTypeAlias } from './kotlin-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Surface builder
@@ -71,8 +71,7 @@ export function buildSurface(
         passingStyle: 'named' as const,
       }));
 
-      if (!methods[method.name]) methods[method.name] = [];
-      methods[method.name].push({
+      overloadsOf(methods, method.name).push({
         name: method.name,
         params,
         returnType: method.returnType,

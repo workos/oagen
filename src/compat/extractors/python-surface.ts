@@ -23,7 +23,7 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { PythonClass, ParsedPythonFile } from './python-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -216,8 +216,7 @@ export function buildSurface(
 
           const returnType = unwrapReturnType(method.returnType);
 
-          if (!apiMethods[method.name]) apiMethods[method.name] = [];
-          apiMethods[method.name].push({
+          overloadsOf(apiMethods, method.name).push({
             name: method.name,
             params,
             returnType,
@@ -293,8 +292,7 @@ export function buildSurface(
             optional: p.optional,
             ...(p.passingStyle ? { passingStyle: p.passingStyle } : {}),
           }));
-          if (!apiMethods[method.name]) apiMethods[method.name] = [];
-          apiMethods[method.name].push({
+          overloadsOf(apiMethods, method.name).push({
             name: method.name,
             params,
             returnType: unwrapReturnType(method.returnType),
@@ -373,8 +371,7 @@ export function buildSurface(
             optional: p.optional,
             ...(p.passingStyle ? { passingStyle: p.passingStyle } : {}),
           }));
-          if (!apiMethods[method.name]) apiMethods[method.name] = [];
-          apiMethods[method.name].push({
+          overloadsOf(apiMethods, method.name).push({
             name: method.name,
             params,
             returnType: unwrapReturnType(method.returnType),

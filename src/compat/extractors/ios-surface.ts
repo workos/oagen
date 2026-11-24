@@ -24,7 +24,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { SwiftTypeDecl, SwiftEnum, SwiftTypeAlias } from './ios-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 interface MergedType {
   name: string;
@@ -121,8 +121,7 @@ export function buildSurface(
         passingStyle: 'positional' as const,
       }));
 
-      if (!methods[method.name]) methods[method.name] = [];
-      methods[method.name].push({
+      overloadsOf(methods, method.name).push({
         name: method.name,
         params,
         returnType: method.returnType,

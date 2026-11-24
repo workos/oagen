@@ -21,7 +21,7 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { PhpClass } from './php-parser.js';
-import { sortRecord, ExportCollector } from './shared.js';
+import { sortRecord, ExportCollector, overloadsOf } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -185,8 +185,7 @@ export function buildSurface(
           passingStyle: 'named' as const,
         }));
 
-        if (!apiMethods[method.name]) apiMethods[method.name] = [];
-        apiMethods[method.name].push({
+        overloadsOf(apiMethods, method.name).push({
           name: method.name,
           params,
           returnType: method.returnType || 'mixed',
