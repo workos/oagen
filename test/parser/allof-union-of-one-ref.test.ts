@@ -667,11 +667,6 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
       ['an array component', () => ({ allOf: [one('Names'), ref('Owner')] }), ['ownerId?: string']],
       ['an enum component', () => ({ allOf: [one('Color'), ref('Owner')] }), ['ownerId?: string']],
       ['a primitive component', () => ({ allOf: [one('StringId'), ref('Owner')] }), ['ownerId?: string']],
-      [
-        'a component of nothing but a description',
-        () => ({ allOf: [one('Described'), ref('Owner')] }),
-        ['ownerId?: string'],
-      ],
       ['two primitive components', () => ({ allOf: [one('StringId'), one('IntId')] }), []],
       [
         'a pointer into a component',
@@ -684,20 +679,24 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
       await expectTwins(schema(), fields, label, extra);
     });
 
+    it('a component of nothing but a description: read as the same member around the `$ref` itself is weighed', async () => {
+      // Such a `$ref` says nothing of what an instance is and names no object a merge conjoins (#731): the `allOf`
+      // is read as its one other `$ref`, around the union of one as beside the `$ref` itself. (Both were the merge
+      // `HolderField { ownerId }`, a copy of `Owner` under a name of its own.) The component is still a model.
+      for (const first of [one('Described'), ref('Described')]) {
+        const { spec, warnings } = await read(twins({ allOf: [first, ref('Owner')] }, extra));
+        const reading = twinReading(spec);
+        expect(reading.component, JSON.stringify(first)).toEqual(['ownerId?: string']);
+        expect(reading.field, JSON.stringify(first)).toBe('Owner');
+        expect(reading.inline, JSON.stringify(first)).toBeUndefined();
+        expect(warnings, JSON.stringify(first)).toEqual([]);
+      }
+    });
+
     it('is weighed as the `$ref` in its place is: a merge wherever two `$ref` members are one', async () => {
       // Whatever the component is, `allOf: [{ oneOf: [{ $ref: X }] }, { $ref: Owner }]` is a merge exactly as
       // `allOf: [{ $ref: X }, { $ref: Owner }]` is.
-      for (const name of [
-        'Pet',
-        'PetAlias',
-        'Puppy',
-        'PetOrToy',
-        'MaybePet',
-        'Names',
-        'Color',
-        'StringId',
-        'Described',
-      ]) {
+      for (const name of ['Pet', 'PetAlias', 'Puppy', 'PetOrToy', 'MaybePet', 'Names', 'Color', 'StringId']) {
         const union = await read(twins({ allOf: [one(name), ref('Owner')] }, extra));
         const plain = await read(twins({ allOf: [ref(name), ref('Owner')] }, extra));
         expect(twinReading(union.spec).field, name).toBe('HolderField');
@@ -705,6 +704,15 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
         expect(modelNames(union.spec), name).toEqual(modelNames(plain.spec));
         expect(union.warnings, name).toEqual([]);
       }
+      // And no merge where two `$ref` members are none: a `$ref` to a component that says nothing of what an
+      // instance is only annotates the `allOf` (#731), so both spellings are the reference to `Owner`.
+      const union = await read(twins({ allOf: [one('Described'), ref('Owner')] }, extra));
+      const plain = await read(twins({ allOf: [ref('Described'), ref('Owner')] }, extra));
+      expect(twinReading(union.spec).field).toBe('Owner');
+      expect(twinReading(plain.spec).field).toBe('Owner');
+      expect(modelNames(union.spec)).toEqual(modelNames(plain.spec));
+      expect(union.warnings).toEqual([]);
+      expect(plain.warnings).toEqual([]);
     });
 
     it('a nested object the component declares is built under the merged model’s name, as a flattened variant’s is', async () => {

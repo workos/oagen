@@ -1060,8 +1060,8 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
         true:  Pet { name?: string, extra?: map<unknown> }
         false: Pet { name?: string, extra?: map<unknown> } (as \`{}\`)
       a component an \`allOf\` member names (field)
-        true:  Owner { ownerName?: string }; Pet { name?: string, owner?: PetOwner }; PetOwner { ownerName?: string }
-        false: Owner { ownerName?: string }; Pet { name?: string, owner?: PetOwner }; PetOwner { ownerName?: string } (as \`{}\`)
+        true:  Owner { ownerName?: string }; Pet { name?: string, owner?: Owner }
+        false: Owner { ownerName?: string }; Pet { name?: string, owner?: Owner } (as \`{}\`)
       a component an \`allOf\` member names (component)
         true:  Owner { ownerName?: string }; Pet { ownerName?: string }
         false: Owner { ownerName?: string }; Pet { ownerName?: string } (as \`{}\`)

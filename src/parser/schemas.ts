@@ -917,9 +917,18 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
   // single-member `allOf`, so `{ allOf: [{ type: 'string', maxLength: 3 }] }`
   // is a string whose limit is the value's own; a `$ref` member contributes
   // the keywords written beside the reference, but the target itself is not
-  // followed — its limits stay on the referenced model.
+  // followed — its limits stay on the referenced model. The members are the
+  // ones every reader reads (`spliceNestedAllOf`): a bare `allOf` among
+  // them opened, which moves no limit, and a `$ref` to a schema that says
+  // nothing of what an instance is, beside a member that names one that
+  // does, read as the keywords written in its place (#731) — it names no
+  // model that could keep them, so `{ allOf: [{ $ref: Owner }, { $ref:
+  // Limited }] }` over `Limited: { minProperties: 1 }` carries the limit,
+  // as `{ minProperties: 1 }` written as the member does.
   let out = ownConstraints(schema);
-  for (const member of schema.allOf ?? []) out = combineConstraints(out, extractConstraints(member));
+  for (const member of spliceNestedAllOf(schema).allOf ?? []) {
+    out = combineConstraints(out, extractConstraints(member));
+  }
   // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
   // collapses to `nullable<T>` in the IR, so that branch's keywords are the
   // value's own too and conjoin with the rest. A `$ref` branch keeps its
@@ -1824,7 +1833,8 @@ function writesNull(schema: SchemaObject): boolean {
   if (isNullSchema(schema)) return true;
   const kind = classifyInlineSchema(schema);
   if (kind === 'const') return schema.const === null;
-  if (kind === 'enum') return (schema.enum ?? []).includes(null);
+  // An `enum` that holds no list names no `null`, as `isNullSchema` reads it.
+  if (kind === 'enum') return Array.isArray(schema.enum) && schema.enum.includes(null);
   if (kind !== 'union') return false;
   if (unionFlaggedNullable(schema)) return true;
   if (!(schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema)) return false;
@@ -2076,9 +2086,14 @@ function membersNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVot
  * `declaresType` alone counts any `allOf` or union as a type (#676 review:
  * `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { allOf: [{ description }] }]
  * }` over two nullable components was the bare model for the wrapper's
- * sake, where the same members written flat were nullable).
+ * sake, where the same members written flat were nullable). Asked too by
+ * the reader that decides whether a `$ref` member of an `allOf` types it
+ * or only annotates it (`saysWhatInstanceIs`; #731), of the schema the
+ * `$ref` names and of what that schema composes, so the `$ref`s read as
+ * the keywords in their place are the ones that have no vote on `null`,
+ * or cast the veto of a `not` alone.
  */
-function typesItself(schema: SchemaObject): boolean {
+export function typesItself(schema: SchemaObject): boolean {
   const { allOf: _allOf, oneOf, anyOf, ...own } = schema;
   if (declaresType(own)) return true;
   return [oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants));
