@@ -2064,6 +2064,24 @@ describe('isArrayComponentSchema', () => {
     expect(isArrayComponentSchema({ anyOf: [{ type: 'null' }, { items }] })).toBe(true);
   });
 
+  it('accepts a type list naming `array` beside other types, none of them `object` (#730)', () => {
+    // It was a fieldless model, the other types lost: a `$ref` to it is the
+    // array beside those types, as the list is where it is written.
+    expect(isArrayComponentSchema({ type: ['array', 'string'], items })).toBe(true);
+    expect(isArrayComponentSchema({ type: ['string', 'array', 'null'], items })).toBe(true);
+    expect(isArrayComponentSchema({ type: ['array', 'integer', 'boolean'], items })).toBe(true);
+    expect(isArrayComponentSchema({ oneOf: [{ type: ['array', 'string'], items }, { type: 'null' }] })).toBe(true);
+    // A list naming `object` is a model beside its other types, one without
+    // `items` or with a name no rule knows the model it was, and a `const`,
+    // an `enum` or a typing union beside the list is read first.
+    expect(isArrayComponentSchema({ type: ['array', 'object'], items, properties: { name: items } })).toBe(false);
+    expect(isArrayComponentSchema({ type: ['array', 'string'] })).toBe(false);
+    expect(isArrayComponentSchema({ type: ['array', 'text'], items })).toBe(false);
+    expect(isArrayComponentSchema({ type: ['array', 'string'], items, const: 'a' })).toBe(false);
+    expect(isArrayComponentSchema({ type: ['array', 'string'], items, enum: ['a'] })).toBe(false);
+    expect(isArrayComponentSchema({ type: ['array', 'string'], items, oneOf: [{ type: 'string' }] })).toBe(false);
+  });
+
   it('rejects an array without items and everything that is not an array', () => {
     expect(isArrayComponentSchema({ type: 'array' })).toBe(false);
     expect(isArrayComponentSchema({ type: 'array', items, enum: ['a', 'b'] })).toBe(false);
@@ -2074,7 +2092,6 @@ describe('isArrayComponentSchema', () => {
     expect(isArrayComponentSchema({ oneOf: [{ type: 'array' }, { type: 'null' }] })).toBe(false);
     expect(isArrayComponentSchema({ oneOf: [{ $ref: '#/components/schemas/Pets' }, { type: 'null' }] })).toBe(false);
     expect(isArrayComponentSchema({ items, allOf: [{ $ref: '#/components/schemas/List' }] })).toBe(false);
-    expect(isArrayComponentSchema({ type: ['array', 'string'], items })).toBe(false);
     expect(isArrayComponentSchema({ type: 'object', properties: { items } })).toBe(false);
     expect(isArrayComponentSchema({ $ref: '#/components/schemas/Pets' })).toBe(false);
   });

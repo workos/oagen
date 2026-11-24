@@ -938,30 +938,25 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
   });
 
   describe('a component that is the type list, with `items` beside the list', () => {
-    // Not this issue, and as it was: what a component is read as is decided
-    // from its own schema. A type list naming `array` with `items` beside it
-    // is neither an array component nor a primitive one, so it is the
-    // fieldless model it always became, where the same list written through
-    // an `allOf` is an array component, typed in place (MichaelDeBoey, #721
-    // review: the docs showed the four spellings as named schemas and said
-    // `oagen diff` between any two reports nothing, which holds where the
-    // list is written, not for a component).
+    // What a component is read as is decided from its own schema. A type
+    // list naming `array` with `items` beside it was neither an array
+    // component nor a primitive one, so it was the fieldless model it always
+    // became, where the same list written through an `allOf` is an array
+    // component, typed in place (MichaelDeBoey, #721 review: the docs showed
+    // the four spellings as named schemas and said `oagen diff` between any
+    // two reports nothing, which held where the list is written, not for a
+    // component). #730: it is an array component too, so the four spellings
+    // are one reading as components as they are in place.
     it.each(['3.0.3', '3.1.0'])(
-      'is the fieldless model `Tags`, so `oagen diff` to the other three spellings reports the model removed, under OAS %s',
+      'is typed in place as the other three spellings are, so `oagen diff` between any two reports nothing, under OAS %s',
       async (openapi) => {
         const parsed: Record<string, ApiSpec> = {};
         for (const [file, schema] of Object.entries(ISSUE)) {
           parsed[file] = await parseJson(document(openapi, ref('Tags'), { Tags: schema() }));
         }
 
-        // `Tags` written as `beside`: a model of no fields and no variants,
-        // the list's limits its own; the field a reference to it.
-        expect(parsed['beside.json']!.models).toEqual([
-          { name: 'Note', fields: [{ name: 'tags', type: { kind: 'model', name: 'Tags' }, required: false }] },
-          { name: 'Tags', fields: [], constraints: { minItems: 2 } },
-        ]);
-        // Written as `two`, `one` or `nested`: no `Tags` model, the field typed in place.
-        for (const file of ['two.json', 'one.json', 'nested.json']) {
+        // `Tags` written as `beside`, `two`, `one` or `nested`: no `Tags` model, the field typed in place.
+        for (const file of ['beside.json', 'two.json', 'one.json', 'nested.json']) {
           expect(parsed[file]!.models, file).toEqual([
             {
               name: 'Note',
@@ -996,20 +991,21 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
         }
         expect(lines.join('\n')).toBe(
           [
-            'beside.json -> two.json: model-removed Tags, model-modified Note',
-            'beside.json -> one.json: model-removed Tags, model-modified Note',
-            'beside.json -> nested.json: model-removed Tags, model-modified Note',
-            'two.json -> beside.json: model-added Tags, model-modified Note',
+            'beside.json -> two.json: nothing',
+            'beside.json -> one.json: nothing',
+            'beside.json -> nested.json: nothing',
+            'two.json -> beside.json: nothing',
             'two.json -> one.json: nothing',
             'two.json -> nested.json: nothing',
-            'one.json -> beside.json: model-added Tags, model-modified Note',
+            'one.json -> beside.json: nothing',
             'one.json -> two.json: nothing',
             'one.json -> nested.json: nothing',
-            'nested.json -> beside.json: model-added Tags, model-modified Note',
+            'nested.json -> beside.json: nothing',
             'nested.json -> two.json: nothing',
             'nested.json -> one.json: nothing',
           ].join('\n'),
         );
+        expect(warn).not.toHaveBeenCalled();
       },
     );
   });

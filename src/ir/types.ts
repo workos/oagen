@@ -1257,7 +1257,11 @@ export interface UnionType {
    * when `Owner` declares `properties` and no `type`, and `Owner` alone —
    * no union — when `Owner` is `type: 'object'`, which no string
    * satisfies. Never one type twice: copies typed alike are one variant,
-   * and a lone variant is the type itself.
+   * and a lone variant is the type itself. A `$ref` to a component written
+   * as such a list is the same union (#730): `Tags: { type: ['array',
+   * 'string'], items }` is `string[] | string`, and `Owner: { type:
+   * ['object', 'string'], properties }` the model `Owner` beside `string`,
+   * where the list written inline names the model from its site.
    */
   variants: TypeRef[];
   /**
@@ -1384,6 +1388,11 @@ export interface TypeParam {
  * — becomes no model at all: a `$ref` to it resolves to the array it
  * declares (`{ kind: 'array' }`, under `nullable` when the component admits
  * null), and what its items reference is extracted under `<Component>Item…`.
+ * So does a component whose OAS 3.1 type list names other types beside
+ * `array`, none of them `object` (`Tags: { type: ['array', 'string'], items
+ * }`): a `$ref` to it resolves to the union of the array and those types
+ * (`{ kind: 'union' }`, `string[] | string`), as the same schema written
+ * inline is typed (#730: it was a fieldless model).
  * A primitive component — a `string`, `integer`, `number` or `boolean`
  * schema, a `const` of any value, a type list of such primitives
  * (`['string', 'integer']`) or a schema that declares no type at all (`{
@@ -1411,7 +1420,14 @@ export interface TypeParam {
  * (`{ kind: 'model', name: 'CatAlias' }`), never to `Cat`, at every site,
  * and as a union variant it pins what `Cat` pins (#618: it was a model with
  * no fields). A chain of bare `$ref`s that returns to itself names nothing:
- * each such component is a model with no fields, reported once. The inline
+ * each such component is a model with no fields, reported once. A component
+ * whose OAS 3.1 type list names `object` beside other types (`Owner: {
+ * type: ['object', 'string'], properties }`) is the model the object is,
+ * built as `type: 'object'` in the list's place builds it, and admits the
+ * other types on each reference: a `$ref` to it resolves to the model in a
+ * union with them (`{ kind: 'union' }`, `Owner | string`, under `nullable`
+ * when the list names `null`), and a `$ref` to an alias of it to the
+ * alias's model in that union (#730: every `$ref` was the model alone). The inline
  * schemas the parser materializes — request bodies,
  * responses, union variants, nested objects, array items, map values — are
  * models too.

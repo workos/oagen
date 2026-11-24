@@ -204,6 +204,66 @@ interface ArrayComponentPlan {
   context: string;
   /** `{ [context]: schema }`: the one-property object both sides read, as a named union's `memberProperties`. */
   properties: ReadonlyMap<string, SchemaObject>;
+  /**
+   * The schemas the synthetic property is extracted as (`arrayComponentTrees`):
+   * the schema itself, or — for a component its type list types as an array
+   * beside other types (`isArrayComponentSchema`; #730) — one per type the
+   * list names, since the type builder types such a list one copy at a time
+   * and the field extractor reads a schema by the one keyword that types it.
+   */
+  trees: readonly SchemaObject[];
+  /**
+   * The JSON types a `$ref` to the component is typed as
+   * (`arrayEntryTypes`): `array` alone for an array, which is what
+   * `isArrayComponentRef` asks, and more for a component whose type list
+   * names another type beside `array`, typed as the union of the two
+   * (`Tags: { type: ['array', 'string'], items }` is `string[] | string`;
+   * #730), and for an alias of one — less the types an alias's own `type`
+   * does not admit (`AllTags: { type: 'array', allOf: [{ $ref: Tags }] }`
+   * is `string[]`).
+   */
+  types: ReadonlySet<string>;
+  /** Set once the self-reference warning has been printed, so it is printed once per component. */
+  warnedSelfReference: boolean;
+}
+
+/**
+ * What the parser decides about a model component that admits other types
+ * beside its object (`multiTypeModelChain`; #730): `Owner: { type:
+ * ['object', 'string'], properties }` is the model `Owner` and a `string`,
+ * so the model built for it carries the fields and each `$ref` the union
+ * (`componentTypeRef`), as each `$ref` to a nullable object component
+ * carries its `null`.
+ */
+interface MultiTypeModel {
+  /** The `components/schemas` keys the reference passes, nearest first: the key a `$ref` names, each alias it reads through, the key whose schema declares the type list, and the keys that list's own `allOf` passes in turn when it is read as a reference to another such component (`multiTypeModelChain`). Read for the limits the reference carries. */
+  chain: readonly string[];
+  /** The component that declares the type list: the first key of `chain` to declare one. One object for the component and every alias of it. */
+  owner: MultiTypeModelOwner;
+  /** The other types a reference to this key carries beside the model: the declaring component's, less those the `type` of an alias on the way does not admit (`multiTypeModelChain`). Never empty. */
+  others: ReadonlySet<string>;
+}
+
+/** The component a model's other types are declared on and named from (`MultiTypeModel.owner`). */
+interface MultiTypeModelOwner {
+  /** The `components/schemas` key, as written. */
+  key: string;
+  /** The key's IR name (`resolveSchemaName`): what the other types' inline models are named from (`<Component>Item`). */
+  name: string;
+  /** The schema whose type list names the types (`multiTypeModelDeclaration`): the component's own, or the member its `allOf` is read as. */
+  declaration: SchemaObject;
+  /** The other types the component itself admits beside its object, as every key that reaches it would at most: what the list names, less what the `type` of a wrapper around the list does not admit. */
+  others: ReadonlySet<string>;
+  /**
+   * The plan of the `array` the list names beside the object, when it names
+   * one: the array copy typed and extracted as an array component's schema
+   * is, under the model's name (`item`, so its inline items are `<Component>
+   * Item`), and planned with the array components (`extractSchemas`), so
+   * the items step around a name another entry holds for a different shape
+   * exactly as an array component's do. Absent until the plans are decided,
+   * when the member is typed under the context `variantMemberKeys` picks.
+   */
+  items?: ArrayComponentPlan;
   /** Set once the self-reference warning has been printed, so it is printed once per component. */
   warnedSelfReference: boolean;
 }
@@ -230,6 +290,30 @@ interface ArrayComponentMints {
  * `$ref` to an enum component is.
  */
 let activeArrayComponentPlans: Map<string, ArrayComponentPlan> = new Map();
+
+/**
+ * Every model component of the document being extracted that admits other
+ * types beside its object, by its `components/schemas` key as written, for
+ * the reason an array component is keyed so: the component whose type list
+ * names `object` beside other types, and every alias of it
+ * (`multiTypeModelChain`; #730). Such a component becomes the `Model` it
+ * always was — the object the list names — and a `$ref` to it resolves to
+ * that model in a union with the other types (`componentTypeRef`). Decided
+ * in `extractSchemas` before any TypeRef is built and dropped with the
+ * other per-document state, so outside an extraction a `$ref` to such a
+ * key is a plain model reference.
+ */
+let activeMultiTypeModels: Map<string, MultiTypeModel> = new Map();
+
+/**
+ * The type lists of the document being extracted that cannot be read as
+ * the union of their per-type copies (`markUnreadTypeLists`), each by the
+ * schema the document writes it on (`sourceDeclaration`): a component
+ * typed by one of them stays the model it always was
+ * (`typeListComponentCopies`). Decided in `extractSchemas` before any
+ * component is read and dropped with the other per-document state.
+ */
+let unreadTypeLists = new WeakSet<SchemaObject>();
 
 /**
  * Every primitive component of the document being extracted
@@ -290,6 +374,9 @@ let activeDispatcherVariantPlans: Map<readonly SchemaObject[], Map<string, Dispa
 
 /** The array components whose reference is being built right now, so a cycle through their items is cut (`arrayComponentTypeRef`). */
 const resolvingArrayComponents = new Set<string>();
+
+/** The model components whose other types are being typed right now, by the key that declares them, so a cycle through those types is cut (`multiTypeModelTypeRef`). */
+const resolvingMultiTypeModels = new Set<string>();
 
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
 function nonNullEnumValues(values: SchemaObject['enum']): unknown[] {
@@ -1025,7 +1112,11 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
  * own), conjoined from the component outward, as JSON Schema applies every
  * level at once and the wire enforces the component's limit whatever is
  * written beside the `$ref` (#512 review). A `$ref` to a model, named union or enum
- * contributes none of the target's: that node carries its own. A JSON
+ * contributes none of the target's: that node carries its own — but for a
+ * model component that admits other types beside its object, whose
+ * reference is the union of the model and those types and carries the
+ * limits of every entry it passes, as the union the same schema is inline
+ * carries them (`limitReference`; #730). A JSON
  * Pointer `$ref` deeper into a component (#539) contributes none here
  * either, since what it lands on is typed after the fact: once
  * `resolveSchemaPointers` settles that type, the pointed schema's limits
@@ -1057,23 +1148,65 @@ export function schemaConstraints(
   if (schema.$ref !== undefined || !namesSeveralTypes(schema)) return limits;
   return typeListCopies(schema).reduce<Constraints | undefined>(
     (conjoined, copy) =>
-      componentReference(copy, componentSchemas) === undefined
+      limitReference(copy, componentSchemas) === undefined
         ? conjoined
         : combineConstraints(conjoined, shapeConstraints(copy, componentSchemas)),
     limits,
   );
 }
 
-/** `schemaConstraints` of `schema` read as the one shape it is written as: its own levels and, for a reference to an array or primitive component or an alias of an enum component, the entries the reference passes. */
+/** `schemaConstraints` of `schema` read as the one shape it is written as: its own levels and, for a reference to a component whose limits no model alone carries (`limitReference`), the entries the reference passes. */
 function shapeConstraints(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): Constraints | undefined {
-  const reference = componentReference(schema, componentSchemas);
+  const reference = limitReference(schema, componentSchemas);
   return [...(reference?.own ?? [schema]), ...(reference?.limitEntries ?? [])].reduceRight<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, extractConstraints(level)),
     undefined,
   );
+}
+
+/**
+ * What a site that references a component reads the component's limits
+ * through, when the type the reference is can carry them: its own levels
+ * (`own`) and the entries the reference passes (`limitEntries`), as
+ * `componentReference` lists them for a reference to an array or primitive
+ * component or to an alias of an enum component — and, for a reference to
+ * a model component that admits other types beside its object
+ * (`activeMultiTypeModels`; #730), each key of its chain: the reference is
+ * the union of the model and those types, which carries the limits the
+ * component's schema writes as the same union written inline carries its
+ * schema's, so `{ $ref: Owner }` with `Owner: { type: ['object',
+ * 'string'], properties, minLength: 2 }` reads `{ minLength: 2 }` on the
+ * field and on its type. The model keeps what a model carries, and the
+ * site reads none of the component's documentation, as beside any `$ref`
+ * to a model. A site that narrows the reference to the model alone — `{
+ * type: 'object', allOf: [{ $ref: Owner }] }` — references a model like
+ * any other and reads none of it. `undefined` for any other schema, and
+ * outside an extraction.
+ */
+function limitReference(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): Pick<ComponentReference, 'own' | 'limitEntries'> | undefined {
+  const reference = componentReference(schema, componentSchemas);
+  if (reference || !componentSchemas) return reference;
+  const wrapped = wrappedReference(schema);
+  if (!wrapped) return undefined;
+  const key = componentKeyOf(wrapped.reference.$ref);
+  const listed = key === undefined ? undefined : activeMultiTypeModels.get(key);
+  if (!listed) return undefined;
+  // What the types each `allOf` on the way to the `$ref` names itself
+  // (`ownTypes`) leave of the model and its other types, innermost first,
+  // as the type built is narrowed (`narrowedToOwnType`): the model alone is
+  // a model reference, which reads none of the component's limits.
+  const left = wrapped.levels.reduceRight<readonly string[]>(
+    (types, level) => (level.$ref === undefined && level.allOf ? typesAdmitted(types, ownTypes(level)) : types),
+    ['object', ...listed.others],
+  );
+  if (left.length === 1 && left[0] === 'object') return undefined;
+  return { own: wrapped.levels, limitEntries: multiTypeModelEntries(listed.chain, componentSchemas) };
 }
 
 /**
@@ -2532,6 +2665,8 @@ export function extractSchemas(
   resetFoldedSchemas();
   resetNullVotes();
   resetFoldWarnings();
+  // No type list is known to be unreadable yet (`markUnreadTypeLists`).
+  unreadTypeLists = new WeakSet();
 
   // Build collision-safe transform if provided. The transform is probed with
   // the same (cleaned, raw) pair resolveSchemaName() will hand it, so a
@@ -2576,61 +2711,15 @@ export function extractSchemas(
   // other inline schema of the document is a root of its own.
   markContestedTitles(options?.document ?? { components: { schemas } });
 
-  // Pre-compute the set of keys whose component schema is an enum so
-  // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
-  // pass because the per-schema loop mutates models/enums and we want this map
-  // available before any TypeRef is resolved (operations + nested fields both
-  // call schemaToTypeRef during extraction). By the key a `$ref` names, never
-  // the name it resolves to, which two keys can share (#668).
-  activeEnumComponentKeys = new Set();
-  activeNullableEnumComponentKeys = new Set();
-  activeNullableModelComponentKeys = new Set();
-  activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
-  // The primitive components, by key, before any TypeRef is built: a `$ref`
-  // to one is the primitive, literal, union of primitives or `unknown` it
-  // declares wherever it is typed, an array component's items included.
-  activePrimitiveComponentKeys = new Set(
-    Object.entries(schemas)
-      .filter(([, schema]) => !isEnumComponentSchema(schema) && isPrimitiveComponentEntry(schema, schemas))
-      .map(([key]) => key),
-  );
-  // The aliases of enum components, by key, before any TypeRef is built: a
-  // `$ref` to one is the enum it names wherever it is typed (#560). Only
-  // an entry whose chain passes a `$ref` (`isEnumComponentAlias`): one
-  // that declares its own enum, inside whatever wrapper, is the enum
-  // (#606), and one that declares none is a model.
-  activeEnumAliasKeys = new Set(
-    Object.entries(schemas)
-      .filter(([, schema]) => isEnumComponentAlias(schema, schemas))
-      .map(([key]) => key),
-  );
-  for (const [name, schema] of Object.entries(schemas)) {
-    // An enum component is read on the schema it declares its members on
-    // (`enumComponentDeclaration`): through an `allOf` wrapper, the
-    // member's own nullability is the enum's unless the `allOf` vetoes it
-    // (`enumComponentAdmitsNull`; #716), and the wrapper's OAS 3.0
-    // `nullable: true` declares nothing.
-    const declaration = enumComponentDeclaration(schema);
-    if (declaration) {
-      activeEnumComponentKeys.add(name);
-      if (enumComponentAdmitsNull(schema)) activeNullableEnumComponentKeys.add(name);
-    } else if (
-      // A named union's `null` variant, or the `null` an object component
-      // declares on itself or on the component it is an alias of (#615),
-      // rides on every reference to the model (`componentTypeRef`), since
-      // the model built for it carries no wrapper.
-      isNullableModelComponentEntry(schema, schemas) &&
-      // A nullable wrapper around an array, a primitive or a `$ref` to an
-      // enum is no union but an array or primitive component, or an alias
-      // of the enum (#560), which a `$ref` names by its key and types with
-      // the component's own wrapper, as the schema written inline is typed.
-      !isArrayComponentEntry(schema, schemas) &&
-      !activePrimitiveComponentKeys.has(name) &&
-      !activeEnumAliasKeys.has(name)
-    ) {
-      activeNullableModelComponentKeys.add(name);
-    }
-  }
+  // What kind of component each key is, decided before any TypeRef is built
+  // (`decideComponentKinds`) — and once more when a type list cannot be read
+  // as the union of its per-type copies, so that the component it types
+  // keeps the model it always was (`markUnreadTypeLists`; #730). The lists
+  // are rehearsed with the enum, primitive and alias components known, and
+  // every other `$ref` a plain model reference: no array component is
+  // planned yet.
+  decideComponentKinds(schemas);
+  if (markUnreadTypeLists(schemas)) decideComponentKinds(schemas);
 
   // The array components, planned once the sets above are complete, in
   // rounds until the plans settle. Every tree starts under `item`. A round
@@ -2662,15 +2751,35 @@ export function extractSchemas(
   // its const derives.
   activeDispatcherVariantPlans = new Map();
   activeDispatcherVariantPlans = planDispatcherVariants(schemas);
-  const arrayComponents = Object.entries(schemas)
-    .filter(([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas))
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  // Planned with them, as a tree of its own: the `array` a model component
+  // names beside its object (#730), whose items are named under the model
+  // as an array component's are under the component, and step around the
+  // same names. Its plan is the model's (`MultiTypeModelOwner.items`), not
+  // an array component's: a `$ref` to the key is the model beside its other
+  // types.
+  const memberOwners = new Map(
+    [...activeMultiTypeModels.values()].flatMap(({ owner }) => {
+      const member = multiTypeArrayMember(owner);
+      return member ? [[owner.key, { owner, member }] as const] : [];
+    }),
+  );
+  const arrayComponents = [
+    ...Object.entries(schemas).filter(
+      ([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas),
+    ),
+    ...[...memberOwners].map(([key, { member }]) => [key, member] as [string, SchemaObject]),
+  ].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (arrayComponents.length > 0) {
     const contexts = new Map(arrayComponents.map(([key]) => [key, 'item']));
+    const plan = (key: string, schema: SchemaObject): void => {
+      const planned = arrayComponentPlan(key, schema, contexts.get(key)!);
+      const owner = memberOwners.get(key)?.owner;
+      if (owner) owner.items = planned;
+      else activeArrayComponentPlans.set(key, planned);
+    };
     const register = (): void => {
-      activeArrayComponentPlans = new Map(
-        arrayComponents.map(([key, schema]) => [key, arrayComponentPlan(key, schema, contexts.get(key)!)] as const),
-      );
+      activeArrayComponentPlans = new Map();
+      for (const [key, schema] of arrayComponents) plan(key, schema);
     };
     let settled = false;
     for (let round = 0; round < MAX_ARRAY_COMPONENT_ROUNDS && !settled; round++) {
@@ -2695,7 +2804,7 @@ export function extractSchemas(
         if (context === contexts.get(key)) continue;
         settled = false;
         contexts.set(key, context);
-        activeArrayComponentPlans.set(key, arrayComponentPlan(key, schema, context));
+        plan(key, schema);
         current.set(key, arrayComponentMints(name, schema, schemas, context));
       }
     }
@@ -2779,9 +2888,12 @@ export function extractSchemas(
       keepComponent(name, extractModel(pascalName, schema, schemas));
       modelComponentKeys.set(pascalName, [...(modelComponentKeys.get(pascalName) ?? []), name]);
 
+      // With what the other types of a component that is a model beside
+      // them reference: its `array` member's inline items (#730).
       for (const inlineModel of [
         ...extractDiscriminatedAllOfVariantModels(schema, pascalName, schemas),
         ...extractNamedUnionVariantModels(schema, pascalName, schemas),
+        ...multiTypeMemberModels(name, schemas),
       ]) {
         keepLarger(inlineModel);
       }
@@ -2831,6 +2943,11 @@ export function extractSchemas(
     const ref = arrayComponentTypeRef(name);
     if (ref) collectInlineEnumFromRef(ref, enums, new Set(enums.map((e) => e.name)));
   }
+  // ...and from the other types of every model component that admits some
+  // beside its object, which no model holds either (#730).
+  for (const key of memberOwners.keys()) {
+    collectInlineEnumFromRef(componentTypeRef(key), enums, new Set(enums.map((e) => e.name)));
+  }
 
   // NOTE: activeSchemaNameTransform is intentionally NOT cleared here.
   // extractOperations() calls schemaToTypeRef() for $ref resolution and
@@ -2838,6 +2955,90 @@ export function extractSchemas(
   // after all extraction is complete.
   activeNamedUnionMemo = null;
   return { models, enums };
+}
+
+/**
+ * Decide what kind of component each `components/schemas` key is, for the
+ * document `extractSchemas` is reading, before any TypeRef is built: the
+ * per-document sets every `$ref` is typed by (`componentTypeRef`).
+ */
+function decideComponentKinds(schemas: Record<string, SchemaObject>): void {
+  // Pre-compute the set of keys whose component schema is an enum so
+  // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
+  // pass because the per-schema loop mutates models/enums and we want this map
+  // available before any TypeRef is resolved (operations + nested fields both
+  // call schemaToTypeRef during extraction). By the key a `$ref` names, never
+  // the name it resolves to, which two keys can share (#668).
+  activeEnumComponentKeys = new Set();
+  activeNullableEnumComponentKeys = new Set();
+  activeNullableModelComponentKeys = new Set();
+  activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
+  // The primitive components, by key, before any TypeRef is built: a `$ref`
+  // to one is the primitive, literal, union of primitives or `unknown` it
+  // declares wherever it is typed, an array component's items included.
+  activePrimitiveComponentKeys = new Set(
+    Object.entries(schemas)
+      .filter(([, schema]) => !isEnumComponentSchema(schema) && isPrimitiveComponentEntry(schema, schemas))
+      .map(([key]) => key),
+  );
+  // The aliases of enum components, by key, before any TypeRef is built: a
+  // `$ref` to one is the enum it names wherever it is typed (#560). Only
+  // an entry whose chain passes a `$ref` (`isEnumComponentAlias`): one
+  // that declares its own enum, inside whatever wrapper, is the enum
+  // (#606), and one that declares none is a model.
+  activeEnumAliasKeys = new Set(
+    Object.entries(schemas)
+      .filter(([, schema]) => isEnumComponentAlias(schema, schemas))
+      .map(([key]) => key),
+  );
+  // The model components that admit other types beside their object, by
+  // key, before any TypeRef is built: a `$ref` to one is its model in a
+  // union with those types wherever it is typed (#730). The component that
+  // declares the type list and every alias of it share one owner.
+  activeMultiTypeModels = new Map();
+  const multiTypeOwners = new Map<string, MultiTypeModelOwner>();
+  for (const key of Object.keys(schemas)) {
+    const named = multiTypeModelChain(key, schemas);
+    const ownerKey = named?.owner;
+    const declared = ownerKey === undefined ? undefined : multiTypeModelDeclaration(schemas[ownerKey]!);
+    if (!named || ownerKey === undefined || !declared) continue;
+    const owner = multiTypeOwners.get(ownerKey) ?? {
+      key: ownerKey,
+      name: resolveSchemaName(ownerKey),
+      declaration: declared.declaration,
+      others: new Set(declared.others),
+      warnedSelfReference: false,
+    };
+    multiTypeOwners.set(ownerKey, owner);
+    activeMultiTypeModels.set(key, { chain: named.chain, owner, others: new Set(named.others) });
+  }
+  for (const [name, schema] of Object.entries(schemas)) {
+    // An enum component is read on the schema it declares its members on
+    // (`enumComponentDeclaration`): through an `allOf` wrapper, the
+    // member's own nullability is the enum's unless the `allOf` vetoes it
+    // (`enumComponentAdmitsNull`; #716), and the wrapper's OAS 3.0
+    // `nullable: true` declares nothing.
+    const declaration = enumComponentDeclaration(schema);
+    if (declaration) {
+      activeEnumComponentKeys.add(name);
+      if (enumComponentAdmitsNull(schema)) activeNullableEnumComponentKeys.add(name);
+    } else if (
+      // A named union's `null` variant, or the `null` an object component
+      // declares on itself or on the component it is an alias of (#615),
+      // rides on every reference to the model (`componentTypeRef`), since
+      // the model built for it carries no wrapper.
+      isNullableModelComponentEntry(schema, schemas) &&
+      // A nullable wrapper around an array, a primitive or a `$ref` to an
+      // enum is no union but an array or primitive component, or an alias
+      // of the enum (#560), which a `$ref` names by its key and types with
+      // the component's own wrapper, as the schema written inline is typed.
+      !isArrayComponentEntry(schema, schemas) &&
+      !activePrimitiveComponentKeys.has(name) &&
+      !activeEnumAliasKeys.has(name)
+    ) {
+      activeNullableModelComponentKeys.add(name);
+    }
+  }
 }
 
 /** Clear the module-level schemaNameTransform. Called by parseSpec() after all extraction phases. */
@@ -2850,6 +3051,8 @@ export function clearSchemaNameTransform(): void {
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
   activeArrayComponentPlans = new Map();
+  activeMultiTypeModels = new Map();
+  unreadTypeLists = new WeakSet();
   activePrimitiveComponentKeys = new Set();
   activeEnumAliasKeys = new Set();
   activeDispatcherVariantPlans = new Map();
@@ -4803,7 +5006,11 @@ export function warnOnUncarriedProperties(
  * property — compared after qualification, so a property `items`, whose
  * name singularizes to `<Variant>Item`, blocks `item` as well.
  * This is the single source of these names for the TypeRef builder
- * (`inlineVariantTypeRef`) and the extractors (`variantMemberSchemas`).
+ * (`multiTypeMembers`) and the extractors (`variantMemberSchemas`), for an
+ * inline variant — and for a component that is a model beside other types
+ * (`multiTypeModelChain`; #730), whose members that are no array are typed
+ * under `value` too, and whose `array` member under `item` until its plan
+ * is decided (`MultiTypeModelOwner.items`).
  */
 export function variantMemberKeys(variant: SchemaObject, variantName: string): { item: string; value: string } {
   const modelNameFor = (key: string): string => qualifyInlineModelName(toPascalCase(key), variantName);
@@ -4947,7 +5154,7 @@ export function componentReference(
   const wrapped = wrappedReference(schema);
   if (!wrapped || !componentSchemas) return undefined;
   const { reference } = wrapped;
-  const declares = isArrayComponentRef(reference)
+  const declares = namesArrayComponent(reference)
     ? isArrayComponentSchema
     : isPrimitiveComponentRef(reference)
       ? isPrimitiveComponentSchema
@@ -5275,7 +5482,12 @@ function holdsPendingReference(type: TypeRef): boolean {
  */
 function typedLeavingNoTrace(schema: SchemaObject, contextName: string): { type: TypeRef; reported: boolean } {
   const warn = console.warn;
-  const plans = [...activeArrayComponentPlans.values()];
+  // Each component that reports a reference to itself once: an array
+  // component, and a model component that admits other types (#730).
+  const plans: Array<{ warnedSelfReference: boolean }> = [
+    ...activeArrayComponentPlans.values(),
+    ...new Set([...activeMultiTypeModels.values()].map((listed) => listed.owner)),
+  ];
   const warned = plans.map((plan) => plan.warnedSelfReference);
   for (const plan of plans) plan.warnedSelfReference = false;
   let reported = false;
@@ -5840,21 +6052,93 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
   if (refName !== modelName) redirectedVariantModelRefs.add(modelRef);
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
-  const keys = variantMemberKeys(variant, modelName);
-  // The variant's limits are the union's, as a type list's are
-  // (`schemaToTypeRef`; #545), so the other members carry none, whichever
-  // level of the variant wrote them (`typeListVariants`; #711).
-  const { variants: members } = typeListVariants(
-    typeList
-      .filter((t) => t !== 'null')
-      .flatMap((t) => {
-        if (t === 'object') return [modelRef];
-        const copy = typeListCopy(variant, t, { nullable: false });
-        return copy === undefined ? [] : [buildTypeRef(copy, t === 'array' ? keys.item : keys.value, modelName)];
-      }),
-  );
-  const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
+  const ref = multiTypeMembers(variant, modelName, modelRef);
   return withSchemaConstraints(nullable ? asNullable(ref) : ref, variant);
+}
+
+/**
+ * The members a schema that is a model and, by its type list, other types
+ * besides is typed as, `null` and the schema's limits aside: the model
+ * (`modelRef`, the object the list names) in a union with one member per
+ * other type, in the list's order, or the model alone when the list names
+ * no other type the schema admits. The one builder for both such schemas:
+ * an inline object variant of a union (`inlineVariantTypeRef`) and a
+ * component (`multiTypeModelTypeRef`; #730). Each other member is the
+ * schema read as that type (`typeListCopy`), typed under `modelName` as
+ * parent — an `array` member's items under the context `variantMemberKeys`
+ * picks (`<Model>Item`), any other member under its `value` key — and
+ * carries no limit, whichever level wrote it (`typeListVariants`; #711);
+ * a type two members are typed alike as is one member (`dedupeTypeRefs`).
+ * A component's `array` member is typed from the plan the component's items
+ * were decided by (`items`: `MultiTypeModelOwner.items`), as an array
+ * component's reference is (`arrayComponentTypeRef`), so its items step
+ * around the names an array component's do; an inline variant has none.
+ */
+function multiTypeMembers(
+  schema: SchemaObject,
+  modelName: string,
+  modelRef: ModelRef,
+  items?: ArrayComponentPlan,
+  others?: ReadonlySet<string>,
+): TypeRef {
+  // The members `others` leaves, a `number` it leaves the integers of read
+  // as an `integer` (`typeLeft`): the types an alias narrowed the list to
+  // (`multiTypeModelChain`).
+  const members = multiTypeMemberSchemas(schema, modelName, true).flatMap(
+    ([context, member]): Array<[string, SchemaObject | undefined]> => {
+      if (member === undefined || others === undefined) return [[context, member]];
+      const left = typeLeft(others, String(member.type));
+      if (left === undefined) return [];
+      return [[context, left === member.type ? member : derivedCopy({ ...member, type: left }, member)]];
+    },
+  );
+  // The schema's limits are the union's, as a type list's are
+  // (`schemaToTypeRef`; #545), so the other members carry none, whichever
+  // level of the schema wrote them (`typeListVariants`; #711).
+  const { variants } = typeListVariants(
+    members.map(([context, member]) => {
+      if (member === undefined) return modelRef;
+      // A component's `array` member is typed from its plan, once it has one.
+      if (member.type === 'array' && items) {
+        return schemaToTypeRef(items.schema, items.context, items.name, items.properties);
+      }
+      return buildTypeRef(member, context, modelName);
+    }),
+    members.map(([, member]) => (member === undefined ? 'object' : String(member.type))),
+  );
+  return variants.length > 1 ? { kind: 'union', variants } : modelRef;
+}
+
+/** The `array` copy of the type list a model component admits other types by (`multiTypeMemberSchemas`), which its plan types and extracts (`MultiTypeModelOwner.items`); `undefined` when the list names no array. */
+function multiTypeArrayMember(owner: MultiTypeModelOwner): SchemaObject | undefined {
+  if (!owner.others.has('array')) return undefined;
+  return multiTypeMemberSchemas(owner.declaration, owner.name).find(([, member]) => member?.type === 'array')?.[1];
+}
+
+/**
+ * The members of a schema that is a model and, by its type list, other
+ * types besides, in the list's order, each as the synthetic property it is
+ * typed as (`multiTypeMembers`): the schema read as that type
+ * (`typeListCopy`) under the context `variantMemberKeys` picks — `item`
+ * for the `array` member, `value` for any other — less the types the
+ * schema's composition excludes. With `withModel`, the `object` the list
+ * names stands in its place, as `undefined`: the model itself, which no
+ * property stands for.
+ */
+function multiTypeMemberSchemas(
+  schema: SchemaObject,
+  modelName: string,
+  withModel = false,
+): Array<[context: string, member: SchemaObject | undefined]> {
+  const typeList = Array.isArray(schema.type) ? schema.type : [];
+  const keys = variantMemberKeys(schema, modelName);
+  return typeList
+    .filter((t) => t !== 'null')
+    .flatMap((t): Array<[string, SchemaObject | undefined]> => {
+      if (t === 'object') return withModel ? [[keys.value, undefined]] : [];
+      const copy = typeListCopy(schema, t, { nullable: false });
+      return copy === undefined ? [] : [[t === 'array' ? keys.item : keys.value, copy]];
+    });
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
@@ -6513,10 +6797,248 @@ function mintingSchema(variant: SchemaObject): SchemaObject {
  * array component: `schemaToTypeRef` types it as unknown, with a warning, so
  * it keeps the fieldless model it always became rather than warning at
  * every reference.
+ *
+ * So is a schema its type list types as an array beside other types, none
+ * of them `object` (`typeListComponentCopies`; #730): `Tags: { type:
+ * ['array', 'string'], items: { type: 'string' } }` is no model either — an
+ * array and a `string` have no fields — so a `$ref` to it is what the same
+ * schema is where it is written, `string[] | string`, its items named under
+ * the component as an array component's are (`TagsItem`), `null` in the
+ * list wrapping the union. It was a fieldless model `Tags`, and every
+ * `$ref` to it that model, while the spelling with the `items` in an
+ * `allOf` member (`{ type: ['array', 'string'], allOf: [{ items }] }`) was
+ * already read here, through that member. A `$ref` to such a component is
+ * typed from its plan as any array component's is, and is no array to a
+ * reader that asks (`isArrayComponentRef`). A list naming `object` too is a
+ * model beside its other types (`multiTypeModelChain`).
  */
 export function isArrayComponentSchema(schema: SchemaObject): boolean {
   const bare = unwrapNullableComponent(schema);
-  return isArraySchema(bare) && bare.items !== undefined;
+  if (isArraySchema(bare) && bare.items !== undefined) return true;
+  const copies = typeListComponentCopies(bare);
+  return copies !== undefined && typesOf(copies).has('array') && !typesOf(copies).has('object');
+}
+
+/** The type each per-type copy of a type list stands for (`typeListCopy` sets `type` to it), as a set. */
+function typesOf(copies: readonly SchemaObject[]): ReadonlySet<unknown> {
+  return new Set(copies.map((copy) => copy.type));
+}
+
+/**
+ * The per-type copies of a component schema typed by its own type list
+ * (`typeListCopy`, one per type the list names besides `null`, in the
+ * list's order, less the types the schema's composition excludes) — what a
+ * `$ref` to the component is the union of, as the same schema is where it
+ * is written (`buildTypeRef`; #730) — or `undefined` for a schema the
+ * component readers do not read that way:
+ *
+ *   - a `$ref`, beside which nothing but annotations is read, and a `type`
+ *     that is no list of several types (`namesSeveralTypes`): one type, or
+ *     one beside `null`, is read as that type;
+ *   - a list holding a name no rule knows, or an entry that is no name
+ *     (`['array', 'text']`, `['array', 1]`): such a component keeps the
+ *     fieldless model it always became, as a `type` no rule knows does
+ *     alone (`isPrimitiveComponentSchema`);
+ *   - a `const`, an `enum:` list, or a `oneOf`/`anyOf` that types the
+ *     schema (`unionTypesSchema`), each read before the list as it always
+ *     was — the literal, the enum, and the named union or composed model
+ *     whose variants the union gives;
+ *   - a list naming `array` whose array copy declares no `items`, beside
+ *     the list or in the member its `allOf` is read as (`arraySchemaOf`,
+ *     as an array component must declare them): `schemaToTypeRef` types
+ *     that copy as unknown, with a warning, so the component stays the
+ *     model it was rather than warning at every reference;
+ *   - a list whose copies the readers cannot read whole (`unreadTypeLists`,
+ *     decided once per document by `markUnreadTypeLists`): a keyword of
+ *     the wrong kind under the array copy's `items`, say, which no reader
+ *     was handed while the component was a model, or `items` the readers
+ *     type as a model they do not build;
+ *   - a list no entry of which the schema's composition admits
+ *     (`typeListCopies` reads that one as written).
+ *
+ * A list of primitives alone is read here too, though no reader asks: it
+ * is a primitive component (`isPrimitiveTypeList`).
+ */
+function typeListComponentCopies(schema: SchemaObject): SchemaObject[] | undefined {
+  if (schema.$ref !== undefined || !namesSeveralTypes(schema)) return undefined;
+  const types: unknown[] = (Array.isArray(schema.type) ? schema.type : []).filter((type) => type !== 'null');
+  if (!types.every((type): type is string => typeof type === 'string' && Object.hasOwn(TYPE_FAMILY_KEYWORDS, type))) {
+    return undefined;
+  }
+  if (schema.const !== undefined || schema.enum !== undefined) return undefined;
+  const unions = [schema.oneOf, schema.anyOf].filter((variants) => variants !== undefined);
+  if (unions.some((variants) => !Array.isArray(variants) || unionTypesSchema(variants))) return undefined;
+  if (unreadTypeLists.has(sourceDeclaration(schema))) return undefined;
+  const copies = types
+    .map((type) => typeListCopy(schema, type))
+    .filter((copy): copy is SchemaObject => copy !== undefined);
+  const untyped = copies.some((copy) => copy.type === 'array' && arraySchemaOf(copy)?.items === undefined);
+  return copies.length === 0 || untyped ? undefined : copies;
+}
+
+/**
+ * Decide which components of `schemas` cannot be read as the union of
+ * their type list's copies (`unreadTypeLists`; #730), and whether any was
+ * found. Such a component was a model, built from its `properties` alone,
+ * so no reader was ever handed what its list's other types carry — the
+ * copies themselves, the `items` of its array copy and everything under
+ * them — and a document that writes there what those readers do not read
+ * parsed all the same: a keyword of the wrong kind at any depth, which
+ * they throw on (`items: { enum: true }`, `items: { type: 'object',
+ * required: 5 }`, a `format` that is a `$ref` back to the component), or
+ * a schema they type without building what it references (`readsWhole`:
+ * `items` that are themselves a type list of an array of inline objects,
+ * whose item model the field extractor builds for no schema, in a
+ * component or in place). So each candidate's reading is rehearsed here
+ * once, silently and leaving no trace (`rehearse`), with the document's
+ * enum, primitive and alias components decided (`decideComponentKinds`)
+ * and a `$ref` to any other component a plain model reference — no array
+ * component is planned yet, and no other list's reading is made on this
+ * one's account: the list is typed as the union of its copies, and every
+ * copy that is no object typed and extracted, as each will be, under the
+ * component's name. One the readers throw on, or leave naming a
+ * model nobody builds, is recorded, and the component keeps its model — a
+ * document that parsed still parses, read as it was, with no reference to
+ * a model it does not hold — rather than the reading deciding from a list
+ * of the shapes it could not make. A document those readers read is
+ * unaffected: the rehearsal types nothing the extraction keeps.
+ */
+function markUnreadTypeLists(schemas: Record<string, SchemaObject>): boolean {
+  let marked = false;
+  const components = new Set(Object.keys(schemas).map((key) => resolveSchemaName(key)));
+  for (const [key, schema] of Object.entries(schemas)) {
+    let list: SchemaObject | undefined;
+    let read = false;
+    try {
+      list = isSchemaObject(schema) ? typeListSchemaOf(schema)?.list : undefined;
+      if (!list) continue;
+      const listed = list;
+      const copies = typeListComponentCopies(listed);
+      if (!copies) continue;
+      const name = resolveSchemaName(key);
+      read = rehearse(() => readsWhole(listed, copies, name, schemas, components));
+    } catch {
+      read = false;
+    }
+    if (read || !list) continue;
+    unreadTypeLists.add(sourceDeclaration(list));
+    marked = true;
+  }
+  return marked;
+}
+
+/**
+ * Whether the readers read `list` — a component's type list, with the
+ * per-type `copies` it is the union of — whole, typed and extracted as the
+ * synthetic property `item` of `name`: every model the copies that are no
+ * object name, or the models built for them name in turn, is one the
+ * extraction builds (`markUnreadTypeLists`). Read with no array component
+ * and no model component's other types registered
+ * (`withoutArrayComponents`), so a `$ref` to any component is the plain
+ * reference to it: only this list's own reading is rehearsed, never
+ * another component's, which answers for itself (a list that only names
+ * one the readers cannot read is read all the same), and only the names
+ * this reading mints are asked about. A
+ * reference to a component (`isComponentModelRef`, or a name a component
+ * resolves to, which a discriminator's mapping can redirect an inline
+ * variant to), one copied from a component's own field
+ * (`isInheritedModelRef`) and one the settle has yet to type
+ * (`isPendingSchemaRef`) name models other passes build.
+ */
+function readsWhole(
+  list: SchemaObject,
+  copies: readonly SchemaObject[],
+  name: string,
+  schemas: Record<string, SchemaObject>,
+  components: ReadonlySet<string>,
+): boolean {
+  return withoutArrayComponents(() => {
+    // The list as a whole, which is where its variants are compared.
+    schemaToTypeRef(list, 'item', name);
+    const models: Model[] = [];
+    const types: TypeRef[] = [];
+    for (const copy of copies) {
+      if (copy.type === 'object') continue;
+      types.push(schemaToTypeRef(copy, 'item', name));
+      extractInlineModelsFromProperties({ properties: { item: copy } }, models, name, schemas);
+    }
+    const built = new Set(models.map((model) => model.name));
+    let whole = true;
+    for (const type of [...types, ...models.flatMap((model) => collectModelTypeRefs(model))]) {
+      walkTypeRef(type, {
+        model: (ref) => {
+          const elsewhere = isComponentModelRef(ref) || isInheritedModelRef(ref) || isPendingSchemaRef(ref);
+          if (!elsewhere && !built.has(ref.name) && !components.has(ref.name)) whole = false;
+        },
+      });
+    }
+    return whole;
+  });
+}
+
+/**
+ * The type list a component is read by (`typeListSchemaOf`), with the
+ * `type` each `allOf` wrapper around it names.
+ */
+interface ListedSchema {
+  /** The schema whose `type` names several types, as the document writes it. */
+  list: SchemaObject;
+  /** The types each wrapper on the way names itself (`ownTypes`), outermost first: each narrows the list's union as the wrapper is unwrapped (`narrowedToOwnType`). */
+  narrowings: ReadonlyArray<ReadonlySet<string>>;
+}
+
+/**
+ * The schema whose type list types `schema`, read as the type builder reads
+ * a component's entry before it comes to a list (`buildTypeRef`): `schema`
+ * itself when its `type` names several types (`namesSeveralTypes`), the one
+ * branch of a nullable wrapper around such a schema
+ * (`unwrapNullableComponent`), or the member a lone `allOf` is read as
+ * (`allOfReadAsMember`), however they nest — with the types each such
+ * `allOf` wrapper names itself (`ownTypes`), which the list's union is
+ * narrowed by (`listedCopies`). `undefined` when the reading comes to no
+ * such list: a `$ref`, which names another entry, or a schema typed by any
+ * other keyword. The list as the document writes it, whatever it holds: a
+ * reader that needs its per-type copies asks `listedCopies`. A member the
+ * walk is already reading ends it.
+ */
+function typeListSchemaOf(
+  schema: SchemaObject,
+  seen: Set<SchemaObject> = new Set(),
+  narrowings: ReadonlyArray<ReadonlySet<string>> = [],
+): ListedSchema | undefined {
+  if (schema.$ref !== undefined) return undefined;
+  if (namesSeveralTypes(schema)) return { list: schema, narrowings };
+  const bare = unwrapNullableComponent(schema);
+  if (bare !== schema) return typeListSchemaOf(bare, seen, narrowings);
+  const member = allOfReadAsMember(bare);
+  if (member === undefined || seen.has(sourceDeclaration(member))) return undefined;
+  seen.add(sourceDeclaration(member));
+  const own = ownTypes(bare);
+  return typeListSchemaOf(member, seen, own ? [...narrowings, own] : narrowings);
+}
+
+/**
+ * The per-type copies a component is the union of: those of the list it is
+ * read by (`typeListComponentCopies`), less the types the wrappers around
+ * the list do not admit, each narrowing what the one inside it left, as
+ * the type builder narrows the union on its way out (`narrowedToOwnType`):
+ * `{ type: 'object', allOf: [{ type: ['object', 'string'], properties }] }`
+ * is the object alone. `undefined` when the list is read by no copies.
+ */
+function listedCopies({ list, narrowings }: ListedSchema): SchemaObject[] | undefined {
+  const copies = typeListComponentCopies(list);
+  return (
+    copies &&
+    narrowings.reduceRight<SchemaObject[]>((kept, own) => {
+      // A `number` copy the wrapper leaves the integers of is read as an `integer` one (`typeLeft`).
+      const admitted = kept.flatMap((copy) => {
+        const left = typeLeft(own, String(copy.type));
+        if (left === undefined) return [];
+        return [left === copy.type ? copy : derivedCopy({ ...copy, type: left }, copy)];
+      });
+      return admitted.length > 0 ? admitted : kept;
+    }, copies)
+  );
 }
 
 /**
@@ -6544,11 +7066,16 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
  * inline was the literal, the union or `unknown`; so did the lone-`allOf`
  * spelling of an untyped schema until the #569 review, while the lone-`allOf`
  * spelling of a `const`, a type list or a primitive was read through
- * (`componentEntries`). A type list naming `object` or `array`, a `type` no
- * rule knows, `type: 'null'` alone in either spelling, `type: 'array'`
- * without `items`, and an `allOf` of several typing members
- * (`allOfTypesSchema` reads it as none of them) are none of these: each
- * keeps the fieldless model it always became.
+ * (`componentEntries`). A type list naming `array` or `object` beside
+ * other types is none of these, and is read by the same rule all the
+ * same — the union of what its types are (#730: it was a model, the other
+ * types lost): an array component when it names no `object`
+ * (`isArrayComponentSchema`), its items named under the component, and
+ * otherwise the model the component builds beside its other types
+ * (`multiTypeModelChain`). A `type` no rule knows, `type: 'null'` alone in
+ * either spelling, `type: 'array'` without `items`, and an `allOf` of
+ * several typing members (`allOfTypesSchema` reads it as none of them) are
+ * none of these either: each keeps the fieldless model it always became.
  */
 function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
   const bare = unwrapNullableComponent(schema);
@@ -6589,7 +7116,8 @@ function declaresNoType(schema: SchemaObject): boolean {
  * primitive among them — the lists `schemaToTypeRef` types as a primitive,
  * a union of primitives, or either under `nullable` (#569). A list of
  * `null` alone names no primitive, and a list naming `object` or `array`
- * types a map, a model or an array beside the primitives.
+ * types a model or an array beside the primitives
+ * (`typeListComponentCopies`).
  */
 function isPrimitiveTypeList(type: string | string[]): boolean {
   const types = Array.isArray(type) ? type : [type];
@@ -6711,6 +7239,132 @@ export function buildsComponentModel(schema: SchemaObject, schemas: Record<strin
     !isPrimitiveComponentEntry(schema, schemas) &&
     !isEnumComponentAlias(schema, schemas)
   );
+}
+
+/**
+ * The schema whose type list makes a model component a model beside other
+ * types (#730), with those types in the list's order, or `undefined` for
+ * any other: the list the component is read by (`typeListSchemaOf`: its
+ * own, or the member a lone `allOf` is read as, as a nullable object
+ * component's `null` is read through one, `declaresNull`) when the
+ * per-type copies it is the union of (`listedCopies`) hold an `object` and
+ * another type — `Owner: { type: ['object', 'string'], properties }`, `{
+ * type: ['array', 'object'], items, properties }`, `{ type: ['object',
+ * 'string'], allOf: [{ $ref: Base }, { properties }] }`. The object is the
+ * model the component builds, as `type: 'object'` in the list's place
+ * makes it — from its `properties`, its `allOf`, or with no fields — and
+ * the other types ride on each reference (`multiTypeModelTypeRef`). A
+ * list left with the object alone is that model alone, as before: one
+ * whose composition admits no other type (`{ type: ['object', 'string'],
+ * allOf: [{ $ref: Typed }] }` with `Typed` declaring `type: 'object'`,
+ * which no string satisfies), and one under a wrapper whose own `type`
+ * admits none (`{ type: 'object', allOf: [{ type: ['object', 'string'],
+ * properties }] }`).
+ */
+function multiTypeModelDeclaration(schema: SchemaObject): { declaration: SchemaObject; others: string[] } | undefined {
+  const listed = typeListSchemaOf(schema);
+  const copies = listed && listedCopies(listed);
+  if (!listed || !copies) return undefined;
+  const types = [...typesOf(copies)].map(String);
+  const others = types.filter((type) => type !== 'object');
+  return types.includes('object') && others.length > 0 ? { declaration: listed.list, others } : undefined;
+}
+
+/**
+ * The `components/schemas` keys a reference to the model component under
+ * `key` reads its other types through (`MultiTypeModel.chain`), nearest
+ * first — `key`, each alias it names in turn, and the component whose
+ * type list names `object` beside other types (`owner`;
+ * `multiTypeModelDeclaration`) — with the other types the reference
+ * carries (`MultiTypeModel.others`), or `undefined` when the component
+ * admits nothing but its object (#730). A list written beside an `allOf`
+ * that is read as a reference to another such component (`Listed: { type:
+ * ['object', 'string'], allOf: [{ $ref: Owner }] }`) is the alias's own
+ * list, typed from its own copies, and the chain goes on through the
+ * component it names, whose limits the reference reads as the same schema
+ * on a field reads them (`limitReference`): `{ minLength: 2 }` on `Owner`
+ * is on `Listed | string` as it is on a `$ref` to `Plain: { allOf: [{
+ * $ref: Owner }] }`. An alias is what it is for the
+ * `null` a nullable object component admits
+ * (`isNullableModelComponentEntry`): a bare `$ref` (`OwnerAlias: { $ref:
+ * Owner }`; #618) or an `allOf` read as its `$ref` member, alone or beside
+ * members that only annotate or limit it (`allOfReadAsMember`), at every
+ * hop of a chain — a model of its own carrying the component's fields,
+ * which a `$ref` names in a union with the component's other types, as
+ * the same `allOf` on a field is typed. So the `type` an alias writes
+ * beside its `allOf`, or in a member of it that is no object the `allOf`
+ * merges (`ownTypes`), narrows what it names, as it does on a field
+ * (`narrowedToOwnType`): `B: { type: 'object', allOf: [{ $ref: Owner }] }`
+ * admits no string and is the model `B` alone, as it was, and `C: { type:
+ * ['object', 'integer'], allOf: [{ $ref: Owner }] }` over `Owner | string`
+ * the model `C` alone; a `type` that leaves the object out (`{ type:
+ * 'string', allOf: [{ $ref: Owner }] }`, `{ allOf: [{ $ref: Owner }, {
+ * type: 'string' }] }`) leaves the alias the model it always built.
+ * Nothing is read beside a bare `$ref`.
+ * Only a component that becomes a model is read (`buildsComponentModel`):
+ * an array, primitive or enum component, or an alias of one, is typed from
+ * its own schema. Neither is a named union, whose variants carry what its
+ * `oneOf` admits (`isNamedUnionSchema`: `{ oneOf: [{ type: ['object',
+ * 'string'], properties }, { type: 'null' }] }` is the union of one
+ * `Model | string`, as before), nor an `allOf` that merges, which is the
+ * model the merge builds, as the same `allOf` is where it is written. A
+ * chain that returns to a key it has visited admits nothing through the
+ * loop.
+ */
+function multiTypeModelChain(
+  key: string,
+  schemas: Record<string, SchemaObject>,
+  seen: Set<string> = new Set(),
+): { chain: string[]; owner: string; others: string[] } | undefined {
+  const schema: unknown = Object.hasOwn(schemas, key) ? schemas[key] : undefined;
+  if (!isSchemaObject(schema) || seen.has(key) || !buildsComponentModel(schema, schemas)) return undefined;
+  seen.add(key);
+  const aliasedBy = (wrapper: SchemaObject) => {
+    const member = wrapper.$ref !== undefined ? wrapper : allOfReadAsMember(wrapper);
+    const aliased = member?.$ref === undefined ? undefined : componentKeyOf(member.$ref);
+    return aliased === undefined ? undefined : multiTypeModelChain(aliased, schemas, seen);
+  };
+  if (schema.$ref === undefined) {
+    if (isNamedUnionSchema(schema)) return undefined;
+    const declared = multiTypeModelDeclaration(schema);
+    if (declared) {
+      return { chain: [key, ...(aliasedBy(declared.declaration)?.chain ?? [])], owner: key, others: declared.others };
+    }
+  }
+  const bare = schema.$ref !== undefined ? schema : unwrapNullableSchema(schema);
+  const named = aliasedBy(bare);
+  if (!named) return undefined;
+  // Nothing but annotations is read beside a bare `$ref`; an `allOf` read
+  // as the reference is narrowed by the `type` written beside it.
+  const own = schema.$ref !== undefined ? undefined : ownTypes(bare);
+  const admitted = typesAdmitted(['object', ...named.others], own);
+  const others = admitted.filter((type) => type !== 'object');
+  return admitted.includes('object') && others.length > 0
+    ? { chain: [key, ...named.chain], owner: named.owner, others }
+    : undefined;
+}
+
+/**
+ * The models the other types of a model component reference that nothing
+ * else materializes (#730): the inline items of its `array` member and
+ * everything nested under them, extracted by the field extractor under the
+ * component's name, each member as the synthetic property `multiTypeMembers`
+ * types it as (`multiTypeMemberSchemas`) — so the reference and the models
+ * agree by construction, as an array component's do
+ * (`extractArrayComponentModels`). Nothing for an alias, whose other types
+ * are the declaring component's, and for any other component.
+ */
+function multiTypeMemberModels(key: string, schemas: Record<string, SchemaObject>): Model[] {
+  const owner = activeMultiTypeModels.get(key)?.owner;
+  if (owner?.key !== key) return [];
+  const models: Model[] = [];
+  if (owner.items) extractPlannedModels(owner.items, models, schemas);
+  for (const [context, member] of multiTypeMemberSchemas(owner.declaration, owner.name)) {
+    if (member === undefined || !owner.others.has(String(member.type))) continue;
+    if (member.type === 'array' && owner.items) continue;
+    extractInlineModelsFromProperties({ properties: { [context]: member } }, models, owner.name, schemas);
+  }
+  return models;
 }
 
 /**
@@ -6853,9 +7507,12 @@ function arrayComponentMints(
   context: string,
 ): ArrayComponentMints {
   return rehearse(() => {
+    const properties = new Map([[context, schema]]);
     const extract = (): Model[] => {
       const models: Model[] = [];
-      extractInlineModelsFromProperties({ properties: { [context]: schema } }, models, name, schemas);
+      for (const tree of arrayComponentTrees(schema)) {
+        extractInlineModelsFromProperties({ properties: { [context]: tree } }, models, name, schemas, properties);
+      }
       return models;
     };
     const models = extract();
@@ -6896,8 +7553,62 @@ function arrayComponentPlan(key: string, schema: SchemaObject, context: string):
     schema,
     context,
     properties: new Map([[context, schema]]),
+    trees: arrayComponentTrees(schema),
+    types: arrayEntryTypes(schema, activeComponentSchemas) ?? new Set(['array']),
     warnedSelfReference: false,
   };
+}
+
+/**
+ * The schemas an array component's synthetic property is extracted as
+ * (`ArrayComponentPlan.trees`): the schema itself, or — for a component
+ * its type list types as an array beside other types
+ * (`typeListComponentCopies`, of the list the entry is read by,
+ * `typeListSchemaOf`; #730) — its per-type copies, each a schema of one
+ * type. The type builder types such a list one copy at a time, every copy
+ * under the property's context, so the array copy's items are `<Component>
+ * Item`; the field extractor reads a schema by the one keyword that types
+ * it (`classifyInlineSchema`), to which `items` beside a list of several
+ * types are nothing, so handed the list it would build no model for them
+ * and the reference would name one nobody built. An alias of the component
+ * — a `$ref`, which mints nothing — is itself.
+ */
+function arrayComponentTrees(schema: SchemaObject): SchemaObject[] {
+  const listed = typeListSchemaOf(schema);
+  return (listed && listedCopies(listed)) ?? [schema];
+}
+
+/**
+ * The JSON types a `$ref` to an array component is typed as
+ * (`ArrayComponentPlan.types`), read from the document as the type builder
+ * types the entry, through the readings an array component is known by
+ * (`componentEntries`): `array` for an array schema that declares `items`;
+ * each type a type list is the union of (`typeListComponentCopies`); what
+ * the entry a `$ref` names is typed as; and, for an `allOf` read as a
+ * member, the member's types less those the `allOf` schema's own `type`,
+ * or a member's, does not admit (`ownTypes`, `typesAdmitted`, as
+ * `narrowedToOwnType` narrows the type built). `undefined` for an entry the walk has met, or one it
+ * reads as no array component.
+ */
+function arrayEntryTypes(
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+  seen: Set<SchemaObject> = new Set(),
+): ReadonlySet<string> | undefined {
+  if (seen.has(schema)) return undefined;
+  seen.add(schema);
+  const bare = unwrapNullableComponent(schema);
+  if (bare.$ref !== undefined) {
+    const key = componentKeyOf(bare.$ref);
+    const target = key !== undefined && schemas && Object.hasOwn(schemas, key) ? schemas[key] : undefined;
+    return isSchemaObject(target) ? arrayEntryTypes(target, schemas, seen) : undefined;
+  }
+  if (isArraySchema(bare) && bare.items !== undefined) return new Set(['array']);
+  const copies = typeListComponentCopies(bare);
+  if (copies) return new Set(copies.map((copy) => String(copy.type)));
+  const member = allOfReadAsMember(bare);
+  const inner = member === undefined ? undefined : arrayEntryTypes(member, schemas, seen);
+  return inner && new Set(typesAdmitted([...inner], ownTypes(bare)));
 }
 
 /**
@@ -6907,24 +7618,32 @@ function arrayComponentPlan(key: string, schema: SchemaObject, context: string):
  */
 function withoutArrayComponents<T>(fn: () => T): T {
   const plans = activeArrayComponentPlans;
+  const listed = activeMultiTypeModels;
   activeArrayComponentPlans = new Map();
+  activeMultiTypeModels = new Map();
   try {
     return fn();
   } finally {
     activeArrayComponentPlans = plans;
+    activeMultiTypeModels = listed;
   }
 }
 
 /**
  * Run `fn` as a rehearsal whose output is discarded: `console.warn` is
  * silenced, and the memory of which unions' fold warnings were already
- * reported is set aside and restored, so every warning the schema deserves
- * is printed once, by the extraction that keeps the models.
+ * reported is set aside and restored — as is that of the model components
+ * that reported a reference to themselves through their other types
+ * (`MultiTypeModelOwner.warnedSelfReference`; #730), which outlive a
+ * rehearsal where an array component's plan is replaced — so every warning
+ * the schema deserves is printed once, by the extraction that keeps the
+ * models.
  */
 export function rehearse<T>(fn: () => T): T {
   const warn = console.warn;
   const reported = reportedUncarriedProperties;
   const unread = reportedUnreadUnions;
+  const owners = new Map([...activeMultiTypeModels.values()].map(({ owner }) => [owner, owner.warnedSelfReference]));
   console.warn = () => {};
   reportedUncarriedProperties = new WeakSet();
   reportedUnreadUnions = new WeakSet();
@@ -6934,6 +7653,7 @@ export function rehearse<T>(fn: () => T): T {
     console.warn = warn;
     reportedUncarriedProperties = reported;
     reportedUnreadUnions = unread;
+    for (const [owner, warned] of owners) owner.warnedSelfReference = warned;
   }
 }
 
@@ -7037,20 +7757,37 @@ function arrayComponentClaims(
  * `items.oneOf`, the objects of a nested array or map, an `allOf`, and
  * everything nested under them — extracted by the field extractor from the
  * plan's synthetic property under the component's resolved name, exactly as
- * `arrayComponentTypeRef` types it. Nothing for an alias of another array
- * component, whose `$ref` mints nothing.
+ * `arrayComponentTypeRef` types it: the schema itself, or each per-type
+ * copy of one a type list types (`ArrayComponentPlan.trees`; #730), under
+ * the one sibling set the reference is typed with. Nothing for an alias of
+ * another array component, whose `$ref` mints nothing.
  */
 function extractArrayComponentModels(key: string, schemas: Record<string, SchemaObject>): Model[] {
   const plan = activeArrayComponentPlans.get(key);
   if (!plan) return [];
   const models: Model[] = [];
-  extractInlineModelsFromProperties({ properties: Object.fromEntries(plan.properties) }, models, plan.name, schemas);
+  extractPlannedModels(plan, models, schemas);
   return models;
+}
+
+/** Extract into `models` what `plan`'s synthetic property references: each of its trees, under the plan's name and the one sibling set its reference is typed with. */
+function extractPlannedModels(plan: ArrayComponentPlan, models: Model[], schemas: Record<string, SchemaObject>): void {
+  for (const tree of plan.trees) {
+    extractInlineModelsFromProperties(
+      { properties: { [plan.context]: tree } },
+      models,
+      plan.name,
+      schemas,
+      plan.properties,
+    );
+  }
 }
 
 /**
  * The TypeRef a `$ref` to the array component under `key` resolves to: the
- * array the component declares, built by `schemaToTypeRef` from the plan's
+ * array the component declares — or the union of that array and the other
+ * types its type list names (`isArrayComponentSchema`; #730) — built by
+ * `schemaToTypeRef` from the plan's
  * synthetic property under the component's resolved name — so a nullable
  * type list or OAS 3.0 flag on the component wraps it in `nullable`, an
  * alias (`isArrayComponentEntry`) resolves to the component it names, `$ref`
@@ -7091,15 +7828,53 @@ function arrayComponentTypeRef(key: string): TypeRef | undefined {
  * (`allOfReadAsMember`: `allOf: [{ $ref: Pets }]`), so a reader that asks
  * whether a property is an array from the document (`detectListEnvelope`,
  * `buildFieldFromSchema`) answers for a reference as `schemaToTypeRef`
- * types it. False outside an extraction, as a `$ref` to an enum component
- * is a model reference there, and for a `$ref` that names no component — a
- * pointer deeper into one, which `isArrayPointerRef` answers for.
+ * types it: an array component whose type list names another type beside
+ * `array` is typed as the union of the two and is no array
+ * (`ArrayComponentPlan.types`; #730: `data: { $ref: Tags }` with `Tags: {
+ * type: ['array', 'string'], allOf: [{ items }] }` was read as a list
+ * envelope's array, and the response typed `Pet[] | string` with `string`
+ * for its item). False outside an extraction, as a `$ref` to an enum
+ * component is a model reference there, and for a `$ref` that names no
+ * component — a pointer deeper into one, which `isArrayPointerRef` answers
+ * for.
  */
 export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
-  if (!schema) return false;
+  const types = arrayComponentRefTypes(schema);
+  return types !== undefined && types.size === 1 && types.has('array');
+}
+
+/**
+ * The JSON types `schema` is typed as when it is a `$ref` to an array
+ * component, under the wrappers `isArrayComponentRef` reads through: the
+ * component's (`ArrayComponentPlan.types`), less those the `type` an
+ * `allOf` on the way names, beside it or in a member (`ownTypes`), does
+ * not admit (`typesAdmitted`), so `{ type: 'array', allOf: [{ $ref: Tags
+ * }] }` and `{ allOf: [{ $ref: Tags }, { type: 'array' }] }` over `Tags:
+ * { type: ['array', 'string'], items }` are arrays, as each is typed
+ * (`narrowedToOwnType`).
+ * `undefined` for any other schema.
+ */
+function arrayComponentRefTypes(schema: SchemaObject | undefined): ReadonlySet<string> | undefined {
+  if (!schema) return undefined;
   const bare = unwrapNullableSchema(schema);
-  if (!bare.$ref) return isArrayComponentRef(allOfReadAsMember(bare));
+  if (!bare.$ref) {
+    const inner = arrayComponentRefTypes(allOfReadAsMember(bare));
+    return inner && new Set(typesAdmitted([...inner], ownTypes(bare)));
+  }
   const key = componentKeyOf(bare.$ref);
+  return key === undefined ? undefined : activeArrayComponentPlans.get(key)?.types;
+}
+
+/**
+ * Whether `schema` is a bare `$ref` to an array component, by the key the
+ * `$ref` names, whatever its plan types the reference as: an array, or the
+ * union a type list naming another type beside `array` makes it (#730).
+ * For the reader that asks which kind of component a reference reads its
+ * declarations through (`componentReference`), not whether it is an array
+ * (`isArrayComponentRef`). False outside an extraction, as that one is.
+ */
+function namesArrayComponent(schema: SchemaObject): boolean {
+  const key = componentKeyOf(schema.$ref);
   return key !== undefined && activeArrayComponentPlans.has(key);
 }
 
@@ -7170,7 +7945,8 @@ export const OWN_MODEL = 'own';
  * review: every such list was refused, so a component dispatching to a
  * pointer at one was flattened while the union of the same variants was
  * mapped) — while `{ type: ['object', 'string'], properties }` is `Model |
- * string`, no model. `undefined` for everything else: a `$ref` no
+ * string`, no model, and so is a `$ref` to a component written so, or to
+ * an alias of one (`multiTypeModelChain`; #730). `undefined` for everything else: a `$ref` no
  * component answers, a `oneOf`/`anyOf`, an array, a map, an enum, a
  * `const` and a primitive.
  */
@@ -7184,11 +7960,14 @@ export function modelReferenceIdentity(
     const key = componentKeyOf(bare.$ref);
     if (key === undefined) return pointerModelIdentity(String(bare.$ref), schemas);
     const target = componentSchemaOf(String(bare.$ref), schemas);
+    // A model component that admits other types beside its object is typed
+    // as the union of the model and those types, no model (#730).
     const modelless =
       target === undefined ||
       isEnumComponentEntry(target, schemas) ||
       isArrayComponentEntry(target, schemas) ||
-      isPrimitiveComponentEntry(target, schemas);
+      isPrimitiveComponentEntry(target, schemas) ||
+      multiTypeModelChain(key, schemas) !== undefined;
     return modelless ? undefined : `component:${resolveSchemaName(key)}`;
   }
   if (namesSeveralTypes(bare)) {
@@ -7200,7 +7979,29 @@ export function modelReferenceIdentity(
   if (kind === 'object') return OWN_MODEL;
   if (kind !== 'allOf') return undefined;
   const member = allOfReadAsMember(bare);
-  return member === undefined ? OWN_MODEL : modelReferenceIdentity(member, schemas);
+  if (member === undefined) return OWN_MODEL;
+  return modelReferenceIdentity(member, schemas) ?? narrowedModelIdentity(bare, member, schemas);
+}
+
+/**
+ * Which model `wrapper` is typed as a reference to when the `$ref` its
+ * `allOf` is read as (`member`) names a model component that admits other
+ * types, and the types the wrapper names itself (`ownTypes`) admit the
+ * object alone (`narrowedToOwnType`; #730): `{ type: 'object', allOf: [{
+ * $ref: Owner }] }` over `Owner: { type: ['object', 'string'], properties
+ * }` is `Owner`, as it was while every `$ref` to `Owner` was. `undefined`
+ * for any other wrapper: the reference stays the union.
+ */
+function narrowedModelIdentity(
+  wrapper: SchemaObject,
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+): string | undefined {
+  const key = componentKeyOf(member.$ref);
+  const named = key === undefined ? undefined : multiTypeModelChain(key, schemas);
+  if (key === undefined || !named) return undefined;
+  const left = typesAdmitted(['object', ...named.others], ownTypes(wrapper));
+  return left.length === 1 && left[0] === 'object' ? `component:${resolveSchemaName(key)}` : undefined;
 }
 
 /**
@@ -8304,7 +9105,11 @@ function memberOrigin(landing: MemberLanding, enclosing: ComponentOrigin | undef
 /**
  * Record `origin` among the reading's bases (`Model.bases`), once, when it
  * is a model component: a `$ref` to it is typed as a model
- * (`componentTypeRef`, read through the nullability a component carries),
+ * (`componentTypeRef`, read through the nullability a component carries
+ * and the other types its type list names beside its object,
+ * `activeMultiTypeModels`; #730: `Owner: { type: ['object', 'string'],
+ * properties }` is the base `Owner` of `Cat: { allOf: [{ $ref: Owner }, {
+ * properties }] }` as it was, the merge reading its object alone),
  * not as an enum, an array or a primitive, which build no model and
  * contribute nothing to the fields. Called where a `$ref` member lands on
  * a component that is more than a nullable wrapper
@@ -8315,6 +9120,10 @@ function memberOrigin(landing: MemberLanding, enclosing: ComponentOrigin | undef
  */
 function noteBase(reading: ComponentReading, origin: ComponentOrigin): void {
   if (reading.bases.some((base) => base.name === origin.name)) return;
+  if (activeMultiTypeModels.has(origin.key)) {
+    reading.bases.push(inheritedRef(origin.name));
+    return;
+  }
   const ref = componentTypeRef(origin.key);
   const inner = ref.kind === 'nullable' ? ref.inner : ref;
   if (inner.kind === 'model') reading.bases.push(inner);
@@ -10253,6 +11062,16 @@ export function markComponentModelRef(ref: ModelRef): void {
  * values, a union variant, a body, a parameter, a header, a webhook or
  * callback payload — and a site that wraps the `$ref` itself (`oneOf: [{
  * $ref: PetOwner }, { type: 'null' }]`) is wrapped once (`asNullable`).
+ *
+ * And every kind carries the types its own type list names (#730). A list
+ * of primitives is a primitive component, and one naming `array` beside
+ * them an array component, each typed from its schema as the union it is
+ * where it is written (`Tags: { type: ['array', 'string'], items }` is
+ * `string[] | string`). A list naming `object` beside other types is a
+ * model that carries the object's fields and no other type, so the
+ * reference carries those, as it carries the `null`: `Owner: { type:
+ * ['object', 'string'], properties }` is `Owner | string`
+ * (`multiTypeModelTypeRef`), where every `$ref` to it was the model alone.
  */
 export function componentTypeRef(key: string): TypeRef {
   const component =
@@ -10313,7 +11132,80 @@ export function componentTypeRef(key: string): TypeRef {
   // a component's (`componentModelRefs`) whether or not it is wrapped.
   const modelRef: ModelRef = { kind: 'model', name: resolved };
   componentModelRefs.add(modelRef);
-  return activeNullableModelComponentKeys.has(key) ? { kind: 'nullable', inner: modelRef } : modelRef;
+  // And a model component that admits other types beside its object — a
+  // type list naming `object` among several (#730): the model carries the
+  // object's fields and no other type, so the reference carries those, as
+  // it carries the `null`, which wraps the union of them.
+  const listed = multiTypeModelTypeRef(key, modelRef);
+  return activeNullableModelComponentKeys.has(key) ? asNullable(listed) : listed;
+}
+
+/**
+ * The type a `$ref` to the model component under `key` resolves to, `null`
+ * aside: `modelRef`, or — for a component whose type list names `object`
+ * beside other types, or an alias of one (`activeMultiTypeModels`; #730) —
+ * `modelRef` in a union with those types, as the same schema is typed where
+ * it is written. `Owner: { type: ['object', 'string'], properties }` named
+ * by a `$ref` was the model `Owner` alone, the `string` lost; it is `Owner
+ * | string`, and `nullable<Owner | string>` when the list names `null`
+ * too. The other types are typed as an inline object variant's are
+ * (`multiTypeMembers`): the schema read as each type, under the name of
+ * the component that declares the list — an `array` member's inline items
+ * `<Component>Item`, which `multiTypeMemberModels` builds — so an alias
+ * carries its own model and the declaring component's other types
+ * (`OwnerAlias | string`). The union carries the limits of every entry the
+ * reference passes, the declaring component's first (`extractConstraints`),
+ * as a `$ref` site reads them (`limitReference`).
+ *
+ * A component reached again while its own other types are being typed —
+ * `Tree: { type: ['array', 'object'], items: { $ref: Tree }, properties }`,
+ * directly, through an array component, or through an `allOf` member that
+ * names it — has no finite type in the IR, as an array component that
+ * reaches itself has none (`arrayComponentTypeRef`). Unlike that one it
+ * has a model: the inner reference is the model alone, as every `$ref` to
+ * the component was, with one warning per component.
+ */
+function multiTypeModelTypeRef(key: string, modelRef: ModelRef): TypeRef {
+  const listed = activeMultiTypeModels.get(key);
+  if (!listed) return modelRef;
+  const { chain, owner, others } = listed;
+  if (resolvingMultiTypeModels.has(owner.key)) {
+    if (!owner.warnedSelfReference) {
+      owner.warnedSelfReference = true;
+      console.warn(
+        `[oagen] Warning: Component "${owner.key}" refers to itself through the other types of its type list — the inner reference is typed as the model alone`,
+      );
+    }
+    return modelRef;
+  }
+  resolvingMultiTypeModels.add(owner.key);
+  try {
+    return withTypeConstraints(
+      multiTypeMembers(owner.declaration, owner.name, modelRef, owner.items, others),
+      multiTypeModelLimits(chain, activeComponentSchemas),
+    );
+  } finally {
+    resolvingMultiTypeModels.delete(owner.key);
+  }
+}
+
+/** The limits of the entries a reference to a model component that admits other types passes (`MultiTypeModel.chain`), conjoined from the declaring component outward, as a site's levels are (`shapeConstraints`). */
+function multiTypeModelLimits(
+  chain: readonly string[],
+  schemas: Record<string, SchemaObject> | undefined,
+): Constraints | undefined {
+  return multiTypeModelEntries(chain, schemas).reduceRight<Constraints | undefined>(
+    (limits, entry) => combineConstraints(limits, extractConstraints(entry)),
+    undefined,
+  );
+}
+
+/** The schemas of `chain` (`MultiTypeModel.chain`) in `schemas`, nearest first. */
+function multiTypeModelEntries(
+  chain: readonly string[],
+  schemas: Record<string, SchemaObject> | undefined,
+): SchemaObject[] {
+  return chain.flatMap((key) => (schemas && Object.hasOwn(schemas, key) ? [schemas[key]!] : []));
 }
 
 /**
@@ -10462,10 +11354,19 @@ function declaredTypes(schema: SchemaObject, seen: Set<SchemaObject> = new Set()
   }
 }
 
-/** Whether `schema` admits an instance of `type`: it declares no type (`declaredTypes`), or one that admits it. */
+/**
+ * Whether `schema` admits an instance of `type`: it declares no type
+ * (`declaredTypes`), or one that leaves some instance of it (`typeLeft`):
+ * the type itself, or `integer` for a `number` — an integer is a number
+ * both admit, so the `number` copy of `{ type: ['number', 'string'],
+ * allOf: [{ $ref: Tag }] }` over `Tag: { type: ['integer', 'string'] }`
+ * stays, and is the `integer` the `allOf` types it as (#730: the copy was
+ * left out, which nothing showed while the `string` copy was typed as the
+ * whole of `Tag`).
+ */
 function admitsType(schema: SchemaObject, type: string): boolean {
   const declared = declaredTypes(schema);
-  return declared === undefined || admits(declared, type);
+  return declared === undefined || typeLeft(declared, type) !== undefined;
 }
 
 /**
@@ -10489,7 +11390,7 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
       return target === undefined || appliesToType(target, type, seen);
     }
     if (isNullSchema(schema)) return false;
-    if (schema.type !== undefined) return admits(typesNamed(schema.type), type);
+    if (schema.type !== undefined) return typeLeft(typesNamed(schema.type), type) !== undefined;
     if (schema.const !== undefined || schema.enum !== undefined) return true;
     if ((TYPE_FAMILY_KEYWORDS[type] ?? []).some((keyword) => schema[keyword] !== undefined)) return true;
     return [schema.allOf, schema.oneOf, schema.anyOf].some(
@@ -10783,17 +11684,160 @@ function typeListCopies(schema: SchemaObject): SchemaObject[] {
  * ['string', 'integer'], enum: ['a', 1] }` is the one enum, not that enum
  * twice; #616).
  */
-function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
-  const seen = new Set<string>();
-  return variants.filter((variant) => {
+function dedupeTypeRefs(variants: readonly TypeRef[], types: readonly string[]): TypeRef[] {
+  return dedupeListedTypeRefs(
+    variants,
+    types.map((type) => [type]),
+  );
+}
+
+/** `dedupeTypeRefs` for variants each of which stands for several JSON types already (`stoodFor`, one list per variant): the variants a narrowing leaves (`narrowedToOwnType`). */
+function dedupeListedTypeRefs(variants: readonly TypeRef[], stoodFor: ReadonlyArray<readonly string[]>): TypeRef[] {
+  const kept = new Map<string, { variant: TypeRef; types: string[] }>();
+  variants.forEach((variant, index) => {
     const key =
       variant.kind === 'model' || variant.kind === 'enum'
         ? `${variant.kind}:${variant.name}`
         : stableStringify(variant);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    const first = kept.get(key);
+    if (first) first.types.push(...stoodFor[index]!);
+    else kept.set(key, { variant, types: [...stoodFor[index]!] });
   });
+  // Each variant kept stands for its own type and for that of every copy
+  // typed alike (`listedVariantTypes`).
+  for (const { variant, types: stoodFor } of kept.values()) listedVariantTypes.set(variant, stoodFor);
+  return [...kept.values()].map(({ variant }) => variant);
+}
+
+/**
+ * The JSON types each variant of a type list's union stands for: the entry
+ * of the list its per-type copy was read as (`typeListCopy`), and that of
+ * every other copy typed alike and dropped as its repeat (`dedupeTypeRefs`)
+ * — `[array]` for the `string[]` of `string[] | string`, `[object]` for
+ * the model of `Owner | string`, `[string, integer]` for the one enum of
+ * `{ type: ['string', 'integer'], enum: ['a', 1] }`. Recorded where the
+ * variants are assembled (`typeListVariants`), by the variant itself, so
+ * the reader that narrows such a union to the types a schema admits knows
+ * which variant is which (`narrowedToOwnType`; #730) whatever the union
+ * was read through on its way: a `$ref` to a component, an alias of it, a
+ * nullable wrapper.
+ */
+const listedVariantTypes = new WeakMap<TypeRef, readonly string[]>();
+
+/**
+ * The types a schema names itself beside `null`, as a set, or `undefined`
+ * when it names none: what the schema admits an instance to be, whatever
+ * the component its `allOf` is read as a reference to admits
+ * (`narrowedToOwnType`). Its own `type`, and conjoined with it (`admits`)
+ * the `type` of each inline member of its `allOf`, a member's own `allOf`
+ * read the same way: every member applies to every instance, so `{ allOf:
+ * [{ $ref: Owner }, { type: 'string' }] }` names what `{ type: 'string',
+ * allOf: [{ $ref: Owner }] }` names, and the two are one reading. A `$ref`
+ * member names the component whose types are the ones narrowed, and is not
+ * read; neither is a member that is no Schema Object, or one the walk is
+ * already reading. A set left empty names two types no instance is both.
+ */
+function ownTypes(schema: SchemaObject, seen: Set<SchemaObject> = new Set()): ReadonlySet<string> | undefined {
+  if (seen.has(schema)) return undefined;
+  seen.add(schema);
+  const named = (Array.isArray(schema.type) ? schema.type : [schema.type]).filter(
+    (type): type is string => typeof type === 'string' && type !== 'null',
+  );
+  let own: ReadonlySet<string> | undefined = named.length > 0 ? new Set(named) : undefined;
+  for (const member of Array.isArray(schema.allOf) ? schema.allOf : []) {
+    if (!isSchemaObject(member) || member.$ref !== undefined) continue;
+    const inner = ownTypes(member, seen);
+    if (inner === undefined) continue;
+    const both = own;
+    own =
+      both === undefined
+        ? inner
+        : new Set([...both, ...inner].filter((type) => admits(both, type) && admits(inner, type)));
+  }
+  return own;
+}
+
+/**
+ * What a schema that names the types `own` leaves of the instances of
+ * `type`: `type` itself when `own` admits it (`admits`: it names the type,
+ * or `number` for an `integer`); `integer` for a `number` when `own` names
+ * `integer` and no `number` — the integers are the numbers both admit, so
+ * `{ type: 'integer', allOf: [{ $ref: Tag }] }` over `Tag: { type:
+ * ['number', 'string'] }` is `integer`, never nothing (Greptile, #741: the
+ * `number` was dropped, and with it every integer); and `undefined` when
+ * no instance is both.
+ */
+function typeLeft(own: ReadonlySet<string>, type: string): string | undefined {
+  if (admits(own, type)) return type;
+  return type === 'number' && own.has('integer') ? 'integer' : undefined;
+}
+
+/**
+ * What `own` leaves of `types` (`typeLeft`), in their order, a type left
+ * twice named once; `types` as they are when `own` is `undefined` — the
+ * schema names no type — or leaves none of them: a schema that
+ * contradicts the member it is read as is read as written, as a type list
+ * no entry of which its composition admits is (`typeListCopies`).
+ */
+function typesAdmitted(types: readonly string[], own: ReadonlySet<string> | undefined): readonly string[] {
+  if (!own) return types;
+  const left = [...new Set(types.flatMap((type) => typeLeft(own, type) ?? []))];
+  return left.length > 0 ? left : types;
+}
+
+/**
+ * `ref` — the type of the member `schema`'s `allOf` is read as
+ * (`allOfReadAsMember`) — narrowed to the types `schema` itself names
+ * (#730). A `type` written beside an `allOf`, or in a member of it,
+ * applies to every instance (`ownTypes`), so
+ * where the member is the union of a type list (`listedVariantTypes`: a
+ * list written in the member, or the component a `$ref` member names, read
+ * through its aliases and under its `null`), only the variants that stand
+ * for a type the schema names are left: `{ type: 'object', allOf: [{ $ref:
+ * Owner }] }` over `Owner: { type: ['object', 'string'], properties }` is
+ * `Owner`, which no string satisfies — as it was while a `$ref` to `Owner`
+ * was the model alone — `{ type: 'array', allOf: [{ $ref: Tags }] }` over
+ * `Tags: { type: ['array', 'string'], items }` is `string[]`, and `{ type:
+ * 'string', allOf: [{ $ref: Tag }] }` over `Tag: { type: ['string',
+ * 'integer'] }` is `string`. A `number` variant the schema leaves only
+ * the integers of is that `integer` (`typeLeft`), and a type left twice is
+ * one variant (`dedupeListedTypeRefs`). One variant left is the type
+ * itself, carrying the union's limits where it can. A schema that names no type, a member
+ * typed as anything but such a union, and a `type` that admits none of the
+ * variants (`typesAdmitted`: the schema contradicts its member, and is
+ * read as written) leave `ref` as it is. The per-type copies of a type
+ * list are narrowed one by one this way, each by its own entry, so `{
+ * type: ['object', 'string'], allOf: [{ $ref: Owner }] }` is `Owner |
+ * string`, never `Owner | string` twice over.
+ */
+function narrowedToOwnType(schema: SchemaObject, ref: TypeRef): TypeRef {
+  const own = ownTypes(schema);
+  if (!own) return ref;
+  if (ref.kind === 'nullable') {
+    const inner = narrowedToOwnType(schema, ref.inner);
+    return inner === ref.inner ? ref : { kind: 'nullable', inner };
+  }
+  if (ref.kind !== 'union') return ref;
+  const stoodFor = ref.variants.map((variant) => listedVariantTypes.get(variant));
+  if (stoodFor.some((types) => types === undefined)) return ref;
+  // What the schema leaves of the types each variant stands for (`typeLeft`).
+  const left = stoodFor.map((types) => [...new Set(types!.flatMap((type) => typeLeft(own, type) ?? []))]);
+  // A `number` the schema leaves only the integers of is that `integer`.
+  const narrowed = ref.variants.map((variant, index): TypeRef => {
+    const integersAlone = left[index]!.length > 0 && !left[index]!.includes('number');
+    return variant.kind === 'primitive' && variant.type === 'number' && integersAlone
+      ? { ...variant, type: 'integer' }
+      : variant;
+  });
+  const keptAt = left.flatMap((types, index) => (types.length > 0 ? [index] : []));
+  const asBuilt =
+    keptAt.length === ref.variants.length && narrowed.every((variant, index) => variant === ref.variants[index]);
+  if (keptAt.length === 0 || asBuilt) return ref;
+  const kept = dedupeListedTypeRefs(
+    keptAt.map((index) => narrowed[index]!),
+    keptAt.map((index) => left[index]!),
+  );
+  return kept.length === 1 ? withTypeConstraints(kept[0]!, ref.constraints) : { ...ref, variants: kept };
 }
 
 /**
@@ -10834,13 +11878,21 @@ function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
  * itself and no variant of anything, so it carries them as its copy alone
  * would (`withTypeConstraints`), under the site's reading where the site
  * has one.
+ *
+ * `types` are the entries of the list the copies were read as, one per
+ * type built: what each variant kept stands for is recorded
+ * (`listedVariantTypes`), for the reader that narrows the union to the
+ * types a schema admits (`narrowedToOwnType`; #730).
  */
-function typeListVariants(built: readonly TypeRef[]): { variants: TypeRef[]; limits: Constraints | undefined } {
+function typeListVariants(
+  built: readonly TypeRef[],
+  types: readonly string[],
+): { variants: TypeRef[]; limits: Constraints | undefined } {
   const limits = built.reduce<Constraints | undefined>(
     (taken, variant) => combineConstraints(taken, takeTypeConstraints(variant)),
     undefined,
   );
-  return { variants: dedupeTypeRefs(built), limits };
+  return { variants: dedupeTypeRefs(built, types), limits };
 }
 
 /**
@@ -10928,10 +11980,10 @@ function buildTypeRef(
     // ['object', 'string']`) is the one the extractor is building for the
     // schema itself (`materializingMergedAllOfName`; #566 review).
     if (nonNullTypes.length > 1) {
+      const copies = typeListCopies(schema);
       const { variants, limits } = typeListVariants(
-        typeListCopies(schema).map((copy) =>
-          buildTypeRef(copy, contextName, parentModelName, siblingProperties, reservedNames),
-        ),
+        copies.map((copy) => buildTypeRef(copy, contextName, parentModelName, siblingProperties, reservedNames)),
+        copies.map((copy) => String(copy.type)),
       );
       const ref: TypeRef =
         variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : { kind: 'union', variants };
@@ -11014,7 +12066,12 @@ function buildTypeRef(
       // carries the component's own `null`, unless the `allOf` vetoes it
       // (`withoutVetoedNull`; #716: `{ allOf: [{ $ref: Owner }, { not: {
       // type: 'null' } }] }` over a nullable `Owner` was `nullable<Owner>`).
-      if (refItem) return withoutVetoedNull(schema, schemaToTypeRef(refItem, contextName, parentModelName));
+      // And the types the component's type list names, less those the
+      // schema's own `type` does not admit (`narrowedToOwnType`; #730).
+      if (refItem) {
+        const reference = schemaToTypeRef(refItem, contextName, parentModelName);
+        return withoutVetoedNull(schema, narrowedToOwnType(schema, reference));
+      }
     } else {
       // A single member, or the one member that types the schema beside
       // members that only annotate or limit it, its items documented by a
@@ -11025,17 +12082,17 @@ function buildTypeRef(
       // carries the wrapper's `description` and link (`withWrapperDocs`),
       // and a model built from it the wrapper's link (`unwrappedAllOfMember`).
       // The member's `null` is the schema's too, unless the `allOf` vetoes
-      // it (`withoutVetoedNull`; #716).
-      return withoutVetoedNull(
-        schema,
-        schemaToTypeRef(
-          withWrapperDocs(annotatedTypingMember(schema), allOfWrapperLayer(schema)),
-          contextName,
-          parentModelName,
-          siblingProperties,
-          reservedNames,
-        ),
+      // it (`withoutVetoedNull`; #716). A member that is a type list is the
+      // union of its types, less those the schema's own `type` does not
+      // admit, as a `$ref` member's component is (`narrowedToOwnType`; #730).
+      const member = schemaToTypeRef(
+        withWrapperDocs(annotatedTypingMember(schema), allOfWrapperLayer(schema)),
+        contextName,
+        parentModelName,
+        siblingProperties,
+        reservedNames,
       );
+      return withoutVetoedNull(schema, narrowedToOwnType(schema, member));
     }
     // Unreachable: `allOfTypesSchema` admits only the three readings above.
     // An `allOf` of bare limits is classified from the schema's own keywords.
@@ -11478,6 +12535,7 @@ import {
   extractInlineModelsFromSchemas,
   firstFreeElementContext,
   isContestedTitle,
+  isInheritedModelRef,
   LIFTED_DECLARATION_KEYWORDS,
   mapValueSchema,
   markContestedTitles,
