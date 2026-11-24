@@ -423,7 +423,8 @@ describe('#715 an `allOf` member that is a `$ref` to a component that only annot
         }),
       );
       expect(script(more)).toBe(
-        'alias: nullable<OwnerTagAlias>, plain: OwnerPlain, wrapped: nullable<Wrapped>, nested: nullable<PetNested>',
+        // `OwnerTag` composes `Tag`, so `nested` is `OwnerTag` (#733; it was a copy of it, `PetNested`).
+        'alias: nullable<OwnerTagAlias>, plain: OwnerPlain, wrapped: nullable<Wrapped>, nested: nullable<OwnerTag>',
       );
       expect(warnings()).toEqual([]);
     });
@@ -855,7 +856,8 @@ describe('#715 `nullVote`', () => {
         },
       }),
     );
-    expect(script(spec)).toBe('loop: PetLoop, loop_owner: LoopOwner, twice: nullable<PetTwice>');
+    // `Owner` named twice is `Owner` (#733; it was a copy of it, `PetTwice`).
+    expect(script(spec)).toBe('loop: PetLoop, loop_owner: LoopOwner, twice: nullable<Owner>');
   });
 
   it('reads a component many members name once', async () => {
@@ -955,7 +957,8 @@ describe('#715 review: a member that is no Schema Object has no vote', () => {
       );
       expect(script(spec)).toBe(
         'with_true: nullable<WithTrue>, with_false: nullable<WithFalse>, wrapped: nullable<Wrapped>, ' +
-          'rejecting: Rejecting, through: nullable<PetThrough>',
+          // `WithTrue` composes `Tag`, so `through` is `WithTrue` (#733; it was a copy of it, `PetThrough`).
+          'rejecting: Rejecting, through: nullable<WithTrue>',
       );
       expect(fieldNames(spec, 'WithTrue')).toEqual(['name', 'label']);
     });
