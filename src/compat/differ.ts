@@ -14,6 +14,7 @@ import type { CompatPolicyHints } from './policy.js';
 import type { ClassifiedChange, ClassificationResult } from './classify.js';
 import { classifySymbolChanges, classifyAddedSymbol, summarizeChanges } from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
+import { bareTypeName } from './type-names.js';
 
 export {
   specDerivedNames,
@@ -162,8 +163,9 @@ function detectForkedSchemas(changes: ClassifiedChange[], baseline: CompatSnapsh
     }
     if (!oldType || !newType || oldType === newType) continue;
 
-    // Strip array/nullable decorations so we compare bare type names. This
-    // covers e.g. `FooList` vs `BarList`, plus simple `Foo[]` vs `Bar[]`.
+    // Compare the declared types the two texts name (`bareTypeName`): this
+    // covers `FooList` vs `BarList`, `Foo[]` vs `Bar[]`, and the optional
+    // spellings around either (`Foo | undefined`, `?Foo`, `Optional[Foo]`).
     const oldTypeBare = bareTypeName(oldType);
     const newTypeBare = bareTypeName(newType);
 
@@ -649,40 +651,6 @@ function setEquals(a: Set<string>, b: Set<string>): boolean {
     if (!b.has(v)) return false;
   }
   return true;
-}
-
-/**
- * Strip array/nullable suffixes so we compare bare type names. Languages
- * encode these differently (`Foo[]`, `Foo | null`, `Foo?`, `List<Foo>`,
- * `Optional[Foo]`); this is a best-effort common-case stripper, not an
- * exhaustive parser.
- */
-function bareTypeName(t: string): string {
-  let s = t.trim();
-  // Go pointer prefix: `*Foo` → `Foo`. Strip first because the rest of the
-  // patterns expect a leading identifier character.
-  s = s.replace(/^\*/, '');
-  // PHP namespace prefix: `\Vendor\Pkg\Foo` → `Foo`. PHP fully-qualified
-  // type references in generated method signatures lead with a backslash
-  // and use backslash-separated segments. Split on the last segment to
-  // preserve nested generics inside the path.
-  if (s.startsWith('\\')) {
-    const lastBackslash = s.lastIndexOf('\\');
-    s = s.slice(lastBackslash + 1);
-  }
-  // Nullable suffixes: `Foo | null`, `Foo?`.
-  s = s.replace(/\s*\|\s*null$/, '').replace(/\?$/, '');
-  // Array suffix: `Foo[]`.
-  s = s.replace(/\[\]$/, '');
-  // Single-arg generic. Two encodings to support:
-  //   - angle brackets: `Iterator<Foo>`, `Optional<Foo>`, `List<Foo>`
-  //   - square brackets: `Iterator[Foo]` (Go iterator returns from the
-  //     emitter, e.g. `*Iterator[APIKey]`)
-  const angleGeneric = s.match(/^[A-Za-z_][A-Za-z0-9_.]*<\s*([A-Za-z_*][A-Za-z0-9_.*]*)\s*>$/);
-  if (angleGeneric) return bareTypeName(angleGeneric[1]);
-  const bracketGeneric = s.match(/^[A-Za-z_][A-Za-z0-9_.]*\[\s*([A-Za-z_*][A-Za-z0-9_.*]*)\s*\]$/);
-  if (bracketGeneric) return bareTypeName(bracketGeneric[1]);
-  return s;
 }
 
 /**
