@@ -378,6 +378,46 @@ function wrapperOf(text: string): { name: string; opening: string; closing: stri
   };
 }
 
+/**
+ * A type text with an intersection that repeats one type read as that type:
+ * `A & A` is `A`, and `(A & A) | undefined` is `A | undefined`.
+ *
+ * A type checker prints what a member resolves to, and a member that two
+ * parts of an intersection both declare resolves to the intersection of the
+ * two declared types. Named types and primitives collapse there
+ * (`string & string` is printed `string`); two object or function types
+ * written inline do not, though they are one type written twice:
+ * `{ a: () => void } & { a: () => void }` has an `a` printed
+ * `(() => void) & (() => void)`. Members are compared by their text, so the
+ * repetition is taken out: the same member reads the same whether one part
+ * declares it or two.
+ *
+ * Only an intersection that stands at the top of the text, or as a whole
+ * member of a union there, is read, and only operands that are the same text
+ * are one type. A text without such a repetition is returned untouched.
+ */
+export function withoutRepeatedIntersectionMembers(typeText: string): string {
+  const members = splitTopLevel(typeText, '|');
+  if (!members) return typeText;
+  let repeated = false;
+  const reduced = members.map((member) => {
+    const text = member.trim();
+    // `(A & B)`, as an intersection is written inside a union.
+    const group = text.startsWith('(') ? enclosed(text) : undefined;
+    const operands = splitTopLevel(group ?? text, '&')?.map((operand) => operand.trim());
+    const distinct = operands && [...new Set(operands)];
+    if (!operands || !distinct || distinct.length === operands.length) return text;
+    repeated = true;
+    if (distinct.length === 1) return distinct[0];
+    return group === undefined ? distinct.join(' & ') : `(${distinct.join(' & ')})`;
+  });
+  if (!repeated) return typeText;
+  // One operand left of the whole text keeps no parentheses: `(() => void)`
+  // stood so beside an `&`, and stands as `() => void` alone.
+  const only = reduced.length === 1 && reduced[0].startsWith('(') ? enclosed(reduced[0]) : undefined;
+  return only ?? reduced.join(' | ');
+}
+
 /** The content of `text` when one bracket pair spans it from its first
  *  character to its last: `(A | B)`, but not `(A) | (B)`. */
 function enclosed(text: string): string | undefined {
@@ -397,7 +437,7 @@ function enclosed(text: string): string | undefined {
  * counts square brackets only; this one reads every language's text, so it
  * counts all four kinds and skips the `>` of an arrow (`=>`, `->`).
  */
-function splitTopLevel(text: string, separator: '|' | ','): string[] | undefined {
+function splitTopLevel(text: string, separator: '|' | ',' | '&'): string[] | undefined {
   const parts: string[] = [];
   const expectedClosings: string[] = [];
   let quote: string | undefined;

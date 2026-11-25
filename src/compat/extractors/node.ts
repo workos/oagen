@@ -17,6 +17,7 @@ import type {
 import type { CompatSnapshot } from '../ir.js';
 import { apiSurfaceToSnapshot } from '../ir.js';
 import { nodeHints } from '../language-hints.js';
+import { withoutRepeatedIntersectionMembers } from '../type-names.js';
 import { sortRecord, overloadsOf } from './shared.js';
 
 export const nodeExtractor: Extractor = {
@@ -77,7 +78,7 @@ export const nodeExtractor: Extractor = {
       } else if (ts.isInterfaceDeclaration(decl)) {
         interfaces[resolved.name] = { ...extractInterface(resolved, checker), sourceFile };
       } else if (ts.isTypeAliasDeclaration(decl)) {
-        typeAliases[resolved.name] = { ...extractTypeAlias(resolved, checker), sourceFile };
+        typeAliases[resolved.name] = { ...extractTypeAlias(resolved, checker, parsedConfig.options), sourceFile };
       } else if (ts.isEnumDeclaration(decl)) {
         enums[resolved.name] = { ...extractEnum(resolved, checker), sourceFile };
       }
@@ -396,15 +397,25 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
   }
 
   for (const prop of type.getProperties()) {
-    const member = memberType(prop, declarations![0], checker);
+    const propType = checker.getTypeOfSymbolAtLocation(prop, declarations![0]);
+    const propDecl = prop.getDeclarations()?.[0];
+    const isOptional = propDecl && ts.isPropertySignature(propDecl) ? !!propDecl.questionToken : false;
+    // The type text is decided by the `?` of the member's property signature,
+    // as it always has been: every baseline holds it so, and a text read any
+    // other way would diff against them. So a member that is optional without
+    // one (a method signature `retry?(): void`, a member inherited through
+    // `Partial<Base>`) keeps its `| undefined`.
+    let typeStr = checker.typeToString(propType);
+    if (isOptional) {
+      typeStr = stripUndefined(typeStr);
+    }
     fields[prop.name] = {
       name: prop.name,
-      type: member.type,
-      // A member can be optional without the `?` of a property signature: a
-      // method signature (`retry?(): void`), a member inherited through
-      // `Partial<Base>`. The checker knows those, and a caller may leave
-      // them out all the same.
-      optional: member.declaredOptional || isOptionalMember(prop),
+      type: typeStr,
+      // Its optionality is the resolved member's, which a `?` on a property
+      // signature always sets: a caller may leave such a member out all the
+      // same.
+      optional: isOptionalMember(prop),
     };
   }
 
@@ -439,12 +450,12 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
   };
 }
 
-function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker): ApiTypeAlias {
+function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker, options: ts.CompilerOptions): ApiTypeAlias {
   const type = checker.getDeclaredTypeOfSymbol(sym);
   return {
     name: sym.name,
     value: checker.typeToString(type, undefined, ts.TypeFormatFlags.InTypeAlias | ts.TypeFormatFlags.NoTruncation),
-    ...objectAliasMembers(sym, type, checker),
+    ...objectAliasMembers(sym, type, checker, options),
   };
 }
 
@@ -459,11 +470,13 @@ function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker): ApiTypeAlias
  *  - an intersection of object types: `Base & { name: string }`,
  *    `Omit<Pet, 'id'> & Extra`.
  *
- * The fields are every member the checker resolves for the alias, with the
- * optionality it resolves (a `Partial`'s members are all optional), the
- * members of an intersection's named types included, as an interface's fields
- * include the ones it inherits. The supertypes are the references an
- * intersection is written with, as an interface's `extends` are.
+ * The fields are every member the checker resolves for the alias, the members
+ * of an intersection's named types included, as an interface's fields include
+ * the ones it inherits. Each is read off the resolved member and off none of
+ * its declarations (see `resolvedMember`), so two aliases that accept the
+ * same values record the same fields however each is written. The supertypes
+ * are the references an intersection is written with, as an interface's
+ * `extends` are.
  *
  * Nothing for any other alias, which the surface records by name and value:
  *
@@ -479,6 +492,7 @@ function objectAliasMembers(
   sym: ts.Symbol,
   type: ts.Type,
   checker: ts.TypeChecker,
+  options: ts.CompilerOptions,
 ): Pick<ApiTypeAlias, 'fields' | 'extends'> {
   const declaration = sym.getDeclarations()?.find(ts.isTypeAliasDeclaration);
   if (!declaration) return {};
@@ -488,14 +502,7 @@ function objectAliasMembers(
 
   const fields: Record<string, ApiField> = {};
   for (const prop of type.getProperties()) {
-    if (!isNamedPublicMember(prop)) continue;
-    // The member's optionality is the checker's: in `{ a?: string } & { a: string }`
-    // the first declaration has a `?` and the member is required.
-    fields[prop.name] = {
-      name: prop.name,
-      type: memberType(prop, declaration, checker).type,
-      optional: isOptionalMember(prop),
-    };
+    if (isNamedPublicMember(prop)) fields[prop.name] = resolvedMember(prop, declaration, checker, options);
   }
   const written = ts.isIntersectionTypeNode(value) ? value.types.map(withoutParentheses) : [];
   return {
@@ -508,20 +515,42 @@ function objectAliasMembers(
 }
 
 /**
- * A member's type text, as an interface's field and an object-type alias's
- * field both record it: an optional property signature (`name?: string`)
- * without the `| undefined` its `?` adds, anything else as the checker prints
- * it.
+ * A member of an alias's resolved type: its optionality and its type text as
+ * the checker resolves them, never as one of its declarations writes them. A
+ * member can have several declarations that disagree (the parts of an
+ * intersection: `{ a?: string } & { a: string | undefined }` is a required
+ * `a`), or one that says something else than the member does (a mapped type:
+ * every member of `Partial<Base>` is optional, none of `Required<Base>` is).
+ *
+ * The type text is the checker's, less the `undefined` that optionality
+ * itself adds. Without `exactOptionalPropertyTypes` an optional member's type
+ * always admits `undefined`, written or not (`a?: string` and
+ * `a?: string | undefined` are one type), so it is left out, as it is from an
+ * interface's optional property. With the option the checker adds none, and
+ * an `undefined` in the text is one the SDK wrote: `a?: string | undefined`
+ * accepts a value `a?: string` does not, and the two are recorded apart. A
+ * required member's text is never touched: `a: string | undefined` is not
+ * `a: string`.
+ *
+ * A member two parts of an intersection declare with one inline type
+ * resolves to that type intersected with itself, which is that type
+ * (`withoutRepeatedIntersectionMembers`).
  */
-function memberType(
+function resolvedMember(
   prop: ts.Symbol,
   location: ts.Node,
   checker: ts.TypeChecker,
-): { type: string; declaredOptional: boolean } {
-  const propDecl = prop.getDeclarations()?.[0];
-  const declaredOptional = propDecl && ts.isPropertySignature(propDecl) ? !!propDecl.questionToken : false;
-  const typeStr = checker.typeToString(checker.getTypeOfSymbolAtLocation(prop, location));
-  return { type: declaredOptional ? stripUndefined(typeStr) : typeStr, declaredOptional };
+  options: ts.CompilerOptions,
+): ApiField {
+  const optional = isOptionalMember(prop);
+  const typeStr = withoutRepeatedIntersectionMembers(
+    checker.typeToString(checker.getTypeOfSymbolAtLocation(prop, location)),
+  );
+  return {
+    name: prop.name,
+    type: optional && options.exactOptionalPropertyTypes !== true ? stripUndefined(typeStr) : typeStr,
+    optional,
+  };
 }
 
 function withoutParentheses(node: ts.TypeNode): ts.TypeNode {
