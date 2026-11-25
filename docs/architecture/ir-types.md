@@ -188,6 +188,37 @@ The `format` field on `PrimitiveType` carries additional type information:
 | `boolean` | (none)      | Boolean           |
 | `unknown` | (none)      | Unknown/any type  |
 
+**Where a format is read (#745).** A `format` is read wherever the value's limits are read (see Type constraints): it does not have to stand beside the `type` it formats. With `Text: { type: string }`, each property below is `{ kind: "primitive", type: "string", format: "date-time" }` (`nullable` that type under a `nullable` wrapper) and is sampled in a snippet as `2026-01-15T12:00:00.000Z`, and `oagen diff` between any two of the spellings reports nothing:
+
+```yaml
+Note:
+  type: object
+  properties:
+    direct: { type: string, format: date-time }
+    member: { allOf: [{ type: string }, { format: date-time }] }
+    reversed: { allOf: [{ format: date-time }, { type: string }] }
+    besideAllOf:
+      allOf: [{ $ref: "#/components/schemas/Text" }]
+      format: date-time
+    refMember:
+      allOf: [{ $ref: "#/components/schemas/Text" }, { format: date-time }]
+    besideRef: { $ref: "#/components/schemas/Text", format: date-time }
+    nullable:
+      oneOf: [{ type: string }, { type: "null" }]
+      format: date-time
+```
+
+(Before #745 only `direct` carried the format: the type builder read the `format` of the schema the `type` is written on and nothing else, while a `maxLength` or a `description` written at the same places was read, so the other six were a plain `string`, sampled as `string_example`, and `oagen diff` from `direct` to each reported a `field-format-changed`.) The rules:
+
+- **Every site, every primitive, both versions.** A field, an array's items, a map's values, a `oneOf`/`anyOf` variant, a parameter, a response header, a request or response body, a webhook payload, a primitive component, an alias of one and a chain of `$ref`s to it, and a JSON Pointer `$ref` deeper into a component, whose site takes the format once the pointer is settled. Any format, on a `string`, `integer`, `number` or `boolean`: `int64` in a member beside `type: integer` is `integer` with `int64`. In an OAS 3.0 document too, beside a `$ref` included, where the limits and the `description` written there are read as well.
+- **As written.** The parser never checks a format against the type: `{ allOf: [{ type: string }, { format: int32 }] }` is a `string` with `int32`, as `{ type: string, format: int32 }` always was. A `format` written apart from the type that is no non-empty string (`5`, `true`, a list) names no format and is read as absent, as a limit of the wrong type is.
+- **The format nearest the type stands.** A format written beside the `type` is the type's, whatever is written elsewhere, as before. A type built without one takes the format of the first schema that writes one on the way out from the type: the component a `$ref` names before the schema that writes the `$ref`, a `$ref` member with what is written beside it before the `allOf` it is a member of, a nullable wrapper's branch before the wrapper, the member an `allOf` is read as before the `allOf`. So `{ $ref: Uuid, format: date-time }` over `Uuid: { type: string, format: uuid }` is `uuid`, as it was, and so is `{ allOf: [{ format: date-time }, { type: string, format: uuid }] }`, in either member order.
+- **Levels that disagree write none.** One schema reads its format from its own keywords, its `allOf` members that only annotate or limit it and a nullable wrapper's one branch together — the levels its limits are conjoined from — and when two of them write different formats it gives none, in whatever order they are written: `{ allOf: [{ type: string }, { format: uuid }, { format: date-time }] }` is a plain `string`, as it was. JSON Schema applies both, no one format describes such a value, and unlike a limit there is no stricter of the two to keep. Two levels that write the same format agree.
+- **Where no node carries one, nothing changes.** A `$ref` to a model or an enum, a `const`, an array, a map and the union of a `oneOf`/`anyOf` of several variants carry no format, so one written beside them or in a member beside them is not read, as before. A schema that writes a `format` and no `type` (`{ format: date-time }`) declares no type and stays `unknown`.
+- **Unions.** The variants of a type list take the format as the list's per-type copies keep it (see Type lists): `{ allOf: [{ type: [string, boolean] }, { format: date-time }] }`, and the same format beside a `$ref` to a component written as that list, is `string` with `date-time` beside a bare `boolean`, as `{ type: [string, boolean], format: date-time }` is; so is the `string` beside a model that admits one (`Owner | string`). A union of one variant is the schema the document wrote for that variant, so `{ oneOf: [{ type: string }], format: date-time }` gives its one variant the format, inline and as a named union.
+
+Two declarations of one property are compared as typed (see Several declarations of one property), so `at: { allOf: [{ type: string }, { format: date-time }] }` in one variant of a merged `allOf` beside `at: { type: string, format: date-time }` in another is one `string` with `date-time`; the first was a plain `string`, and the field a union of the two.
+
 ### Boolean schemas
 
 OAS 3.1 allows a JSON Schema boolean wherever a schema goes: `true` admits every instance, as `{}` does, and `false` admits none. A boolean has no keyword for a reader to ask and is never remembered by one: every reader that keeps what it read by the schema first asks whether the value is one it can keep (a Schema Object, `isSchemaObject` in `src/parser/schemas.ts`; where two declarations of a property are combined, any object), so a boolean does not fail the parse wherever it is written, in an OAS 3.0 document too (#728: since #597 every schema was handed to a memo only an object can key, and `true` anywhere but among the members of an `allOf` failed the parse with `Invalid value used as weak map key`).

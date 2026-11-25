@@ -239,6 +239,30 @@ export function pendingSiteLimitsOf(ref: ModelRef): Constraints | undefined {
 }
 
 /**
+ * The `format` of the site a pending reference was built at — what is
+ * written beside the `$ref`, or in the wrapper or the `allOf` members
+ * around it, read at the places the site's limits are (`schemaFormat`;
+ * #745) — kept until the reference is settled, as the site's limits are
+ * (`pendingSiteLimits`): the type the site settles into takes it where
+ * that type has none of its own, as a `$ref` to a primitive component
+ * typed without a format takes the one written beside the reference
+ * (`resolveSchemaPointers`). A copy of a pending reference keeps it
+ * (`cloneTypeRef`).
+ */
+const pendingSiteFormats = new WeakMap<ModelRef, string>();
+
+/** Record `format` as what the site of the pending `ref` writes around it, in place of any recorded before; `undefined` forgets it. The caller records the format written nearest the reference alone (`withTypeFormat`). */
+export function recordPendingSiteFormat(ref: ModelRef, format: string | undefined): void {
+  if (format !== undefined) pendingSiteFormats.set(ref, format);
+  else pendingSiteFormats.delete(ref);
+}
+
+/** The `format` recorded for the site of the pending `ref`, `undefined` when it writes none. */
+export function pendingSiteFormatOf(ref: ModelRef): string | undefined {
+  return pendingSiteFormats.get(ref);
+}
+
+/**
  * The pending references whose site vetoes `null`: each is the member an
  * `allOf` that vetoes `null` is read as (`withoutVetoedNull`; #716), so
  * the type it is settled to admits none, whatever the schema the pointer

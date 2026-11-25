@@ -372,7 +372,8 @@ describe('#674 a type list’s primitive copy reads its `allOf` at any depth', (
       ['const', { const: 'a' }, '(Owner | "a")'],
       // `Status` is a string: no object satisfies the `allOf`, so the list is the enum alone.
       ['$ref to an enum', ref('Status'), 'enum Status'],
-      ['format', { format: 'date-time' }, '(Owner | string)'],
+      // The `string` copy keeps the member's `format`, as it keeps one written beside the list (#745).
+      ['format', { format: 'date-time' }, '(Owner | string:date-time)'],
     ] as const) {
       const written = await typed({ type: ['object', 'string'], allOf: [owner, member] }, { Status });
       expect(written, label).toBe(expected);
@@ -404,7 +405,7 @@ describe('#674 a type list’s primitive copy reads its `allOf` at any depth', (
       "enum: enum NoteAuthor
       const: "a"
       $ref to an enum: enum Status
-      format: (string | boolean)"
+      format: (string:date-time | boolean)"
     `);
     expect(warn).not.toHaveBeenCalled();
   });

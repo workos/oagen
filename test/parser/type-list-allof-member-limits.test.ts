@@ -1030,7 +1030,7 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
         array, OAS 3.0 nullable: nullable<array<string> {"minItems":2}>
         a list of one type: array<string> {"minItems":2}
         no type: array<string> {"minItems":2}
-        string: string {"minLength":2}
+        string: string:date {"minLength":2}
         string or null, a const member: nullable<"ab" {"minLength":2}>"
       `);
       const single = await field({ type: 'array', allOf: [{ items: string, minItems: 2 }] });

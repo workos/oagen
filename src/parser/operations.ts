@@ -86,7 +86,7 @@ import {
   unwrapNullableSchema,
   warnOnUncarriedProperties,
   warnOnUnreadUnion,
-  withSchemaConstraints,
+  withSchemaKeywords,
   withWrapperDocs,
 } from './schemas.js';
 import {
@@ -5480,7 +5480,7 @@ function typePickedRequestBody(
     if (mapping) deferInlineUnionMappingEntries(schema, objectVariantNames, variants, mapping);
     // The union carries the body's own limits, as `schemaToTypeRef` would
     // have it carry them (#545); each variant carries its own.
-    const union: TypeRef = withSchemaConstraints(
+    const union: TypeRef = withSchemaKeywords(
       {
         kind: 'union',
         variants,

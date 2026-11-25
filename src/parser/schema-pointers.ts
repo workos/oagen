@@ -77,6 +77,17 @@
  * and the site keeps what it wrote beside the `$ref`, as beside a `$ref` to
  * a model component.
  *
+ * So is the `format` (#745). A `$ref` to a primitive component typed
+ * without a format takes the one written beside the reference, and a
+ * pointer site does once its type is known: the type builder records the
+ * format the site writes around the pointer (`recordPendingSiteFormat`,
+ * read from the levels the site's limits are), and the type the site
+ * settles into takes it where it has none of its own (`withTypeFormat`),
+ * so `{ $ref: '#/components/schemas/Owner/properties/since', format:
+ * 'date-time' }` to `{ type: 'string' }` is a `string` with `date-time`,
+ * and to `{ type: 'string', format: 'date' }` a `date`: the format of the
+ * schema the pointer lands on stands, as a component's does.
+ *
  * What a site decided from the pending reference before the settle is
  * decided again from the settled type: an operation whose primary response
  * was pending chooses its iterator's item type from the settled response
@@ -131,6 +142,7 @@ import {
   schemaToTypeRef,
   unionFlaggedNullable,
   withTypeConstraints,
+  withTypeFormat,
   type SchemaObject,
 } from './schemas.js';
 import { cloneTypeRef, mapValueSchema, readInlineAllOf, replaceTypeRef, writtenTypingMember } from './inline-models.js';
@@ -145,8 +157,10 @@ import {
   isPendingSchemaRef,
   isPendingVariant,
   pendingNullVetoed,
+  pendingSiteFormatOf,
   pendingSiteLimitsOf,
   recordPendingNullVeto,
+  recordPendingSiteFormat,
   withoutNull,
   schemaAtPointer,
   schemaRefOf,
@@ -972,6 +986,8 @@ class PointerResolver {
     }
     settlePendingSchemaRef(pending);
     const site = pendingSiteLimitsOf(pending);
+    const siteFormat = pendingSiteFormatOf(pending);
+    recordPendingSiteFormat(pending, undefined);
     const vetoed = pendingNullVetoed(pending);
     recordPendingNullVeto(pending, false);
     replaceTypeRef(pending, type ?? UNKNOWN);
@@ -993,6 +1009,10 @@ class PointerResolver {
     // now: `replaceTypeRef` rewrote it in place.
     const settled = pending as TypeRef;
     const bare = underNullableWrappers(settled);
+    // And the `format` the site writes around the pointer, where the type
+    // reached has none of its own (`withTypeFormat`; #745), as a `$ref` to a
+    // primitive component typed without one takes the site's.
+    withTypeFormat(settled, siteFormat);
     withTypeConstraints(settled, combineConstraints(typeRefConstraints(bare), site));
     this.settled.push(pending);
     this.settledRefs.add(pending);
