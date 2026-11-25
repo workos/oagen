@@ -701,15 +701,26 @@ describe('#745 formats that disagree', () => {
   });
 
   it('takes a format through a chain of aliases alike, whatever the component is', async () => {
-    // A string, a type list of primitives and a model that admits a string,
-    // each named through `Base` -> `Alias` -> `AliasAlias` -> the field, with
-    // a format or none at each of the four places: the string takes the one
-    // written nearest the component, in all three (Greptile, #749: the model's
-    // chain was read as one level, so two formats on it gave none).
+    // A string, a type list and a model that admits a string, nullable or
+    // not, each named through `Base` -> `Alias` -> `AliasAlias` -> the field,
+    // with a format or none at each of the four places: the string takes the
+    // one written nearest the component, whatever the component is (Greptile,
+    // #749: the model's chain was read as one level, so two formats on it
+    // gave none).
     const kinds: Record<string, Schema> = {
       string,
+      'a nullable string': { type: ['string', 'null'] },
+      'a string under a nullable wrapper': { oneOf: [string, nil] },
       'a type list': { type: ['string', 'boolean'] },
+      'a nullable type list': { type: ['string', 'boolean', 'null'] },
+      'a type list naming an array': { type: ['array', 'string'], items: { type: 'integer' } },
       'a model that admits a string': { type: ['object', 'string'], properties: { name: string } },
+      'a nullable model that admits a string': { type: ['object', 'string', 'null'], properties: { name: string } },
+      'a model that admits an array and a string': {
+        type: ['object', 'array', 'string'],
+        properties: { name: string },
+        items: { type: 'integer' },
+      },
     };
     const FORMATS = [undefined, 'uuid', 'date-time'] as const;
     const f = (format: string | undefined) => (format ? { format } : {});
@@ -737,7 +748,7 @@ describe('#745 formats that disagree', () => {
                 formats.push(stringOf(fieldType(spec)));
               }
               const label = `${beside ? 'beside the type' : 'in a member'}: ${[f0, f1, f2, f3].join(' / ')}`;
-              expect(formats, label).toEqual(Array(3).fill(f0 ?? f1 ?? f2 ?? f3 ?? 'none'));
+              expect(formats, label).toEqual(Object.keys(kinds).map(() => f0 ?? f1 ?? f2 ?? f3 ?? 'none'));
             }
           }
         }
