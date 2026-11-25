@@ -540,14 +540,30 @@ retypes('#752 however a TypeScript type is declared', [
     expected: SOFT_RISK,
   },
   {
-    // Printed as `{ timeout?: number | undefined; }`: whether that `undefined`
-    // is TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text
-    // does not say, and the declared field is recorded without one.
-    name: 'a shape written in place with an optional member, to a declared type',
+    // Printed as `{ timeout?: number | undefined; }`. Beside an interface the
+    // `undefined` of an optional member is left out, as the interface's is.
+    name: 'a shape written in place with an optional member, to an interface',
     newOnly: 'export interface RequestOptions% { timeout?: number; maxRetries?: number }',
     old: 'options: { timeout?: number }',
     new: 'options: RequestOptions%',
+    expected: SOFT_RISK,
+  },
+  {
+    // Beside a type alias it is weighed as written: whether it is
+    // TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text does
+    // not say, and an alias's member is recorded without the first only.
+    name: 'a shape written in place with an optional member, to a type alias',
+    newOnly: 'export type RequestOptions% = { timeout?: number; maxRetries?: number };',
+    old: 'options: { timeout?: number }',
+    new: 'options: RequestOptions%',
     expected: BREAKING,
+  },
+  {
+    name: 'a type alias to the same shape written in place',
+    shared: 'export type RequestOptions% = { timeout?: number };',
+    old: 'options: RequestOptions%',
+    new: 'options: { timeout?: number; maxRetries?: number }',
+    expected: SOFT_RISK,
   },
   {
     name: 'a destructured parameter',
@@ -997,13 +1013,43 @@ export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
     // The parameter's text is `{ name?: string | undefined; }` for
     // `{ name?: string }` and for `{ name?: string | undefined }` alike,
     // unless the SDK is compiled with `exactOptionalPropertyTypes`. Nothing
-    // in it says which, so it is not accepted by a declared type whose field
+    // in it says which, so it is not accepted by a type alias whose member
     // is recorded without one.
     const strict = { strict: true };
     expect(await retype(strict, '{ name?: string }', 'Plain')).toEqual(GET(BREAKING));
     expect(await retype(strict, '{ name?: string | undefined }', 'Plain')).toEqual(GET(BREAKING));
     expect(await retype(strict, '{ name: string }', 'Plain')).toEqual(GET(SOFT_RISK));
     expect(await retype(strict, '{ name?: string }', '{ name?: string; tag?: string }')).toEqual(GET(SOFT_RISK));
+  });
+
+  it('is left out beside an interface, whose optional field is recorded without it either way', async () => {
+    const interfaces = (parameter: string) => `export interface Plain { name?: string }
+export interface OrUndefined { name?: string | undefined }
+export type Alias = { name?: string | undefined };
+export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
+`;
+    const modes: Array<Record<string, boolean>> = [
+      { strict: true },
+      { strict: true, exactOptionalPropertyTypes: true },
+    ];
+    for (const compilerOptions of modes) {
+      const between = async (from: string, to: string) =>
+        notAdditive(
+          (
+            await compatDiff(
+              nodeExtractor,
+              sdk(compilerOptions, interfaces(from)),
+              sdk(compilerOptions, interfaces(to)),
+            )
+          ).diff,
+        );
+      // Both interfaces record an optional `string`: the snapshot holds no
+      // difference to weigh, as #750's own comparison of the field holds none.
+      expect(await between('OrUndefined', 'Plain')).toEqual(GET(SOFT_RISK));
+      expect(await between('Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+      expect(await between('Alias', 'Plain')).toEqual(GET(SOFT_RISK));
+      expect(await between('{ name?: string | undefined }', 'Plain')).toEqual(GET(SOFT_RISK));
+    }
   });
 
   it('is two types with it: the one that takes `undefined` is not accepted by the one that does not', async () => {

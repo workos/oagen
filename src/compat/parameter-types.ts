@@ -30,7 +30,7 @@
  */
 
 import type { DeclaredTypes, RecordedMember, TypeLookup } from './type-graph.js';
-import { declaresSupertype, recordedMembers } from './type-graph.js';
+import { declaresSupertype, isObjectAlias, recordedMembers } from './type-graph.js';
 import {
   handsBackItsArgument,
   objectTypeMembers,
@@ -366,13 +366,18 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
   // pass: the rule compares fields and has none to compare.
   if (oldFields.size === 0) return false;
   const declared = declaresSupertype(context.newTypes, oldType, newType);
+  const anInterface = isInterface(context.oldTypes, oldType) || isInterface(context.newTypes, newType);
   for (const [name, newField] of newFields) {
     if (!newField.optional && oldFields.get(name)?.optional !== false) return false;
   }
   for (const [name, oldField] of oldFields) {
     const newField = newFields.get(name);
     if (newField === undefined) return false;
-    if (!declared && !acceptsByShape(oldField.type, newField.type, context)) return false;
+    if (declared) continue;
+    const withoutUndefined = anInterface && oldField.optional && newField.optional;
+    const oldMembers = fieldTypeMembers(oldField, withoutUndefined, context.oldTypes);
+    const newMembers = fieldTypeMembers(newField, withoutUndefined, context.newTypes);
+    if (!membersAccept(oldMembers, newMembers, context)) return false;
   }
   context.fields.set(JSON.stringify([oldType, newType]), { oldType, newType });
   return true;
@@ -384,16 +389,36 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
  * whose fields the snapshot records whole (`recordedMembers`). Undefined for
  * anything else, and for either kind when the fields are not all a value may
  * carry.
- *
- * A field's type is weighed as it stands, an `undefined` included. Under
- * `exactOptionalPropertyTypes` an optional `name?: string | undefined` takes
- * a value an optional `name?: string` does not, and a type alias's members
- * are recorded apart there. An object type written in place is printed with
- * `| undefined` on each optional member where the SDK is not compiled with
- * that option, and nothing in its text says which of the two it is. So an
- * optional member written in place with one is not accepted by a declared
- * field without one, though the reverse is.
  */
 function fieldsOf(member: string, types: TypeLookup): ReadonlyMap<string, RecordedMember> | undefined {
   return objectTypeMembers(member) ?? recordedMembers(types, member);
+}
+
+/** A declared type that is no type alias: an interface, a model class. Not an
+ *  object type written in place, which no snapshot declares. */
+function isInterface(types: TypeLookup, typeName: string): boolean {
+  const type = types.get(typeName);
+  return type !== undefined && !isObjectAlias(type);
+}
+
+/**
+ * The members of a field's type, behind its aliases, to weigh against the
+ * other side's.
+ *
+ * A field's type is weighed as it stands, an `undefined` included: under
+ * `exactOptionalPropertyTypes` an optional `name?: string | undefined` takes
+ * a value an optional `name?: string` does not, and a type alias's member is
+ * recorded apart there. An interface's optional field is another matter. Its
+ * text carries the `undefined` its `?` adds or not by where the `?` is
+ * written, whatever the SDK meant, so the differ reads two optional fields
+ * as one type when either owner is an interface and they differ by that
+ * `undefined` alone (`sameOptionalFieldType`, #750). The same holds here:
+ * `withoutUndefined` leaves it out, on both sides, of two optional fields
+ * one of which an interface owns.
+ */
+function fieldTypeMembers(field: RecordedMember, withoutUndefined: boolean, types: TypeLookup): string[] | undefined {
+  const members = unionMembers(field.type);
+  if (!withoutUndefined || members === undefined) return membersBehindAliases(members, types);
+  const defined = members.filter((member) => member !== 'undefined');
+  return membersBehindAliases(defined.length > 0 ? defined : members, types);
 }
