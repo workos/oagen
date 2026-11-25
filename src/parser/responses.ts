@@ -34,6 +34,7 @@ import {
   unionFlaggedNullable,
   warnOnUncarriedProperties,
   warnOnUnreadUnion,
+  withProvenance,
   withSchemaKeywords,
   withWrapperDocs,
   withoutVetoedNull,
@@ -1253,7 +1254,13 @@ function extractDirectResource(
       // A const only variants declare holds on a branch: it names nothing.
       const branchOnly = new Set(merged.properties.filter((p) => p.conditional).map((p) => p.name));
       const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(rebuilt, contextName, branchOnly);
-      inlineModels.push(...extractInlineModel(modelName, rebuilt, componentSchemas));
+      // The body's model names the components its `$ref` members land on as
+      // its bases, and the fields it takes from one unchanged, as the model
+      // every other site builds from the merged list does (`buildMergedModel`,
+      // `withProvenance`; #755) — each field still typed under the body's
+      // own name, as a component's model types the fields of its bases.
+      const [model, ...nested] = extractInlineModel(modelName, rebuilt, componentSchemas);
+      inlineModels.push(withProvenance(model!, merged.provenance), ...nested);
       return {
         // The model carries the merged fields and no wrapper, so the
         // reference carries the `null` the merge admits, as

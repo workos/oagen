@@ -835,12 +835,27 @@ describe('#733 an inline `allOf` of two `$ref`s, one to a component the other al
         ['a member that requires a field', { required: ['label'] }],
       ];
       const lines: string[] = [];
+      // A field apart from the base it is taken from, and each field's base by name.
+      const apartFromBase = (model: Model | undefined) =>
+        model?.fields.map(({ inheritedFrom: _base, ...field }) => field);
+      const baseOf = (model: Model | undefined) =>
+        model?.fields.map((field) => `${field.name}${field.inheritedFrom ? ` from ${show(field.inheritedFrom)}` : ''}`);
       for (const [label, member] of pairs) {
         const both = await tagOf(openapi, all(ref('Tag'), ref('TagOutput'), member), schemas);
         // The same fields, required alike, as the `allOf` without the `$ref` that adds nothing.
         const alone = await parse(holder(openapi, all(ref('TagOutput'), member), schemas));
         const merged = await parse(holder(openapi, all(ref('Tag'), ref('TagOutput'), member), schemas));
-        expect(modelOf(merged, 'HolderTag')?.fields, label).toEqual(modelOf(alone, 'HolderTag')?.fields);
+        expect(apartFromBase(modelOf(merged, 'HolderTag')), label).toEqual(apartFromBase(modelOf(alone, 'HolderTag')));
+        // The bases are each `allOf`'s own `$ref` members, as a component's are (#755): a merge
+        // reads every member as written, so `Tag` is a base of the first and not of the second,
+        // and `label`, which `TagOutput` requires and `Tag` declares, is the first's own.
+        expect(modelOf(merged, 'HolderTag')?.bases?.slice(0, 2).map(show), label).toEqual(['Tag', 'TagOutput']);
+        expect(baseOf(modelOf(merged, 'HolderTag'))?.slice(0, 2), label).toEqual(['label', 'color from Tag']);
+        expect(modelOf(alone, 'HolderTag')?.bases?.slice(0, 1).map(show), label).toEqual(['TagOutput']);
+        expect(baseOf(modelOf(alone, 'HolderTag'))?.slice(0, 2), label).toEqual([
+          'label from TagOutput',
+          'color from TagOutput',
+        ]);
         lines.push(`${label}: ${both}`);
       }
       const required = { ...all(ref('Tag'), ref('TagOutput')), required: ['label'] };
@@ -1405,7 +1420,10 @@ describe('#733 at every site an `allOf` is written, and wherever a property is r
           Pet,
         }),
       );
-      expect(script(inline).split('\n').slice(3)).toEqual(['ListPetsResponse { name?: string, tag?: TagOutput }']);
+      // The body names `Pet` as its base (#755) and narrows `tag`, its own declaration.
+      expect(script(inline).split('\n').slice(3)).toEqual([
+        'ListPetsResponse extends Pet { name?: string, tag?: TagOutput }',
+      ]);
 
       const owner = (tag: string) => ({ type: 'object', properties: { tag: ref(tag) } });
       const deep = await parse(

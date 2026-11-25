@@ -903,25 +903,38 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
 
     it('leaves a merge a merge, and adds no field and no base to it', async () => {
       const extra = { type: 'object', properties: { extra: string } };
-      const rows: ReadonlyArray<readonly [string, unknown[], unknown[], string[]]> = [
-        ['two typing `$ref`s', [Owner, Tag, Described], [Owner, Tag, text], ['name', 'label']],
-        ['a `$ref` and an inline object', [Owner, extra, Described], [Owner, extra, text], ['name', 'extra']],
-        ['the same, the `$ref` first', [Described, Owner, extra], [text, Owner, extra], ['name', 'extra']],
+      // The bases are the typing `$ref`s' components alone (#755: a merge
+      // written inline names them as a component's does), never the
+      // component that only annotates.
+      const rows: ReadonlyArray<readonly [string, unknown[], unknown[], string[], string[]]> = [
+        ['two typing `$ref`s', [Owner, Tag, Described], [Owner, Tag, text], ['name', 'label'], ['Owner', 'Tag']],
+        [
+          'a `$ref` and an inline object',
+          [Owner, extra, Described],
+          [Owner, extra, text],
+          ['name', 'extra'],
+          ['Owner'],
+        ],
+        ['the same, the `$ref` first', [Described, Owner, extra], [text, Owner, extra], ['name', 'extra'], ['Owner']],
         [
           'a `$ref` and inline properties',
           [Owner, { properties: { extra: string } }, NotNull],
           [Owner, { properties: { extra: string } }, notNull],
           ['name', 'extra'],
+          ['Owner'],
         ],
       ];
-      for (const [label, byRef, inline, fields] of rows) {
+      for (const [label, byRef, inline, fields, bases] of rows) {
         const spec = await expectOneIr(
           ownerDoc(openapi, { allOf: byRef }, tag),
           ownerDoc(openapi, { allOf: inline }, tag),
           label,
         );
         const merged = modelOf(spec, 'PetOwner')!;
-        expect(merged.bases, label).toBeUndefined();
+        expect(
+          merged.bases?.map((base) => (base.kind === 'model' ? base.name : base.kind)),
+          label,
+        ).toEqual(bases);
         expect(
           merged.fields.map((f) => f.name),
           label,

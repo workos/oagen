@@ -863,7 +863,7 @@ describe('#730 a component whose type list names `array` or `object` beside anot
           "Cat { name?: string, lives?: string } bases [X]",
           "X { name?: string }",
           "Other { x?: OtherX }",
-          "OtherX { name?: string, lives?: string }",
+          "OtherX { name?: string, lives?: string } bases [X]",
         ]
       `);
       // `Tags` is no model, so it is no base: the merge reads the object member alone, as over an array component.
@@ -1559,7 +1559,7 @@ describe('#730 a component whose type list names `array` or `object` beside anot
           "Owner { name?: string }",
           "OwnerAlias { name?: string } bases [Owner]",
           "Twice { name?: string } bases [OwnerAlias, Owner]",
-          "NoteTwice { name?: string }",
+          "NoteTwice { name?: string } bases [OwnerAlias, Owner]",
           "NoteTagsTwice {  }",
           "NoteArrayTwice {  }",
         ]
@@ -1876,7 +1876,7 @@ describe('#730 a component whose type list names `array` or `object` beside anot
     it('reads a merge over the component as the model the same merge is in place', async () => {
       const merge = { allOf: [ref('X'), { properties: { extra: string } }] };
       expect(await inline(merge, { X: OWNER })).toMatchInlineSnapshot(
-        `"NoteX ; NoteX { name?: string, extra?: string }"`,
+        `"NoteX ; NoteX { name?: string, extra?: string } bases [X]"`,
       );
       expect(await inline({ allOf: [OWNER, { properties: { extra: string } }] })).toMatchInlineSnapshot(
         `"NoteX ; NoteX { name?: string, extra?: string }"`,
