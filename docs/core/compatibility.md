@@ -76,7 +76,7 @@ Each classified change includes a provenance bucket explaining where the drift c
 
 ### Remediation Hints
 
-When a change matches a recognized upstream antipattern (e.g. forking a new schema instead of extending the existing one), the differ attaches a `remediation` string to the classified change. The hint surfaces in both the machine-readable report and the human-readable summary, telling the spec author how to make the change non-breaking. The classification, severity, and fail-threshold semantics are unchanged.
+When a change matches a recognized upstream antipattern (e.g. forking a new schema instead of extending the existing one), the differ attaches a `remediation` string to the classified change. The hint surfaces in both the machine-readable report and the human-readable summary, telling the spec author how to make the change non-breaking. A schema fork is also reported as soft-risk instead of breaking, and its two types are found by name through whatever optional or nullable spelling the language puts around them (`X | undefined`, `X | None`, `?X`).
 
 See [Compatibility Policy → Remediation Hints](compatibility-policy.md#remediation-hints) for the list of detected patterns and how to add new ones.
 
