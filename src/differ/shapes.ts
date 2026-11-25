@@ -1,8 +1,8 @@
 import type { ApiSpec, Enum, Model, TypeRef } from '../ir/types.js';
 import { typeRefConstraints } from '../ir/types.js';
 import { classifyConstraintsChange } from './classify.js';
-import { constraintsShift, type ConstrainedSite } from './constraints.js';
-import { typeRefsEqual } from './models.js';
+import { constraintsShift, type ConstrainedSite, type VariantPairing } from './constraints.js';
+import { sameCompositionKinds, typeRefsEqual } from './models.js';
 
 /** The named types of one document, so a body's model or enum ref can be read through to its shape. */
 export interface DocumentTypes {
@@ -100,30 +100,44 @@ const MODEL_LENIENT_KEYS: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS,
  * the new name is one the old document lacks.
  */
 export function sameShape(a: TypeRef, b: TypeRef, shapes?: DocumentShapes): boolean {
-  return sameShapeWithin(a, b, shapes, new Set(), true);
+  return sameShapeWithin(a, b, shapes, new Set(), 'renamed');
 }
 
 /**
+ * How a pair of types is read as one shape. `renamed` is `sameShape`: two
+ * names both documents declare are different shapes, and a union's
+ * composition keyword is passed over, as `typeRefsEqual` passes over it.
+ * `alike` is `oneShape`: whatever the names, and the same keyword on every
+ * union.
+ */
+type Reading = 'renamed' | 'alike';
+
+/**
  * Whether two types are one shape whatever names they carry: `sameShape`
- * without its rule for two names both documents declare. That rule tells a
- * rename from a move, so that a body moved between two declared models
- * stays reported; what a reader finds in a field typed `Owner` and in one
- * typed by an identical `OwnerCopy` is the same either way, which is all
- * `compatibleShape` asks of a field's type.
+ * without its rule for two names both documents declare, and with every
+ * inline union's composition keyword compared. That rule tells a rename
+ * from a move, so that a body moved between two declared models stays
+ * reported; what a reader finds in a field typed `Owner` and in one typed
+ * by an identical `OwnerCopy` is the same either way, which is all
+ * `compatibleShape` asks of a field's type. The keyword is read because
+ * `compatibleShape` vouches for the pair: `anyOf` become `oneOf` rejects a
+ * value that matches two variants, and the reverse lets a reader receive
+ * one, as `composition-changed` is breaking on a named union (Greptile,
+ * #758 review round 1).
  */
 function oneShape(a: TypeRef, b: TypeRef, shapes?: DocumentShapes): boolean {
-  return sameShapeWithin(a, b, shapes, new Set(), false);
+  return sameShapeWithin(a, b, shapes, new Set(), 'alike');
 }
 
-/** `sameShape`, with the model pairs already being compared (`seen`) and whether two names both documents declare are different shapes (`renamesOnly`: `sameShape`'s rule) or read through like any other pair (`oneShape`). */
+/** `sameShape` or `oneShape` by `reading`, with the model pairs already being compared (`seen`). */
 function sameShapeWithin(
   a: TypeRef,
   b: TypeRef,
   shapes: DocumentShapes | undefined,
   seen: Set<string>,
-  renamesOnly: boolean,
+  reading: Reading,
 ): boolean {
-  if (typeRefsEqual(a, b)) return true;
+  if (typeRefsEqual(a, b) && (reading === 'renamed' || sameCompositionKinds(a, b))) return true;
   if (!shapes || a.kind !== b.kind) return false;
   switch (a.kind) {
     case 'model': {
@@ -131,31 +145,32 @@ function sameShapeWithin(
       const oldModel = shapes.old.models.get(a.name);
       const newModel = shapes.new.models.get(b.name);
       if (!oldModel || !newModel) return false;
-      if (renamesOnly && shapes.new.models.has(a.name) && shapes.old.models.has(b.name)) return false;
+      if (reading === 'renamed' && shapes.new.models.has(a.name) && shapes.old.models.has(b.name)) return false;
       const pair = `model:${a.name}\u0000${b.name}`;
       if (seen.has(pair)) return true;
       seen.add(pair);
-      return sameModelShape(oldModel, newModel, shapes, seen, renamesOnly);
+      return sameModelShape(oldModel, newModel, shapes, seen, reading);
     }
     case 'enum': {
       if (b.kind !== 'enum') return false;
       const oldEnum = shapes.old.enums.get(a.name);
       const newEnum = shapes.new.enums.get(b.name);
       if (!oldEnum || !newEnum) return false;
-      if (renamesOnly && shapes.new.enums.has(a.name) && shapes.old.enums.has(b.name)) return false;
+      if (reading === 'renamed' && shapes.new.enums.has(a.name) && shapes.old.enums.has(b.name)) return false;
       return sameEnumShape(oldEnum, newEnum);
     }
     case 'array':
-      return b.kind === 'array' && sameShapeWithin(a.items, b.items, shapes, seen, renamesOnly);
+      return b.kind === 'array' && sameShapeWithin(a.items, b.items, shapes, seen, reading);
     case 'map':
-      return b.kind === 'map' && sameShapeWithin(a.valueType, b.valueType, shapes, seen, renamesOnly);
+      return b.kind === 'map' && sameShapeWithin(a.valueType, b.valueType, shapes, seen, reading);
     case 'nullable':
-      return b.kind === 'nullable' && sameShapeWithin(a.inner, b.inner, shapes, seen, renamesOnly);
+      return b.kind === 'nullable' && sameShapeWithin(a.inner, b.inner, shapes, seen, reading);
     case 'union':
       return (
         b.kind === 'union' &&
-        sameVariants(a.variants, b.variants, shapes, seen, renamesOnly) &&
-        sameDiscriminator(a.discriminator, b.discriminator, shapes, seen, renamesOnly)
+        (reading === 'renamed' || a.compositionKind === b.compositionKind) &&
+        sameVariants(a.variants, b.variants, shapes, seen, reading) &&
+        sameDiscriminator(a.discriminator, b.discriminator, shapes, seen, reading)
       );
     default:
       // Primitives and literals are equal exactly when `typeRefsEqual` says so.
@@ -201,50 +216,70 @@ export type BodySide = 'reader' | 'writer';
  *   judges the same edit to a model of that direction
  *   (`classifyConstraintsChange`): tightened is incompatible for a writer,
  *   since a value it sends can be rejected, and any change is compatible
- *   for a reader;
+ *   for a reader. The levels are compared in the pairs the shape
+ *   comparison made (`limitsBreak`);
  * - the model's type parameters are the same, and so are a named union's
- *   variants and discriminator, each variant and mapped model one shape;
- *   its deprecation does not count, so a body can move off a deprecated
- *   model.
+ *   composition keyword, variants and discriminator, each variant and
+ *   mapped model one shape; its deprecation does not count, so a body can
+ *   move off a deprecated model.
  *
  * The same wrapper on both sides is looked through to what it wraps: an
  * array's items, a map's values, a `nullable`'s inner type, and an inline
- * union's variants pairwise in order, with its discriminator's property and
- * keys the same and each key's two targets compatible. A wrapper added,
- * removed or exchanged is not, and neither is a union that gained or lost a
- * variant (`addedUnionVariants` is asked beside this where a widening
- * counts). Anything else — a primitive, a literal, an enum — is compatible
- * only as one shape: an enum with the same values, under whatever name.
+ * union's variants pairwise in order, with the same composition keyword,
+ * its discriminator's property and keys the same and each key's two
+ * targets compatible. A wrapper added, removed or exchanged is not, and
+ * neither is a union that gained or lost a variant (`addedUnionVariants`
+ * is asked beside this where a widening counts). The limits those wrappers
+ * carry are judged by side too: `Pet[]` with `maxItems: 10` become
+ * `PetWithTag[]` with `maxItems: 5` rejects a request the old body
+ * accepted. Anything else — a primitive, a literal, an enum — is
+ * compatible only as one shape: an enum with the same values, under
+ * whatever name.
  *
  * Unlike `sameShape` this is no identity: it does not ask whether either
  * name is new to its document, at the body or under it, so a body moved to
  * a model both documents declare is compatible when that model's fields
  * are, which is all the reader or the writer depends on (the move is still
- * reported: this only says what it is called). Without `shapes`, or for a
- * name its document lacks, two refs are compatible only when
- * `typeRefsEqual`.
+ * reported: this only says what it is called). Nor does it hold wherever
+ * `sameShape` does: a model that was only renamed is one shape there
+ * whatever its union keywords and the limits around it, and compatible
+ * here only when those allow it. Two types `typeRefsEqual` reads as one
+ * are compatible, since the differ reports no type change for them
+ * anywhere. Without `shapes`, or for a name its document lacks, two refs
+ * are compatible only when `typeRefsEqual`.
  */
 export function compatibleShape(oldType: TypeRef, newType: TypeRef, side: BodySide, shapes?: DocumentShapes): boolean {
-  if (oneShape(oldType, newType, shapes)) return true;
+  if (typeRefsEqual(oldType, newType)) return true;
   if (!shapes) return false;
+  return (
+    compatibleWithin(oldType, newType, side, shapes) &&
+    // The limits the body's own type carries around its models, level by level in the pairs just made.
+    !limitsBreak({ type: oldType }, { type: newType }, side, 'inOrder')
+  );
+}
+
+/** `compatibleShape`'s walk: one shape, two compatible models, or the same wrapper around a pair that is either. */
+function compatibleWithin(oldType: TypeRef, newType: TypeRef, side: BodySide, shapes: DocumentShapes): boolean {
+  if (oneShape(oldType, newType, shapes)) return true;
   if (oldType.kind === 'model' && newType.kind === 'model') {
     const oldModel = shapes.old.models.get(oldType.name);
     const newModel = shapes.new.models.get(newType.name);
     return !!oldModel && !!newModel && compatibleModel(oldModel, newModel, side, shapes);
   }
   if (oldType.kind === 'array' && newType.kind === 'array') {
-    return compatibleShape(oldType.items, newType.items, side, shapes);
+    return compatibleWithin(oldType.items, newType.items, side, shapes);
   }
   if (oldType.kind === 'map' && newType.kind === 'map') {
-    return compatibleShape(oldType.valueType, newType.valueType, side, shapes);
+    return compatibleWithin(oldType.valueType, newType.valueType, side, shapes);
   }
   if (oldType.kind === 'nullable' && newType.kind === 'nullable') {
-    return compatibleShape(oldType.inner, newType.inner, side, shapes);
+    return compatibleWithin(oldType.inner, newType.inner, side, shapes);
   }
   if (oldType.kind === 'union' && newType.kind === 'union') {
     return (
+      oldType.compositionKind === newType.compositionKind &&
       oldType.variants.length === newType.variants.length &&
-      oldType.variants.every((variant, i) => compatibleShape(variant, newType.variants[i], side, shapes)) &&
+      oldType.variants.every((variant, i) => compatibleWithin(variant, newType.variants[i], side, shapes)) &&
       compatibleDiscriminator(oldType.discriminator, newType.discriminator, side, shapes)
     );
   }
@@ -267,11 +302,15 @@ function compatibleModel(oldModel: Model, newModel: Model, side: BodySide, shape
     ) {
       return false;
     }
-    if (limitsBreak(oldField, newField, side)) return false;
+    // Two types the differ reads as one pair their variants as it pairs them
+    // on any field; two that are one shape under other names were matched
+    // in order.
+    const pairing = typeRefsEqual(oldField.type, newField.type) ? 'byType' : 'inOrder';
+    if (limitsBreak(oldField, newField, side, pairing)) return false;
   }
   // A required field the old model lacks is one more thing a writer must send.
   if (side === 'writer' && newModel.fields.some((field) => field.required && !oldNames.has(field.name))) return false;
-  if (limitsBreak(oldModel, newModel, side)) return false;
+  if (limitsBreak(oldModel, newModel, side, 'byType')) return false;
   if (
     stableStringify(omitKeys(oldModel, MODEL_LENIENT_KEYS)) !== stableStringify(omitKeys(newModel, MODEL_LENIENT_KEYS))
   ) {
@@ -282,16 +321,28 @@ function compatibleModel(oldModel: Model, newModel: Model, side: BodySide, shape
     oldModel.variants &&
     newModel.variants &&
     (!sameVariantLimits(oldModel.variants, newModel.variants) ||
-      !sameVariants(oldModel.variants, newModel.variants, shapes, new Set(), false))
+      !sameVariants(oldModel.variants, newModel.variants, shapes, new Set(), 'alike'))
   ) {
     return false;
   }
-  return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, new Set(), false);
+  return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, new Set(), 'alike');
 }
 
-/** Whether the limits moved between two sites in a way that breaks `side`: tightened, for a writer (`classifyConstraintsChange`). */
-function limitsBreak(oldSite: ConstrainedSite, newSite: ConstrainedSite, side: BodySide): boolean {
-  const shift = constraintsShift(oldSite, newSite);
+/**
+ * Whether the limits moved between two sites in a way that breaks `side`:
+ * tightened, for a writer (`classifyConstraintsChange`). `pairing` is how
+ * the two types' union variants were matched by the comparison that read
+ * them as one type, so that every level it accepted is a level compared
+ * here: by type for two the differ reads as one, in order for two that
+ * are one shape under other names.
+ */
+function limitsBreak(
+  oldSite: ConstrainedSite,
+  newSite: ConstrainedSite,
+  side: BodySide,
+  pairing: VariantPairing,
+): boolean {
+  const shift = constraintsShift(oldSite, newSite, pairing);
   return (
     shift !== undefined &&
     classifyConstraintsChange(shift.tightened, side === 'reader' ? 'response' : 'request') === 'breaking'
@@ -311,7 +362,7 @@ function compatibleDiscriminator(
   const bKeys = Object.keys(b.mapping).sort();
   if (aKeys.length !== bKeys.length || !aKeys.every((key, i) => key === bKeys[i])) return false;
   return aKeys.every((key) =>
-    compatibleShape({ kind: 'model', name: a.mapping[key] }, { kind: 'model', name: b.mapping[key] }, side, shapes),
+    compatibleWithin({ kind: 'model', name: a.mapping[key] }, { kind: 'model', name: b.mapping[key] }, side, shapes),
   );
 }
 
@@ -320,7 +371,7 @@ function sameModelShape(
   newModel: Model,
   shapes: DocumentShapes,
   seen: Set<string>,
-  renamesOnly: boolean,
+  reading: Reading,
 ): boolean {
   const oldFields = new Map(oldModel.fields.map((field) => [field.name, field]));
   const newFields = new Map(newModel.fields.map((field) => [field.name, field]));
@@ -333,7 +384,7 @@ function sameModelShape(
     }
     // The limits the field's type carries are its shape, as its own are (#545).
     if (!sameLimits(oldField.type, newField.type)) return false;
-    if (!sameShapeWithin(oldField.type, newField.type, shapes, seen, renamesOnly)) return false;
+    if (!sameShapeWithin(oldField.type, newField.type, shapes, seen, reading)) return false;
   }
   if (
     stableStringify(omitKeys(oldModel, MODEL_IDENTITY_KEYS)) !==
@@ -346,11 +397,11 @@ function sameModelShape(
     oldModel.variants &&
     newModel.variants &&
     (!sameVariantLimits(oldModel.variants, newModel.variants) ||
-      !sameVariants(oldModel.variants, newModel.variants, shapes, seen, renamesOnly))
+      !sameVariants(oldModel.variants, newModel.variants, shapes, seen, reading))
   ) {
     return false;
   }
-  return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, seen, renamesOnly);
+  return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, seen, reading);
 }
 
 /**
@@ -396,9 +447,9 @@ function sameVariants(
   b: TypeRef[],
   shapes: DocumentShapes,
   seen: Set<string>,
-  renamesOnly: boolean,
+  reading: Reading,
 ): boolean {
-  return a.length === b.length && a.every((variant, i) => sameShapeWithin(variant, b[i], shapes, seen, renamesOnly));
+  return a.length === b.length && a.every((variant, i) => sameShapeWithin(variant, b[i], shapes, seen, reading));
 }
 
 /** The same `property`, the same mapping keys, each mapped to one shape; absent on both sides is the same too. */
@@ -407,7 +458,7 @@ function sameDiscriminator(
   b: { property: string; mapping: Record<string, string> } | undefined,
   shapes: DocumentShapes,
   seen: Set<string>,
-  renamesOnly: boolean,
+  reading: Reading,
 ): boolean {
   if (!a && !b) return true;
   if (!a || !b || a.property !== b.property) return false;
@@ -420,7 +471,7 @@ function sameDiscriminator(
       { kind: 'model', name: b.mapping[key] },
       shapes,
       seen,
-      renamesOnly,
+      reading,
     ),
   );
 }

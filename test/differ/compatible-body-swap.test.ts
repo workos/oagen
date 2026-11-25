@@ -597,6 +597,50 @@ describe('#753 a body moved to a model that still serves its reader or its write
       }
     });
 
+    it('keeps a union whose keyword changed beside the move breaking, on both sides (Greptile, #758 review round 1)', async () => {
+      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
+      const union = (keyword: 'anyOf' | 'oneOf', name: string): Schema => ({ [keyword]: [ref(name), ref('Dog')] });
+      for (const site of Object.values(sites)) {
+        const classified = async (before: Schema, after: Schema) =>
+          bodyChange(
+            await diffDocuments(
+              siteDocument(openapi, site, schemas, before),
+              siteDocument(openapi, site, schemas, after),
+            ),
+          ).classification;
+        expect(await classified(union('anyOf', 'Pet'), union('oneOf', 'Pet2')), site.side).toBe('breaking');
+        expect(await classified(union('oneOf', 'Pet'), union('anyOf', 'Pet2')), site.side).toBe('breaking');
+        expect(await classified(union('anyOf', 'Pet'), union('anyOf', 'Pet2')), site.side).toBe('additive');
+        expect(await classified(union('oneOf', 'Pet'), union('oneOf', 'Pet2')), site.side).toBe('additive');
+      }
+    });
+
+    it('judges the limits of the body’s own array by side, as a field’s are', async () => {
+      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
+      const array = (name: string, maxItems?: number): Schema => ({
+        type: 'array',
+        items: ref(name),
+        ...(maxItems === undefined ? {} : { maxItems }),
+      });
+      const classified = async (site: Site, before: Schema, after: Schema) =>
+        bodyChange(
+          await diffDocuments(
+            siteDocument(openapi, site, schemas, before),
+            siteDocument(openapi, site, schemas, after),
+          ),
+        ).classification;
+      // Tightened: a request the old body accepted is rejected. A reader is handed fewer items.
+      expect(await classified(sites.request, array('Pet', 10), array('Pet2', 5))).toBe('breaking');
+      expect(await classified(sites.request, array('Pet'), array('Pet2', 5))).toBe('breaking');
+      expect(await classified(sites.response, array('Pet', 10), array('Pet2', 5))).toBe('additive');
+      // Loosened, or the same.
+      for (const site of Object.values(sites)) {
+        expect(await classified(site, array('Pet', 5), array('Pet2', 10)), site.side).toBe('additive');
+        expect(await classified(site, array('Pet', 5), array('Pet2')), site.side).toBe('additive');
+        expect(await classified(site, array('Pet', 5), array('Pet2', 5)), site.side).toBe('additive');
+      }
+    });
+
     it('keeps a union whose mapping lost or renamed a key breaking, and one that gained a variant beside the move', async () => {
       const mapped = WRAPPERS['a union with a mapping'];
       const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'], Bird: object({ id: string }) };
@@ -695,6 +739,22 @@ describe('#753 a body moved to a model that still serves its reader or its write
         response: 'additive',
         request: 'breaking',
       });
+    });
+
+    it('reads a limit on a union variant whose items are an identical model under another name (Greptile, #758 review round 1)', async () => {
+      const Child = object({ id: string });
+      const kids = (child: string, maxItems: number): Schema =>
+        object({ id: string, kids: { anyOf: [{ type: 'array', items: ref(child), maxItems }, string] } }, ['id']);
+      const moved = (before: number, after: number): [[Schemas, Schema], [Schemas, Schema]] => {
+        const declared = { Child, ChildCopy: Child, Pet: kids('Child', before) };
+        return [
+          [declared, ref('Pet')],
+          [{ ...declared, Pet2: kids('ChildCopy', after) }, ref('Pet2')],
+        ];
+      };
+      expect(await judged(...moved(10, 5))).toEqual({ response: 'additive', request: 'breaking' });
+      expect(await judged(...moved(5, 10))).toEqual(additive);
+      expect(await judged(...moved(10, 10))).toEqual(additive);
     });
 
     it('passes over deprecation, on a field and on the model, so a body can move off a deprecated model', async () => {
@@ -1188,7 +1248,7 @@ describe('#753 compatibleShape', () => {
     expect(compatibleShape(model('PetCopy'), model('Pet'), 'writer', swapped)).toBe(true);
   });
 
-  it('is compatible on both sides wherever `sameShape` reads one shape', () => {
+  it('is compatible on both sides wherever `sameShape` reads one shape with the same union keywords and limits', () => {
     const level: Enum = {
       name: 'Level',
       values: [
@@ -1220,6 +1280,150 @@ describe('#753 compatibleShape', () => {
       expect(compatibleShape(a, b, 'reader', shapes)).toBe(true);
       expect(compatibleShape(a, b, 'writer', shapes)).toBe(true);
     }
+    // `sameShape` passes over a union's keyword and the limits around a renamed
+    // model; this vouches for the pair, so it reads both.
+    const anyOf: TypeRef = { kind: 'union', compositionKind: 'anyOf', variants: [model('Pet'), str] };
+    const oneOf: TypeRef = { kind: 'union', compositionKind: 'oneOf', variants: [model('Animal'), str] };
+    expect(sameShape(anyOf, oneOf, shapes)).toBe(true);
+    expect(compatibleShape(anyOf, oneOf, 'reader', shapes)).toBe(false);
+    expect(compatibleShape(anyOf, oneOf, 'writer', shapes)).toBe(false);
+    const items = (name: string, maxItems: number): TypeRef => ({
+      kind: 'array',
+      items: model(name),
+      constraints: { maxItems },
+    });
+    expect(sameShape(items('Pet', 10), items('Animal', 5), shapes)).toBe(true);
+    expect(compatibleShape(items('Pet', 10), items('Animal', 5), 'reader', shapes)).toBe(true);
+    expect(compatibleShape(items('Pet', 10), items('Animal', 5), 'writer', shapes)).toBe(false);
+    expect(compatibleShape(items('Pet', 5), items('Animal', 10), 'writer', shapes)).toBe(true);
+    // Two types `typeRefsEqual` reads as one are no type change anywhere in the differ, and none here.
+    const same: TypeRef = { ...anyOf, compositionKind: 'oneOf' };
+    expect(compatibleShape(anyOf, same, 'writer', shapes)).toBe(true);
+    expect(compatibleShape(items('Pet', 10), items('Pet', 5), 'writer', shapes)).toBe(true);
+  });
+
+  it('compares every inline union’s composition keyword, at the body and under it (Greptile, #758 review round 1)', () => {
+    const dog: Model = { name: 'Dog', fields: [field('id', str, true)] };
+    const pet2: Model = { name: 'Pet2', fields: [...pet.fields, field('tag', str, false)] };
+    const union = (kind: 'anyOf' | 'oneOf' | undefined, first: string): TypeRef => ({
+      kind: 'union',
+      variants: [model(first), model('Dog')],
+      ...(kind ? { compositionKind: kind } : {}),
+    });
+    const shapes = shapesOf({ models: [pet, dog] }, { models: [pet, pet2, dog] });
+    const judge = (a: TypeRef, b: TypeRef, documents = shapes) => ({
+      reader: compatibleShape(a, b, 'reader', documents),
+      writer: compatibleShape(a, b, 'writer', documents),
+    });
+    // The finding: `anyOf: [Pet, Dog]` → `oneOf: [Pet2, Dog]` rejects a body that matches both variants.
+    expect(judge(union('anyOf', 'Pet'), union('oneOf', 'Pet2'))).toEqual(neither);
+    expect(judge(union('oneOf', 'Pet'), union('anyOf', 'Pet2'))).toEqual(neither);
+    expect(judge(union('anyOf', 'Pet'), union('anyOf', 'Pet2'))).toEqual(both);
+    expect(judge(union('oneOf', 'Pet'), union('oneOf', 'Pet2'))).toEqual(both);
+    // Written on one side only is another keyword too, as `addedUnionVariants` reads it.
+    expect(judge(union(undefined, 'Pet'), union('oneOf', 'Pet2'))).toEqual(neither);
+    expect(judge(union(undefined, 'Pet'), union(undefined, 'Pet2'))).toEqual(both);
+    // Under a wrapper, and in a variant that is a union itself.
+    const array = (items: TypeRef): TypeRef => ({ kind: 'array', items });
+    expect(judge(array(union('anyOf', 'Pet')), array(union('oneOf', 'Pet2')))).toEqual(neither);
+    const outer = (inner: TypeRef): TypeRef => ({ kind: 'union', compositionKind: 'oneOf', variants: [inner, str] });
+    expect(judge(outer(union('anyOf', 'Pet')), outer(union('oneOf', 'Pet2')))).toEqual(neither);
+    expect(judge(outer(union('anyOf', 'Pet')), outer(union('anyOf', 'Pet2')))).toEqual(both);
+    // A union inside the moved model: its variants are the same by name, its keyword is not.
+    const holder = (name: string, kind: 'anyOf' | 'oneOf'): Model => ({
+      name,
+      fields: [field('pet', { kind: 'union', compositionKind: kind, variants: [model('Pet'), model('Dog')] }, true)],
+    });
+    const inside = (old: Model[], next: Model[]) =>
+      judge(model('Home'), model('Home2'), shapesOf({ models: [pet, dog, ...old] }, { models: [pet, dog, ...next] }));
+    const [any, one] = [holder('Home', 'anyOf'), holder('Home2', 'oneOf')];
+    expect(inside([any], [any, one])).toEqual(neither);
+    expect(inside([any], [one])).toEqual(neither);
+    expect(inside([any, one], [any, one])).toEqual(neither);
+    expect(inside([any], [any, holder('Home2', 'anyOf')])).toEqual(both);
+    // And inside a model a field of the moved model is typed by.
+    const street = (name: string, home: string): Model => ({ name, fields: [field('home', model(home), true)] });
+    expect(
+      judge(
+        model('Street'),
+        model('Street2'),
+        shapesOf(
+          { models: [pet, dog, any, street('Street', 'Home')] },
+          { models: [pet, dog, any, one, street('Street', 'Home'), street('Street2', 'Home2')] },
+        ),
+      ),
+    ).toEqual(neither);
+  });
+
+  it('reads the limits in the pairs the shape comparison made, around the body’s model and under a field (Greptile, #758 review round 1)', () => {
+    const child = (name: string): Model => ({ name, fields: [field('id', str, true)] });
+    const kids = (childName: string, maxItems: number): TypeRef => ({
+      kind: 'union',
+      compositionKind: 'anyOf',
+      variants: [{ kind: 'array', items: model(childName), constraints: { maxItems } }, str],
+    });
+    const parent = (name: string, childName: string, maxItems: number): Model => ({
+      name,
+      fields: [field('kids', kids(childName, maxItems), true)],
+    });
+    const judge = (before: number, after: number, to = 'ChildCopy') => {
+      const declared = [child('Child'), child('ChildCopy'), parent('Pet', 'Child', before)];
+      const shapes = shapesOf({ models: declared }, { models: [...declared, parent('Pet2', to, after)] });
+      return {
+        reader: compatibleShape(model('Pet'), model('Pet2'), 'reader', shapes),
+        writer: compatibleShape(model('Pet'), model('Pet2'), 'writer', shapes),
+      };
+    };
+    const readerOnly = { reader: true, writer: false };
+    // The finding: `anyOf: [Child[] maxItems 10, string]` → `anyOf: [ChildCopy[] maxItems 5, string]`,
+    // `Child` and `ChildCopy` identical. The arrays are one shape and do not pair by name.
+    expect(judge(10, 5)).toEqual(readerOnly);
+    expect(judge(5, 10)).toEqual(both);
+    expect(judge(10, 10)).toEqual(both);
+    // The same items by name pair as on any field.
+    expect(judge(10, 5, 'Child')).toEqual(readerOnly);
+    expect(judge(5, 10, 'Child')).toEqual(both);
+    // Two variants of one type that changed places with their limits are still the same union.
+    const pattern: TypeRef = { ...str, constraints: { pattern: '^pet_' } };
+    const patterned = (name: string, variants: TypeRef[]): Model => ({
+      name,
+      fields: [field('code', { kind: 'union', compositionKind: 'anyOf', variants }, true)],
+    });
+    const reordered = shapesOf(
+      { models: [patterned('Pet', [pattern, str])] },
+      { models: [patterned('Pet', [pattern, str]), patterned('Pet2', [str, pattern])] },
+    );
+    expect(compatibleShape(model('Pet'), model('Pet2'), 'writer', reordered)).toBe(true);
+
+    // Around the body's own model: an array's, a map's, a union variant's limits.
+    const grown: Model = { name: 'Pet2', fields: [...pet.fields, field('tag', str, false)] };
+    const shapes = shapesOf({ models: [pet] }, { models: [pet, grown] });
+    const array = (name: string, maxItems?: number): TypeRef => ({
+      kind: 'array',
+      items: model(name),
+      ...(maxItems === undefined ? {} : { constraints: { maxItems } }),
+    });
+    const map = (name: string, maxProperties?: number): TypeRef => ({
+      kind: 'map',
+      valueType: model(name),
+      ...(maxProperties === undefined ? {} : { constraints: { maxProperties } }),
+    });
+    const around = (a: TypeRef, b: TypeRef) => ({
+      reader: compatibleShape(a, b, 'reader', shapes),
+      writer: compatibleShape(a, b, 'writer', shapes),
+    });
+    expect(around(array('Pet', 10), array('Pet2', 5))).toEqual(readerOnly);
+    expect(around(array('Pet'), array('Pet2', 5))).toEqual(readerOnly);
+    expect(around(array('Pet', 5), array('Pet2', 10))).toEqual(both);
+    expect(around(array('Pet', 5), array('Pet2'))).toEqual(both);
+    expect(around(map('Pet', 10), map('Pet2', 5))).toEqual(readerOnly);
+    expect(around(map('Pet', 5), map('Pet2', 10))).toEqual(both);
+    const nested = (name: string, maxItems: number): TypeRef => ({
+      kind: 'nullable',
+      inner: { kind: 'union', variants: [array(name, maxItems), str] },
+    });
+    expect(around(nested('Pet', 10), nested('Pet2', 5))).toEqual(readerOnly);
+    expect(around(nested('Pet', 5), nested('Pet2', 10))).toEqual(both);
   });
 
   it('looks through the same wrapper on both sides, and through nothing else', () => {

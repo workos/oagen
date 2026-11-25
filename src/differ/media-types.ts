@@ -347,9 +347,11 @@ export function ownRepresentationKept(
   );
   if (!pair) return false;
   const [before, after] = pair;
+  // One shape was always the same representation, whatever limits or union
+  // keywords it carries; a compatible one is since #753.
   return (
     before.type !== undefined &&
     after.type !== undefined &&
-    compatibleShape(before.type, after.type, bodySideOf(side), shapes)
+    (sameShape(before.type, after.type, shapes) || compatibleShape(before.type, after.type, bodySideOf(side), shapes))
   );
 }

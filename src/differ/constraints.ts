@@ -41,6 +41,18 @@ export interface ConstraintsShift {
   tightened: boolean;
 }
 
+/**
+ * How two unions' variants are paired when their limits are compared.
+ * `byType` is `pairVariants`: for two unions the differ reads as one type,
+ * whose variants of one type may have changed places. `inOrder` pairs them
+ * by position: for two unions a caller has already matched variant by
+ * variant — `compatibleShape` reads `array<Child>` and `array<ChildCopy>`
+ * as one shape when the two models are, which `pairVariants`, matching by
+ * name, cannot pair, so a limit tightened on that variant would go unread
+ * (Greptile, #758 review round 1).
+ */
+export type VariantPairing = 'byType' | 'inOrder';
+
 /** The two sides of `shift` alone, each present when the site declares limits there, to spread onto the entry that reports it. */
 export function constraintsSides(shift: ConstraintsShift): Pick<ConstraintsShift, 'oldConstraints' | 'newConstraints'> {
   return {
@@ -275,9 +287,15 @@ type PairMemo = WeakMap<TypeRef, WeakMap<TypeRef, LevelShift[]>>;
  * whether the limits tightened at some level (`constraintsTightened`).
  * `oldConstraints` / `newConstraints` are the site's own, each present when
  * it declares any on that side, so a change on a nested level alone carries
- * two equal sides (or none) and names the level in `details`.
+ * two equal sides (or none) and names the level in `details`. `pairing`
+ * says how a union's variants are paired at every level (`VariantPairing`);
+ * the differ's own comparisons leave it at `byType`.
  */
-export function constraintsShift(oldSite: ConstrainedSite, newSite: ConstrainedSite): ConstraintsShift | undefined {
+export function constraintsShift(
+  oldSite: ConstrainedSite,
+  newSite: ConstrainedSite,
+  pairing: VariantPairing = 'byType',
+): ConstraintsShift | undefined {
   const memo: PairMemo = new WeakMap();
   const levels: LevelShift[] = [];
   const oldConstraints = siteLimits(oldSite);
@@ -285,7 +303,7 @@ export function constraintsShift(oldSite: ConstrainedSite, newSite: ConstrainedS
   if (!sameConstraints(oldConstraints, newConstraints)) {
     levels.push(levelShift('', oldConstraints, newConstraints, oldSite.type, newSite.type));
   }
-  if (oldSite.type && newSite.type) levels.push(...childLevels('', oldSite.type, newSite.type, memo));
+  if (oldSite.type && newSite.type) levels.push(...childLevels('', oldSite.type, newSite.type, memo, pairing));
   if (levels.length === 0) return undefined;
   return {
     ...(oldConstraints ? { oldConstraints } : {}),
@@ -299,9 +317,16 @@ export function constraintsShift(oldSite: ConstrainedSite, newSite: ConstrainedS
  * The levels at which `a` and `b` carry different limits, each path
  * prefixed with `path`: their own (`limitsOf`, through a nullable wrapper)
  * and, under it, their children's (`childLevels`). Memoized by the two
- * types' identity, with the paths relative to the pair.
+ * types' identity, with the paths relative to the pair; one comparison
+ * pairs variants one way throughout, so the memo holds one answer per pair.
  */
-function typeLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo): LevelShift[] {
+function typeLevels(
+  path: string,
+  a: TypeRef,
+  b: TypeRef,
+  memo: PairMemo,
+  pairing: VariantPairing = 'byType',
+): LevelShift[] {
   let byNew = memo.get(a);
   if (!byNew) {
     byNew = new WeakMap();
@@ -312,7 +337,7 @@ function typeLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo): Level
     levels = [];
     const [x, y] = [limitsOf(a), limitsOf(b)];
     if (!sameConstraints(x, y)) levels.push(levelShift('', x, y, a, b));
-    levels.push(...childLevels('', a, b, memo));
+    levels.push(...childLevels('', a, b, memo, pairing));
     byNew.set(b, levels);
   }
   return path === '' ? levels : levels.map((level) => ({ ...level, path: `${path}${level.path}` }));
@@ -322,17 +347,22 @@ function typeLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo): Level
  * The levels under two types of one kind that differ, each path prefixed
  * with `path` and the child's key: an array's `items.`, a map's
  * `valueType.`, a union's `variants[i].` for each new variant paired with
- * an old one (`pairVariants`), `i` the new variant's index. Two types of
- * different kinds, or two leaves, have no children to compare.
+ * an old one, `i` the new variant's index — by `pairVariants`, or by
+ * position when `pairing` is `inOrder`. Two types of different kinds, or
+ * two leaves, have no children to compare.
  */
-function childLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo): LevelShift[] {
+function childLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo, pairing: VariantPairing): LevelShift[] {
   const [x, y] = [unwrap(a), unwrap(b)];
-  if (x.kind === 'array' && y.kind === 'array') return typeLevels(`${path}items.`, x.items, y.items, memo);
-  if (x.kind === 'map' && y.kind === 'map') return typeLevels(`${path}valueType.`, x.valueType, y.valueType, memo);
+  if (x.kind === 'array' && y.kind === 'array') return typeLevels(`${path}items.`, x.items, y.items, memo, pairing);
+  if (x.kind === 'map' && y.kind === 'map') {
+    return typeLevels(`${path}valueType.`, x.valueType, y.valueType, memo, pairing);
+  }
   if (x.kind === 'union' && y.kind === 'union') {
-    return [...pairVariants(x.variants, y.variants, memo)].flatMap(([i, old]) =>
-      typeLevels(`${path}variants[${i}].`, old, y.variants[i], memo),
-    );
+    const pairs: Array<[number, TypeRef]> =
+      pairing === 'inOrder'
+        ? x.variants.slice(0, y.variants.length).map((old, i) => [i, old])
+        : [...pairVariants(x.variants, y.variants, memo)];
+    return pairs.flatMap(([i, old]) => typeLevels(`${path}variants[${i}].`, old, y.variants[i], memo, pairing));
   }
   return [];
 }
