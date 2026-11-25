@@ -1964,8 +1964,8 @@ const LIST_KEYWORDS = ['enum', 'required'] as const;
  * member is not readable to the reading it had (workos/oagen#732), and a
  * property's declaration that is a nullable `oneOf`/`anyOf` wrapper is
  * conjoined with another declaration of the property as the declaration
- * it wraps only where it is readable (`openedNullableUnion`;
- * workos/oagen#743: declared second, it was dropped unread).
+ * it wraps only where both are readable (`openedNullableUnion`;
+ * workos/oagen#743: the pair kept the first, the second unread).
  */
 export function isReadableSchema(schema: unknown): boolean {
   const seen = new Set<unknown>();
