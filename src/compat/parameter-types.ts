@@ -32,6 +32,7 @@
 import type { DeclaredTypes, RecordedMember, TypeLookup } from './type-graph.js';
 import { declaresSupertype, recordedMembers } from './type-graph.js';
 import {
+  everyNameIn,
   handsBackItsArgument,
   objectTypeMembers,
   singleArgumentGeneric,
@@ -329,8 +330,9 @@ function memberAccepts(oldMember: string, newMember: string, context: ShapeConte
 
 /**
  * Whether a text that is the same on both sides stands for one type on both:
- * every type it mentions (`typeNamesIn`) that a snapshot declares is declared
- * alike in the two.
+ * every type it depends on (`everyNameIn`: an argument of `Partial<…>` and
+ * the type a template literal is built with included) that a snapshot
+ * declares is declared alike in the two.
  *
  *  - A type alias recorded by its text stands for the same text, and that
  *    text reads alike in turn.
@@ -344,7 +346,7 @@ function memberAccepts(oldMember: string, newMember: string, context: ShapeConte
  * a type that mentions itself ends.
  */
 function readsAlike(text: string, context: ShapeContext, read: Set<string>): boolean {
-  for (const name of typeNamesIn(text)) {
+  for (const name of everyNameIn(text)) {
     if (read.has(name)) continue;
     read.add(name);
     const oldType = context.oldTypes.get(name);
@@ -367,7 +369,9 @@ function readsAlike(text: string, context: ShapeContext, read: Set<string>): boo
     for (const [fieldName, oldField] of oldFields) {
       const newField = newFields.get(fieldName);
       if (newField === undefined || newField.optional !== oldField.optional) return false;
-      if (newField.type.trim() !== oldField.type.trim() || !readsAlike(oldField.type, context, read)) return false;
+      // Two texts cut short may read alike and differ in what was left out.
+      if (ELIDED.test(oldField.type) || newField.type.trim() !== oldField.type.trim()) return false;
+      if (!readsAlike(oldField.type, context, read)) return false;
     }
   }
   return true;

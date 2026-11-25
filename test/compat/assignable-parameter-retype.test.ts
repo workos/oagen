@@ -999,6 +999,31 @@ retypes('#752 a TypeScript parameter whose text keeps a name that changed', [
     expected: SOFT_RISK,
   },
   {
+    // A `Partial` of the type changes with the type.
+    name: 'an interface that lost a member, under `Partial`, in a parameter that became optional',
+    oldOnly: OLD('timeout?: number; maxRetries?: number'),
+    newOnly: OLD('timeout?: number'),
+    old: 'options: Partial<OldOptions%>',
+    new: 'options?: Partial<OldOptions%>',
+    expected: BREAKING,
+  },
+  {
+    name: 'an unchanged interface, under `Partial`, in a parameter that became optional',
+    shared: OLD('timeout?: number; maxRetries?: number'),
+    old: 'options: Partial<OldOptions%>',
+    new: 'options?: Partial<OldOptions%>',
+    expected: SOFT_RISK,
+  },
+  {
+    name: 'an alias that lost a member, among the keys of a `Pick`',
+    shared: OLD('timeout?: number; maxRetries?: number'),
+    oldOnly: "export type Keys% = 'timeout' | 'maxRetries';",
+    newOnly: "export type Keys% = 'timeout';",
+    old: 'options: Pick<OldOptions%, Keys%>',
+    new: 'options?: Pick<OldOptions%, Keys%>',
+    expected: BREAKING,
+  },
+  {
     // `symbol_removed` says so too, on the field.
     name: 'an interface that lost a member, in a parameter that became optional',
     oldOnly: OLD('timeout?: number; maxRetries?: number'),

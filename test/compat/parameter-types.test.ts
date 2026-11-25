@@ -656,6 +656,54 @@ describe('#752 by shape: one text on both sides is two declarations', () => {
     expect(byShape('Box<Buffer>', 'Box<Buffer> | null', baseline, baseline)).toBeDefined();
   });
 
+  it('reads every type a text depends on, where a value is built from a part of it or not at all', () => {
+    // `Partial<Options>` is built from no whole `Options`, and changes with it
+    // all the same; so does a `Pick`, a template literal over an alias, and a
+    // forward reference in quotes.
+    const baseline = types(
+      objectType('Options', { timeout: '?number', maxRetries: '?number' }),
+      alias('Id', 'string | number'),
+      alias('Keys', '"timeout" | "maxRetries"'),
+    );
+    const changed = types(
+      objectType('Options', { timeout: '?number' }),
+      alias('Id', 'string'),
+      alias('Keys', '"timeout"'),
+    );
+    for (const [text, orNull] of [
+      ['Partial<Options>', 'Partial<Options> | null'],
+      ['Pick<Options, "timeout">', 'Pick<Options, "timeout"> | null'],
+      ['Pick<Options, Keys>', 'Pick<Options, Keys> | null'],
+      ['Omit<Options, "timeout">', 'Omit<Options, "timeout"> | null'],
+      ['Required<Options>', 'Required<Options> | null'],
+      ['Partial<Record<Id, string>>', 'Partial<Record<Id, string>> | null'],
+      ['Partial<Options>[]', 'Partial<Options>[] | null'],
+      ['Promise<Partial<Options>>', 'Promise<Partial<Options>> | null'],
+      ['{ part: Partial<Options>; }', '{ part: Partial<Options>; } | null'],
+      ['`pet_${Id}`', '`pet_${Id}` | null'],
+      ['Optional["Options"]', 'Optional["Options"] | null'],
+      ['typeof Options', 'typeof Options | null'],
+      ['keyof Options', 'keyof Options | null'],
+      ['Options["timeout"]', 'Options["timeout"] | null'],
+    ]) {
+      expect([text, byShape(text, orNull, baseline, baseline) !== undefined]).toEqual([text, true]);
+      expect([text, byShape(text, orNull, changed, baseline) !== undefined]).toEqual([text, false]);
+    }
+    // A word in quotes that names no declared type is a value, as before.
+    expect(byShape('"Elsewhere"', '"Elsewhere" | null', changed, baseline)).toBeDefined();
+  });
+
+  it('does not take a field cut short for the same field, in a type a text depends on', () => {
+    // The extractor records a long union as `"a" | "b" | ... 12 more ... | "z"`:
+    // one text for two unions that differ in what was left out.
+    const cut = '"a" | "b" | ... 12 more ... | "z"';
+    const whole = types(objectType('Options', { order: '?"a" | "b"' }));
+    const short = types(objectType('Options', { order: `?${cut}` }));
+    expect(byShape('Partial<Options>', 'Partial<Options> | null', whole, whole)).toBeDefined();
+    expect(byShape('Partial<Options>', 'Partial<Options> | null', short, short)).toBeUndefined();
+    expect(byShape('Options', 'Options | null', short, short)).toBeUndefined();
+  });
+
   it('reads an object type behind an unchanged name from each snapshot', () => {
     const baseline = types(objectType('Options', { timeout: '?number', maxRetries: '?number' }));
     const lostAField = types(objectType('Options', { timeout: '?number' }));
