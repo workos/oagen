@@ -556,18 +556,17 @@ retypes('#752 however a TypeScript type is declared', [
     expected: SOFT_RISK,
   },
   {
-    // Printed as `{ timeout?: number | undefined; }`. Beside an interface the
-    // `undefined` of an optional member is left out, as the interface's is.
+    // Printed as `{ timeout?: number | undefined; }`: whether that `undefined`
+    // is TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text
+    // does not say, and a declared type's field is recorded without the
+    // first only.
     name: 'a shape written in place with an optional member, to an interface',
     newOnly: 'export interface RequestOptions% { timeout?: number; maxRetries?: number }',
     old: 'options: { timeout?: number }',
     new: 'options: RequestOptions%',
-    expected: SOFT_RISK,
+    expected: BREAKING,
   },
   {
-    // Beside a type alias it is weighed as written: whether it is
-    // TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text does
-    // not say, and an alias's member is recorded without the first only.
     name: 'a shape written in place with an optional member, to a type alias',
     newOnly: 'export type RequestOptions% = { timeout?: number; maxRetries?: number };',
     old: 'options: { timeout?: number }',
@@ -1103,34 +1102,33 @@ export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
     expect(await retype(strict, '{ name?: string }', '{ name?: string; tag?: string }')).toEqual(GET(SOFT_RISK));
   });
 
-  it('is left out beside an interface, whose optional field is recorded without it either way', async () => {
+  it('is read off an interface as off a type alias: by what the checker resolved', async () => {
     const interfaces = (parameter: string) => `export interface Plain { name?: string }
 export interface OrUndefined { name?: string | undefined }
+export interface Base { name: string }
+export interface Inherited extends Partial<Base> {}
 export type Alias = { name?: string | undefined };
 export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
 `;
-    const modes: Array<Record<string, boolean>> = [
-      { strict: true },
-      { strict: true, exactOptionalPropertyTypes: true },
-    ];
-    for (const compilerOptions of modes) {
-      const between = async (from: string, to: string) =>
-        notAdditive(
-          (
-            await compatDiff(
-              nodeExtractor,
-              sdk(compilerOptions, interfaces(from)),
-              sdk(compilerOptions, interfaces(to)),
-            )
-          ).diff,
-        );
-      // Both interfaces record an optional `string`: the snapshot holds no
-      // difference to weigh, as #750's own comparison of the field holds none.
-      expect(await between('OrUndefined', 'Plain')).toEqual(GET(SOFT_RISK));
-      expect(await between('Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
-      expect(await between('Alias', 'Plain')).toEqual(GET(SOFT_RISK));
-      expect(await between('{ name?: string | undefined }', 'Plain')).toEqual(GET(SOFT_RISK));
-    }
+    const between = async (compilerOptions: Record<string, boolean>, from: string, to: string) =>
+      notAdditive(
+        (await compatDiff(nodeExtractor, sdk(compilerOptions, interfaces(from)), sdk(compilerOptions, interfaces(to))))
+          .diff,
+      );
+
+    // Without the option the two interfaces are one type, whichever way.
+    const strict = { strict: true };
+    expect(await between(strict, 'OrUndefined', 'Plain')).toEqual(GET(SOFT_RISK));
+    expect(await between(strict, 'Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+    expect(await between(strict, 'Alias', 'Plain')).toEqual(GET(SOFT_RISK));
+    // With it an interface's text is `string` for both, as every baseline
+    // holds it, and the resolved type beside it tells them apart.
+    const exact = { strict: true, exactOptionalPropertyTypes: true };
+    expect(await between(exact, 'OrUndefined', 'Plain')).toEqual(GET(BREAKING));
+    expect(await between(exact, 'Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+    expect(await between(exact, 'Alias', 'Plain')).toEqual(GET(BREAKING));
+    expect(await between(exact, 'OrUndefined', 'Alias')).toEqual(GET(SOFT_RISK));
+    expect(await between(exact, '{ name?: string | undefined }', 'Plain')).toEqual(GET(BREAKING));
   });
 
   it('is two types with it: the one that takes `undefined` is not accepted by the one that does not', async () => {

@@ -383,10 +383,11 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     ['a required field dropped', { name: 'string', timeout: '?number' }, { timeout: '?number' }, REFUSED],
     ['a field renamed', { timeout: '?number' }, { timeoutMs: '?number' }, REFUSED],
     ['a field renamed in case only', { timeout: '?number' }, { Timeout: '?number' }, REFUSED],
-    // An interface's optional field is recorded with or without the
-    // `undefined` its `?` adds, so between two optional fields it is left out.
+    // A field's type is weighed as the snapshot resolves it, `undefined` and
+    // all: under `exactOptionalPropertyTypes` an optional `number | undefined`
+    // takes a value an optional `number` does not.
     ['an optional field gains `| undefined`', { timeout: '?number' }, { timeout: '?number | undefined' }, ACCEPTED],
-    ['an optional field loses `| undefined`', { timeout: '?number | undefined' }, { timeout: '?number' }, ACCEPTED],
+    ['an optional field loses `| undefined`', { timeout: '?number | undefined' }, { timeout: '?number' }, REFUSED],
     ['a field that is only ever undefined', { never: '?undefined' }, { never: '?undefined' }, ACCEPTED],
     ['a field that is only ever undefined, retyped', { never: '?undefined' }, { never: '?string' }, REFUSED],
     // A required field that may be `undefined` still has to be written.
@@ -404,44 +405,47 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     expect(pair(oldFields, newFields) !== undefined).toBe(accepted);
   });
 
-  it('weighs the `undefined` of an optional field as written between two type aliases, and leaves it out beside an interface', () => {
-    // Under `exactOptionalPropertyTypes` a type alias's member is recorded
-    // with the `undefined` the SDK wrote: `name?: string | undefined` takes a
-    // value `name?: string` does not. An interface's field is recorded by
-    // where its `?` stands, so its `undefined` says nothing (#750).
-    const WITH = { name: '?string | undefined' };
-    const WITHOUT = { name: '?string' };
-    const declare = (kind: 'interface' | 'alias', name: string, fields: Record<string, string>) =>
-      objectType(name, fields, kind === 'alias' ? { aliasOf: '{ … }' } : {});
-    const accepted = (
-      oldKind: 'interface' | 'alias',
-      newKind: 'interface' | 'alias',
-      oldFields = WITH,
-      newFields = WITHOUT,
-    ) =>
-      byShape(
-        'OldOptions',
-        'NewOptions',
-        types(declare(oldKind, 'OldOptions', oldFields), declare(newKind, 'NewOptions', newFields)),
-      ) !== undefined;
-
-    expect(accepted('alias', 'alias')).toBe(false);
-    expect(accepted('alias', 'alias', WITHOUT, WITH)).toBe(true);
-    expect(accepted('alias', 'alias', WITH, WITH)).toBe(true);
-    for (const [oldKind, newKind] of [
-      ['interface', 'interface'],
-      ['interface', 'alias'],
-      ['alias', 'interface'],
-    ] as const) {
-      expect([oldKind, newKind, accepted(oldKind, newKind)]).toEqual([oldKind, newKind, true]);
-      expect(accepted(oldKind, newKind, WITHOUT, WITH)).toBe(true);
-      // Only the `undefined` of two optional fields: a required one's is a value.
-      expect(accepted(oldKind, newKind, { name: 'string | undefined' }, { name: 'string' })).toBe(false);
-      expect(accepted(oldKind, newKind, { name: 'string | undefined' }, WITHOUT)).toBe(false);
-      // ... and nothing else of the type.
-      expect(accepted(oldKind, newKind, { name: '?string | null' }, WITHOUT)).toBe(false);
-      expect(accepted(oldKind, newKind, { name: '?string | number | undefined' }, WITHOUT)).toBe(false);
+  it('reads a field by the type its checker resolved, where the snapshot records one beside the text', () => {
+    // An interface's `typeRef.name` is decided by where the member's `?`
+    // stands; `resolvedType` is what the member is (#750). The two readings
+    // of `name`, each spelled both ways:
+    const spelled = (name: string, text: string, resolvedType?: string) => [
+      symbol('alias', name, { extends: [], hasUnlistedMembers: false }),
+      symbol('field', `${name}.name`, {
+        ownerFqName: name,
+        typeRef: { name: text },
+        optional: true,
+        ...(resolvedType === undefined ? {} : { resolvedType }),
+      }),
+    ];
+    const declared = types(
+      // an optional `string`: as written, and as a member inherited through `Partial<…>` is recorded
+      spelled('Plain', 'string'),
+      spelled('PlainInherited', 'string | undefined', 'string'),
+      // an optional `string | undefined` under `exactOptionalPropertyTypes`:
+      // as a type alias's member is recorded, and as an interface's is
+      spelled('OrUndefined', 'string | undefined'),
+      spelled('OrUndefinedInterface', 'string', 'string | undefined'),
+    );
+    const accepted = (oldType: string, newType: string) => byShape(oldType, newType, declared) !== undefined;
+    for (const plain of ['Plain', 'PlainInherited']) {
+      for (const orUndefined of ['OrUndefined', 'OrUndefinedInterface']) {
+        // `get({ name: undefined })` compiles against the second alone.
+        expect([orUndefined, plain, accepted(orUndefined, plain)]).toEqual([orUndefined, plain, false]);
+        expect([plain, orUndefined, accepted(plain, orUndefined)]).toEqual([plain, orUndefined, true]);
+      }
     }
+    // Two spellings of one member accept each other.
+    expect(accepted('Plain', 'PlainInherited')).toBe(true);
+    expect(accepted('PlainInherited', 'Plain')).toBe(true);
+    expect(accepted('OrUndefined', 'OrUndefinedInterface')).toBe(true);
+    expect(accepted('OrUndefinedInterface', 'OrUndefined')).toBe(true);
+    // A `resolvedType` that is no text is no reading: the field's own text is.
+    const odd = types(
+      spelled('Old', 'string', 1 as unknown as string),
+      spelled('New', 'string', null as unknown as string),
+    );
+    expect(byShape('Old', 'New', odd)).toBeDefined();
   });
 
   it('asks the same question of each field, through unions, arrays, aliases and nested types', () => {
@@ -715,16 +719,15 @@ describe('#752 by shape: an object type written in place', () => {
     // one side declared, the other written in place
     ['RequestOptions', '{ timeout?: number | undefined; maxRetries?: number | undefined; }', ACCEPTED],
     ['{ timeout?: number; }', 'RetryRequestOptions', ACCEPTED],
-    ['{ timeout?: number | undefined; }', 'RetryRequestOptions', ACCEPTED],
+    ['{ timeout?: number | undefined; }', 'RetryRequestOptions', REFUSED],
     ['RetryRequestOptions', '{ timeout?: number | undefined; }', REFUSED],
     ['{ timeout?: number | undefined; maxRetries?: number | undefined; }', 'RequestOptions', REFUSED],
     ['{ retry?: RequestOptions; }', '{ retry?: RetryRequestOptions; }', ACCEPTED],
-    // An optional member's `undefined`: printed by TypeScript for every
-    // optional member, or written by an SDK compiled with
-    // `exactOptionalPropertyTypes`. Beside an interface it is left out, as
-    // the interface's own is; beside a type alias or another type written in
-    // place it is weighed as written.
-    ['{ a?: string | undefined; b?: number | undefined; c: boolean; }', 'ThreeFields', ACCEPTED],
+    // An optional member's `undefined` is weighed as written. Printed by
+    // TypeScript for every optional member, or written by an SDK compiled
+    // with `exactOptionalPropertyTypes`: the text does not say which, so a
+    // member with one is not accepted by a declared field without one.
+    ['{ a?: string | undefined; b?: number | undefined; c: boolean; }', 'ThreeFields', REFUSED],
     ['{ a?: string | undefined; b?: number | undefined; c: boolean; }', 'ThreeFieldsAlias', REFUSED],
     ['{ a?: string; b?: number; c: boolean; }', 'ThreeFieldsAlias', ACCEPTED],
     ['ThreeFieldsAlias', '{ a?: string | undefined; b?: number | undefined; c: boolean; }', ACCEPTED],

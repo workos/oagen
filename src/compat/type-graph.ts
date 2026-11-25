@@ -182,7 +182,9 @@ export function isRecordedByNameOnly(type: DeclaredType | undefined): boolean {
 
 /** A member of a type, as `recordedMembers` reads it. */
 export interface RecordedMember {
-  /** The member's type text (`CompatSymbol.typeRef.name`). */
+  /** The member's type text: as the extractor's checker resolves it where
+   *  the snapshot records that beside the text baselines hold
+   *  (`CompatSymbol.resolvedType`), `typeRef.name` otherwise. */
   type: string;
   /** Whether a caller that builds the type may leave the member out. */
   optional: boolean;
@@ -259,7 +261,9 @@ function ownMembers(type: DeclaredType | undefined, typeName: string): Map<strin
       typeof member.fqName === 'string' && member.fqName.startsWith(`${typeName}.`)
         ? member.fqName.slice(typeName.length + 1)
         : '';
-    const text = member.typeRef?.name;
+    // A field with a recorded optionality is compared by its resolved type
+    // where it carries one, as the classifier compares it.
+    const text = typeof member.resolvedType === 'string' ? member.resolvedType : member.typeRef?.name;
     if (member.kind !== 'field' || name === '' || typeof text !== 'string' || typeof member.optional !== 'boolean') {
       return undefined;
     }
