@@ -12,9 +12,16 @@ import type { ApiSurface, ApiMethod, LanguageHints, DiffResult, Violation, Addit
 import type { CompatSnapshot, CompatSymbol } from './ir.js';
 import type { CompatPolicyHints } from './policy.js';
 import type { ClassifiedChange, ClassificationResult } from './classify.js';
-import { classifySymbolChanges, classifyAddedSymbol, summarizeChanges } from './classify.js';
+import {
+  classifySymbolChanges,
+  classifyAddedSymbol,
+  classifyFieldRequirednessIncrease,
+  summarizeChanges,
+} from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
 import { bareTypeName } from './type-names.js';
+import { declaredTypes, declaresSupertype, inputTypes, isObjectAlias, isRecordedByNameOnly } from './type-graph.js';
+import type { DeclaredTypes } from './type-graph.js';
 
 export {
   specDerivedNames,
@@ -35,17 +42,53 @@ export interface CompatDiffResult {
   summary: ClassificationResult['summary'];
 }
 
+/** What `diffSnapshots` may be told beside the two snapshots. */
+export interface SnapshotDiffContext {
+  /**
+   * The baseline SDK's whole snapshot, when `baseline` is a part of it (the
+   * symbols a spec derives, as `oagen verify` scopes it). The scoped part is
+   * still what is compared; the whole one says which types the SDK's callers
+   * build and which fields the SDK already has, so a field the scope left out
+   * of the baseline is not taken for one the candidate added as required.
+   */
+  unscopedBaseline?: CompatSnapshot;
+}
+
 /**
  * Diff two compat snapshots, producing classified changes with
  * policy-aware severity.
  */
 export function diffSnapshots(
-  baseline: CompatSnapshot,
-  candidate: CompatSnapshot,
+  recordedBaseline: CompatSnapshot,
+  recordedCandidate: CompatSnapshot,
   policy?: CompatPolicyHints,
+  context?: SnapshotDiffContext,
 ): CompatDiffResult {
-  const effectivePolicy = policy ?? baseline.policies;
+  const effectivePolicy = policy ?? recordedBaseline.policies;
   const changes: ClassifiedChange[] = [];
+
+  // What each snapshot says about its types, as recorded. The types callers
+  // build are the baseline's: the callers that exist today call its
+  // callables, with values of the types those take. A type only the
+  // candidate takes (a new method's options, an existing response type a new
+  // method now accepts) has no caller yet that a new required field breaks.
+  const baselineTypes = declaredTypes(recordedBaseline);
+  const candidateTypes = declaredTypes(recordedCandidate);
+  const callersBaseline = context?.unscopedBaseline ?? recordedBaseline;
+  const callersTypes = context?.unscopedBaseline ? declaredTypes(callersBaseline) : baselineTypes;
+  const takenBy = inputTypes(callersBaseline, callersTypes);
+  // The fields the SDK has today, where the compared baseline is a part of it.
+  const fieldsOutOfScope = context?.unscopedBaseline
+    ? new Set(context.unscopedBaseline.symbols.map((sym) => sym.fqName))
+    : undefined;
+
+  // The members of a type alias are compared only when both snapshots
+  // record them (see `comparableSymbols`). Everything below reads these.
+  const baseline = { ...recordedBaseline, symbols: comparableSymbols(recordedBaseline, baselineTypes, candidateTypes) };
+  const candidate = {
+    ...recordedCandidate,
+    symbols: comparableSymbols(recordedCandidate, candidateTypes, baselineTypes),
+  };
 
   // Build set of service wrapper fqNames from both snapshots so we can
   // suppress constructor noise — users never instantiate service classes
@@ -72,18 +115,51 @@ export function diffSnapshots(
     baseByFqName.add(sym.fqName);
   }
 
+  // A field callers must now supply: required in the candidate, on a type
+  // the baseline's callers build. Returns the callable that takes the type.
+  // Asked of a field the baseline lacks and of one it records as optional;
+  // a snapshot that does not record a field's optionality (an older one, an
+  // extractor that cannot tell) never has `optional: false` or `true`, so it
+  // neither raises nor answers the question. Nor does a baseline that
+  // records the owning type by name only: what it does not list, it does not
+  // say was missing.
+  const requiredOfCallers = (field: CompatSymbol, owner: string | undefined): string | undefined =>
+    field.kind === 'field' &&
+    field.optional === false &&
+    owner !== undefined &&
+    !isRecordedByNameOnly(callersTypes.get(owner))
+      ? takenBy.get(owner)
+      : undefined;
+
   // Compare each baseline symbol against candidate
   for (const baseSym of baseline.symbols) {
     if (isServiceWrapperConstructor(baseSym, serviceAccessors)) continue;
     const candSym = candById.get(baseSym.id) ?? candByFqName.get(baseSym.fqName);
     changes.push(...classifySymbolChanges(baseSym, candSym, effectivePolicy, baseline.source.language));
+    // Optional → required, on a type callers build. Every other change of
+    // optionality is left unreported, as before the snapshot carried it.
+    if (candSym && baseSym.kind === 'field' && baseSym.optional === true) {
+      const callable = requiredOfCallers(candSym, baseSym.ownerFqName);
+      if (callable !== undefined) changes.push(classifyFieldRequirednessIncrease(candSym, baseSym, callable));
+    }
   }
 
   // Detect added symbols
   for (const candSym of candidate.symbols) {
     if (!baseByFqName.has(candSym.fqName)) {
       if (isServiceWrapperConstructor(candSym, serviceAccessors)) continue;
-      changes.push(classifyAddedSymbol(candSym));
+      // A required field on a type callers already build is not an addition
+      // they can ignore: one change per field, the breaking one. A field of
+      // a type that is itself new has no owner in the baseline to be taken,
+      // and a field the baseline's scope left out is not new at all.
+      const callable = fieldsOutOfScope?.has(candSym.fqName)
+        ? undefined
+        : requiredOfCallers(candSym, candSym.ownerFqName);
+      changes.push(
+        callable !== undefined
+          ? classifyFieldRequirednessIncrease(candSym, undefined, callable)
+          : classifyAddedSymbol(candSym),
+      );
     }
   }
 
@@ -115,12 +191,40 @@ export function diffSnapshots(
   // pair them on its own. Use the recorded parent rename + the field
   // typeRefs to derive the secondary rename.
   inferTransitiveTypeRenames(typeRenames, baseline, candidate, changes);
-  cascadeRenameDowngrades(changes, typeRenames, enumRenames, baseline, candidate);
+  cascadeRenameDowngrades(changes, typeRenames, enumRenames, baseline, candidate, candidateTypes, takenBy);
 
   return {
     changes,
     summary: summarizeChanges(changes),
   };
+}
+
+/**
+ * A snapshot's symbols, without the members of each type alias the other
+ * snapshot records by name only.
+ *
+ * A type alias of an object type carries its members as `field` symbols
+ * (`isObjectAlias`); a snapshot written before it did, and an alias that is
+ * not an object type, is the alias symbol alone (`isRecordedByNameOnly`),
+ * which says nothing about the members. Set against each other, every member
+ * would read as added or removed, though nothing may have changed but the
+ * snapshot's writer. So the members of an alias are compared only when both
+ * sides record them, as `isStatic` is: here they are left out of the diff,
+ * and the alias is compared by name, as it was before it carried any.
+ *
+ * Only an alias's members are held back. An interface's or a class's fields
+ * set against a bare alias of the same name (`type Old = New` replacing a
+ * struct) are compared as they always were.
+ */
+function comparableSymbols(snapshot: CompatSnapshot, types: DeclaredTypes, otherTypes: DeclaredTypes): CompatSymbol[] {
+  const heldBack = new Set<string>();
+  for (const [name, type] of types) {
+    if (isObjectAlias(type) && isRecordedByNameOnly(otherTypes.get(name))) heldBack.add(name);
+  }
+  if (heldBack.size === 0) return snapshot.symbols;
+  return snapshot.symbols.filter(
+    (sym) => !(sym.kind === 'field' && typeof sym.ownerFqName === 'string' && heldBack.has(sym.ownerFqName)),
+  );
 }
 
 /**
@@ -500,6 +604,11 @@ function detectEnumRenames(
  *     old → new pair matches a recorded rename — the type swap is the
  *     rename itself, not a meaningful signature break.
  *
+ *   - Downgrades a `return_type_changed` / `field_type_changed` to a type
+ *     the candidate declares as a subtype of the old one (`declaresSupertype`)
+ *     — every value of the new type is a value of the old. For a position
+ *     callers read only: a return, and a field of a type no callable takes.
+ *
  * Each cascaded change gets a remediation pointing at the parent rename
  * so the reviewer can find the explanation in the report.
  */
@@ -509,7 +618,17 @@ function cascadeRenameDowngrades(
   enumRenames: Map<string, string>,
   baseline: CompatSnapshot,
   candidate: CompatSnapshot,
+  candidateTypes: DeclaredTypes,
+  takenBy: ReadonlyMap<string, string>,
 ): void {
+  // The type that owns each baseline field, to tell a field callers read
+  // from one they write (see the `field_type_changed` branch).
+  const ownerOfField = new Map<string, string>();
+  for (const sym of baseline.symbols) {
+    if ((sym.kind === 'field' || sym.kind === 'property') && sym.ownerFqName)
+      ownerOfField.set(sym.fqName, sym.ownerFqName);
+  }
+
   // Lazy-built field-set maps for the structural-equivalence fallback used
   // by `*_type_changed`. Both maps are needed even when no renames were
   // recorded — the structural test handles cases where both old and new
@@ -555,6 +674,29 @@ function cascadeRenameDowngrades(
     return true;
   };
 
+  /**
+   * A retype that narrows to a declared subtype and does nothing else: the
+   * candidate declares that `newT` extends `oldT` (`declaresSupertype`), and
+   * the two type texts are one text with the type's name swapped. `ErrorBody`
+   * → `DetailedErrorBody` is, and so is `ErrorBody[] | undefined` →
+   * `DetailedErrorBody[] | undefined`. A retype that also changes what stands
+   * around the name is not: `ErrorBody` → `DetailedErrorBody[]` hands the
+   * caller a list, `ErrorBody` → `DetailedErrorBody | undefined` a value that
+   * may be missing.
+   */
+  const narrowsToDeclaredSubtype = (
+    oldText: string | undefined,
+    newText: string | undefined,
+    oldT: string,
+    newT: string,
+  ): boolean =>
+    oldText !== undefined &&
+    newText !== undefined &&
+    oldT !== '' &&
+    newT !== '' &&
+    oldText.split(oldT).join('\0') === newText.split(newT).join('\0') &&
+    declaresSupertype(candidateTypes, newT, oldT);
+
   for (const change of changes) {
     if (change.severity !== 'breaking') continue;
 
@@ -593,6 +735,11 @@ function cascadeRenameDowngrades(
             `Consumer code accessing fields on the returned value continues to work; ` +
             `only explicit "${oldT}" type annotations need to migrate.`;
         }
+      } else if (narrowsToDeclaredSubtype(change.old.returnType, change.new.returnType, oldT, newT)) {
+        // The new type says it is a kind of the old one, whether or not it
+        // is new: what a caller did with the result still type-checks.
+        change.severity = 'soft-risk';
+        change.remediation ??= declaredSubtypeRemediation('Return type', oldT, newT);
       }
       continue;
     }
@@ -613,9 +760,28 @@ function cascadeRenameDowngrades(
             `Field type swap from "${oldT}" to "${newT}" is structurally equivalent — ` +
             `every field on "${oldT}" still exists on "${newT}".`;
         }
+      } else if (
+        !takenBy.has(ownerOfField.get(change.symbol) ?? '') &&
+        narrowsToDeclaredSubtype(change.old.type, change.new.type, oldT, newT)
+      ) {
+        // A field of a type callers build is one they write: the subtype may
+        // ask for more than the value they pass today, so that retype keeps
+        // its severity. Anywhere else the field is read, and a subtype's
+        // value is still one of the old type.
+        change.severity = 'soft-risk';
+        change.remediation ??= declaredSubtypeRemediation('Field type', oldT, newT);
       }
     }
   }
+}
+
+function declaredSubtypeRemediation(position: 'Return type' | 'Field type', oldT: string, newT: string): string {
+  return (
+    `${position} swap from "${oldT}" to "${newT}" narrows to a declared subtype — ` +
+    `"${newT}" extends "${oldT}", so every value of the new type is still a value of the old one. ` +
+    `Code that reads the value continues to work; only code that produces one ` +
+    `(a test double, an override) has to supply "${newT}".`
+  );
 }
 
 /**

@@ -640,6 +640,45 @@ export function classifyAddedSymbol(symbol: CompatSymbol): ClassifiedChange {
   };
 }
 
+/**
+ * Classify a field callers must now supply: one a type they build gained as
+ * required (no `baseline`), or one that was optional there and is required
+ * now. The counterpart of `parameter_requiredness_increased` for the members
+ * of the types a callable takes: an options object's fields are its
+ * parameters in all but name.
+ *
+ * The caller decides that the owning type is one callers build (see
+ * `inputTypes`) and that the field is required now; `takenBy` is the
+ * callable or constructor whose parameters lead to the type.
+ */
+export function classifyFieldRequirednessIncrease(
+  candidate: CompatSymbol,
+  baseline: CompatSymbol | undefined,
+  takenBy: string,
+): ClassifiedChange {
+  const category: CompatChangeCategory = 'field_requiredness_increased';
+  const owner = candidate.ownerFqName ?? '';
+  const field = candidate.fqName.startsWith(`${owner}.`) ? candidate.fqName.slice(owner.length + 1) : candidate.fqName;
+  const old: Record<string, string> = baseline ? { field, required: 'false' } : { field: '(absent)' };
+  return {
+    category,
+    severity: defaultSeverityForCategory(category),
+    symbol: candidate.fqName,
+    conceptualChangeId: buildConceptualChangeId(
+      category,
+      candidate.fqName,
+      old,
+      candidate.schemaName ?? baseline?.schemaName,
+    ),
+    provenance: 'unknown',
+    old,
+    new: { field, required: 'true', takenBy },
+    message: baseline
+      ? `Field "${field}" became required on "${owner}", which callers of "${takenBy}" pass in`
+      : `Required field "${field}" added to "${owner}", which callers of "${takenBy}" pass in`,
+  };
+}
+
 /** Summarize a list of classified changes by severity. */
 export function summarizeChanges(changes: ClassifiedChange[]): ClassificationResult['summary'] {
   let breaking = 0;

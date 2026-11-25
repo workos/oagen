@@ -6,8 +6,10 @@
  * `ErrorBody`, `ErrorBody[]`, `Promise<ErrorBody>`, `ErrorBody | undefined`,
  * `?ErrorBody`, `*ErrorBody`. The differ's fork and rename rules ask which
  * declared type such a text names, and `bareTypeName` is the one place that
- * answers. It reads text only: it takes no language and no snapshot, so the
- * same text reads the same whichever extractor wrote it.
+ * answers. `typeNamesIn` reads every name a text mentions, for following a
+ * type to the types it is built from, and `supertypeName` reads a declared
+ * supertype's entry. All three read text only: they take no language and no
+ * snapshot, so the same text reads the same whichever extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -79,6 +81,124 @@ export function bareTypeName(typeText: string): string {
     if (GENERIC_ARGUMENT_NAME.test(name)) return bareTypeName(name);
   }
   return text;
+}
+
+/** A name as a type text writes it, alone or under a module path:
+ *  `Foo`, `models.Foo`, `crate::models::Foo`, `\Acme\Foo`. */
+const NAME_PATH = /\\?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::|\\)[A-Za-z_$][A-Za-z0-9_$]*)*/y;
+const NAME_PATH_SEPARATOR = /\.|::|\\/;
+
+/** A supertype written as a name and nothing else, with the namespace PHP
+ *  may put before it: `Base`, `\Acme\Base`. */
+const SUPERTYPE_NAME = /^\\?[A-Za-z_$][A-Za-z0-9_$]*(?:\\[A-Za-z_$][A-Za-z0-9_$]*)*$/;
+
+/** What a quoted run holds when it is a string literal and not two
+ *  apostrophes that happen to stand in one text (Rust's lifetimes:
+ *  `&'a Foo, &'b Bar`). */
+const NOT_A_STRING_LITERAL = /[<>()[\]{}&,]/;
+
+/** TypeScript's wrappers that take the required members off their argument:
+ *  a `Partial<Foo>` needs none of them, a `Pick<Foo, 'a'>` only the ones it
+ *  lists. A value of either is not built from a whole `Foo`. */
+const WRAPPERS_OF_A_PART = new Set(['Partial', 'Pick']);
+
+/**
+ * Every name a type text mentions, for following a type to the types a value
+ * of it is built from: the members of a union or an intersection, an array's
+ * element, each argument of a generic, the types of an inline object's
+ * properties and of a function's parameters and result.
+ *
+ * `bareTypeName` answers which one declared type a text names, and refuses a
+ * text that names several. This reads them all, the one `bareTypeName` reads
+ * among them: each name path of the text as written (`models.Foo`,
+ * `\Acme\Foo`) and each of its segments (`models`, `Foo`), since the declared
+ * type may be recorded under either.
+ *
+ * It over-approximates on purpose. A property name, a parameter name and a
+ * keyword are names too (`{ body: Foo }` gives `body` and `Foo`), and the
+ * caller keeps the ones that are declared types. Two things are left out:
+ *
+ *  - a string literal, whole (`Omit<Foo, "id">` gives `Omit` and `Foo`), which
+ *    is also why a quoted forward reference (`Optional["Foo"]`) is not
+ *    followed, as `bareTypeName` does not look one up;
+ *  - the arguments of `Partial<…>` and `Pick<…>` (`WRAPPERS_OF_A_PART`):
+ *    `Partial<Foo> | Bar` gives `Bar`.
+ */
+export function typeNamesIn(typeText: string): string[] {
+  const names = new Set<string>();
+  let i = 0;
+  while (i < typeText.length) {
+    const char = typeText[i];
+    if (char === '"' || char === "'" || char === '`') {
+      i = stringLiteralEnd(typeText, i) ?? i + 1;
+      continue;
+    }
+    NAME_PATH.lastIndex = i;
+    const path = NAME_PATH.exec(typeText)?.[0];
+    if (path === undefined) {
+      i++;
+      continue;
+    }
+    i += path.length;
+    if (WRAPPERS_OF_A_PART.has(path)) {
+      const end = typeArgumentsEnd(typeText, i);
+      if (end !== undefined) {
+        i = end;
+        continue;
+      }
+    }
+    names.add(path);
+    for (const segment of path.split(NAME_PATH_SEPARATOR)) if (segment !== '') names.add(segment);
+  }
+  return [...names];
+}
+
+/** The index after the `<…>` that opens at `start` (spaces before it
+ *  allowed), or undefined when no argument list opens there or it never
+ *  closes. */
+function typeArgumentsEnd(text: string, start: number): number | undefined {
+  let open = start;
+  while (text[open] === ' ') open++;
+  if (text[open] !== '<') return undefined;
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const char = text[i];
+    if (char === '"' || char === "'" || char === '`') {
+      i = (stringLiteralEnd(text, i) ?? i + 1) - 1;
+    } else if (char === '<') {
+      depth++;
+    } else if (char === '>' && text[i - 1] !== '=' && text[i - 1] !== '-') {
+      if (--depth === 0) return i + 1;
+    }
+  }
+  return undefined;
+}
+
+/** The index after the string literal that opens at `start`, or undefined
+ *  when the quote there opens none: it has no partner, or what stands between
+ *  the two is type syntax (see `NOT_A_STRING_LITERAL`). */
+function stringLiteralEnd(text: string, start: number): number | undefined {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === quote) return NOT_A_STRING_LITERAL.test(text.slice(start + 1, i)) ? undefined : i + 1;
+  }
+  return undefined;
+}
+
+/**
+ * The declared type a supertype entry names (an interface's `extends`, a
+ * class's base, a named member of an intersection), or undefined when the
+ * entry is not a name alone.
+ *
+ * `Base` and `\Acme\Base` name `Base`. An instantiation does not name the
+ * type it instantiates: `Partial<Base>` has none of `Base`'s required
+ * members, and `bareTypeName` would read `List<Item>` as `Item`. Such an entry
+ * declares no supertype the differ can credit.
+ */
+export function supertypeName(entry: string): string | undefined {
+  const text = entry.trim();
+  return SUPERTYPE_NAME.test(text) ? bareTypeName(text) : undefined;
 }
 
 /**

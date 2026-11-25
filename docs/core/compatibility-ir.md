@@ -37,21 +37,28 @@ interface CompatSymbol {
   route?: { method: string; path: string };
   parameters?: CompatParameter[];
   returns?: CompatTypeRef;
+  typeRef?: CompatTypeRef; // a field's or a property's type
+  value?: string | number; // an enum member's value
+  isStatic?: boolean; // a callable
+  optional?: boolean; // a field: may a caller leave it out
+  extends?: string[]; // a type whose members are recorded: its supertypes
+  aliasOf?: string; // a type alias: the type text it stands for
+  sourceFile?: string;
 }
 ```
 
 ### Symbol Kinds
 
-| Kind               | Description                              |
-| ------------------ | ---------------------------------------- |
-| `service_accessor` | A service class (e.g., `UserManagement`) |
-| `callable`         | A method on a service class              |
-| `constructor`      | A constructor/initializer                |
-| `field`            | A field on an interface/model            |
-| `property`         | A property on a class                    |
-| `enum`             | An enum type                             |
-| `enum_member`      | A member of an enum                      |
-| `alias`            | A type alias or interface name           |
+| Kind               | Description                                                         |
+| ------------------ | ------------------------------------------------------------------- |
+| `service_accessor` | A service class (e.g., `UserManagement`)                            |
+| `callable`         | A method on a service class                                         |
+| `constructor`      | A constructor/initializer                                           |
+| `field`            | A field on an interface/model, or a member of an object-type alias  |
+| `property`         | A property on a class                                               |
+| `enum`             | An enum type                                                        |
+| `enum_member`      | A member of an enum                                                 |
+| `alias`            | An interface, a model class or a type alias (the type's own symbol) |
 
 ### Source Kinds
 
@@ -62,6 +69,62 @@ interface CompatSymbol {
 | `generated_resource_constructor` | Generated resource constructor   |
 | `generated_enum`                 | Generated from an enum schema    |
 | `compat_alias`                   | Added for backward compatibility |
+
+### Types and Their Members
+
+A type is a symbol other symbols name as their owner (`ownerFqName`). An interface, a model class and a type alias are each an `alias` symbol; a service class is a `service_accessor`. Three keys say what the snapshot keeps about a type, beside its name:
+
+| Key        | On                                | Holds                                                                                               |
+| ---------- | --------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `optional` | a `field`                         | whether a caller that builds the owning type may leave the field out (`false`: it must be supplied) |
+| `extends`  | a type whose members are recorded | the supertypes its declaration names, as written; `[]` when it names none                           |
+| `aliasOf`  | a type alias                      | the type text the alias stands for, as the extractor recorded it                                    |
+
+Each is left out where it does not apply or is not known, never written as `null`.
+
+**Members.** An interface's fields, a model class's fields and the members of a type alias that names an object shape are all `field` symbols under the type, each with its `typeRef` and its `optional`:
+
+```ts
+export interface UpdatePetOptions {
+  name?: string;
+  ownerId: string;
+}
+export type CreatePetOptions = { name: string; ownerId: string };
+```
+
+```jsonc
+{ "id": "iface:UpdatePetOptions", "kind": "alias", "extends": [] }
+{ "id": "field:UpdatePetOptions.name", "kind": "field", "typeRef": { "name": "string" }, "optional": true }
+{ "id": "field:UpdatePetOptions.ownerId", "kind": "field", "typeRef": { "name": "string" }, "optional": false }
+{ "id": "alias:CreatePetOptions", "kind": "alias", "extends": [], "aliasOf": "{ name: string; ownerId: string; }" }
+{ "id": "field:CreatePetOptions.name", "kind": "field", "typeRef": { "name": "string" }, "optional": false }
+{ "id": "field:CreatePetOptions.ownerId", "kind": "field", "typeRef": { "name": "string" }, "optional": false }
+```
+
+The `nodeExtractor` records members for an alias whose declared type is one object shape of its own: an object type (`{ name: string }`), what a mapped type comes to (`Omit<Pet, 'id'>`, `Partial<Options>`, `Record<'a' | 'b', string>`, an instantiation of a generic object alias) and an intersection of object types (`Base & { name: string }`). The members are every member the checker resolves for the alias, with the optionality it resolves (every member of a `Partial<…>` is optional; a member of `{ a?: string } & { a: string }` is required), an intersection's named types' members included, as an interface's fields include the ones it inherits. Any other alias is its symbol alone, with `aliasOf` and no `extends`: a union, a primitive, a function or tuple type, an instantiation of an interface or a class (`Promise<Pet>`, `Pet[]`), and another declared type under a second name (`type Old = New`). Such a symbol says nothing about the type's members; it does not say there are none. The other extractors record every alias that way.
+
+**Optionality.** `optional` is what the extractor's surface states (`ApiField.optional`), and each extractor reads it from what its language writes:
+
+| Extractor | `optional: false` when                                                             | No `optional` at all on                                                                     |
+| --------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| node      | the member has no `?` (a property or a method) and no mapped type made it optional | a class's properties                                                                        |
+| python    | a model's, a dataclass's or an annotated class's field has no default              | the keys of a `TypedDict`, and of a class that extends one                                  |
+| php       | a promoted constructor property has no default                                     | a class with a property declared in its body, a PHP `interface`'s methods, a resource class |
+| go        | the struct tag has no `omitempty` (an embedded struct is such a field)             | —                                                                                           |
+| kotlin    | the property is not nullable and has no default                                    | —                                                                                           |
+| dotnet    | the property's type is not nullable (`T?`)                                         | —                                                                                           |
+| rust      | the field is not an `Option<…>`                                                    | —                                                                                           |
+| ios       | the property's type is not optional (`T?`)                                         | —                                                                                           |
+| elixir    | the struct's `@type t` does not give the key `\| nil`                              | a struct with no `@type t`                                                                  |
+| ruby      | (the surface has no fields)                                                        | —                                                                                           |
+
+Where the surface cannot tell which fields may be left out and would only write a placeholder (`ApiInterface.fieldOptionalityUnknown`), the snapshot records no `optional` for them: `NotRequired[…]` and `total=False` decide a `TypedDict`'s keys, and a PHP property declared in the class body says nothing about the constructor.
+
+**Supertypes.** `extends` is what the surface states (`ApiInterface.extends`, `ApiTypeAlias.extends`): the `extends` of a TypeScript interface, the types an intersection alias is written with, a PHP class's base, and a Python model's base once the extractor is told what a model is (`hints.modelBaseClasses`). The other surfaces read no supertype, and their types carry `extends: []`; a class (`service_accessor`) carries none.
+
+**Which types callers build.** A snapshot records no direction, so the differ tells one this way: a type is one callers build when it is reachable from the type of a parameter of a callable or a constructor, through the types of its members, its supertypes and the text a type alias stands for. Each type text is read for every name it mentions (a union's members, an array's element, a generic's arguments), except the argument of `Partial<…>` and `Pick<…>`, which take the required members off it. A type that is both taken and returned counts as taken. The types are read from the baseline: the callers that exist today call its callables. Where `oagen verify` compares a baseline scoped to what the spec derives (`--scope spec-only`), they are read from the whole baseline, and so is which fields the SDK already has: a field the scope leaves out of the comparison is not taken for one the candidate added. An extractor that records no parameter types (Elixir's and Ruby's record each as `any` or `Object`) names no type a callable takes, so no field is reported as newly required there.
+
+**Snapshots written before these keys.** `schemaVersion` stays `"1"`: every key above is optional, and a reader that does not know one ignores it. The differ reads each only where it is defined. A baseline without `optional` cannot show a field that became required; a baseline without `extends` credits no supertype (the candidate's own `extends` is what a retype is judged by). The members of a type alias are compared only when both snapshots record them: against an alias the other snapshot records by name alone, they are neither added nor removed, so a baseline written before aliases carried members reports nothing new against a candidate extracted from the same sources.
 
 ## CompatParameter
 
@@ -105,20 +168,29 @@ interface ParameterSensitivity {
 
 ### Breaking
 
-| Category                                       | Description                                         |
-| ---------------------------------------------- | --------------------------------------------------- |
-| `symbol_removed`                               | A public symbol was removed                         |
-| `symbol_renamed`                               | A public symbol was renamed                         |
-| `parameter_removed`                            | A parameter was removed                             |
-| `parameter_renamed`                            | A parameter was renamed                             |
-| `parameter_requiredness_increased`             | Optional → required                                 |
-| `parameter_type_narrowed`                      | Parameter type changed                              |
-| `parameter_position_changed_order_sensitive`   | Parameter moved in order-sensitive language         |
-| `constructor_position_changed_order_sensitive` | Constructor param moved in order-sensitive language |
-| `named_arg_name_removed`                       | Named argument removed                              |
-| `keyword_name_removed`                         | Keyword argument removed                            |
-| `overload_removed`                             | Method overload removed                             |
-| `union_wrapper_migration_without_compat_alias` | Union wrapper migration without backward compat     |
+| Category                                       | Description                                                                                 |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `symbol_removed`                               | A public symbol was removed                                                                 |
+| `symbol_renamed`                               | A public symbol was renamed                                                                 |
+| `parameter_removed`                            | A parameter was removed                                                                     |
+| `parameter_renamed`                            | A parameter was renamed                                                                     |
+| `parameter_requiredness_increased`             | Optional → required                                                                         |
+| `parameter_type_narrowed`                      | Parameter type changed                                                                      |
+| `parameter_position_changed_order_sensitive`   | Parameter moved in order-sensitive language                                                 |
+| `constructor_position_changed_order_sensitive` | Constructor param moved in order-sensitive language                                         |
+| `named_arg_name_removed`                       | Named argument removed                                                                      |
+| `keyword_name_removed`                         | Keyword argument removed                                                                    |
+| `overload_removed`                             | Method overload removed                                                                     |
+| `union_wrapper_migration_without_compat_alias` | Union wrapper migration without backward compat                                             |
+| `field_requiredness_increased`                 | A type callers build gained a required field, or one of its fields went optional → required |
+
+`field_requiredness_increased` is the counterpart of `parameter_requiredness_increased` for the members of the types a callable takes (see [Which types callers build](#types-and-their-members)): an options object's fields are its parameters in all but name. It replaces the `symbol_added` such a field was reported as; a field is never reported as both. `new.takenBy` names the callable or constructor whose parameters lead to the type.
+
+```
+[field_requiredness_increased] UpdatePetOptions.ownerId — Required field "ownerId" added to "UpdatePetOptions", which callers of "PetsClient.update" pass in
+```
+
+A required field added to a type no callable takes, and an optional field added anywhere, stays an additive `symbol_added`. Every other change of a field's optionality (required → optional, and optional → required on a type no callable takes) is not reported.
 
 ### Soft-Risk
 
@@ -190,7 +262,7 @@ This enrichment happens after extraction, as a post-step in the CLI. Extractors 
 
 ### Bridge: ApiSurface → CompatSnapshot
 
-The `apiSurfaceToSnapshot()` function converts an `ApiSurface` to a `CompatSnapshot`, applying language-appropriate passing styles and sensitivity flags. This is what `extractSnapshot()` uses internally.
+The `apiSurfaceToSnapshot()` function converts an `ApiSurface` to a `CompatSnapshot`, applying language-appropriate passing styles and sensitivity flags. This is what `extractSnapshot()` uses internally. It keeps what the surface states about each type (see [Types and Their Members](#types-and-their-members)): a field's `optional`, an interface's `extends`, a type alias's `value` as `aliasOf`, and an alias's `fields` as `field` symbols.
 
 ```ts
 import { apiSurfaceToSnapshot } from "@workos/oagen";

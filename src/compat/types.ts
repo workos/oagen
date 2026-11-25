@@ -52,14 +52,25 @@ export interface ApiInterface {
   name: string;
   sourceFile?: string;
   fields: Record<string, ApiField>;
+  /** The supertypes the declaration names, as written: an interface's
+   *  `extends`, a model class's base. Empty when it names none, and when the
+   *  extractor does not read them. */
   extends: string[];
   /** True if the resource class defines its own constructFromResponse (not inherited). */
   hasCustomConstructor?: boolean;
+  /** True when the extractor cannot tell which of the fields may be left out
+   *  and writes `optional: false` on each as a placeholder (a Python
+   *  `TypedDict`'s keys, a PHP class's declared properties). The compat
+   *  snapshot then records no optionality for these fields, so none of them
+   *  is ever reported as newly required. Absent when `optional` is as the
+   *  SDK declares it. */
+  fieldOptionalityUnknown?: true;
 }
 
 export interface ApiField {
   name: string;
   type: string;
+  /** Whether a caller that builds the value may leave the field out. */
   optional: boolean;
 }
 
@@ -67,6 +78,18 @@ export interface ApiTypeAlias {
   name: string;
   sourceFile?: string;
   value: string;
+  /** The members of an alias that names an object shape of its own, as an
+   *  interface's `fields` are: an object type (`{ name: string }`), what a
+   *  mapped type comes to (`Omit<Pet, 'id'>`, `Partial<Options>`) and an
+   *  intersection of object types (`Base & { name: string }`). Absent on
+   *  every other alias (a union, a primitive, a function, another declared
+   *  type under a second name) and from an extractor that does not resolve
+   *  an alias's members. */
+  fields?: Record<string, ApiField>;
+  /** The types an intersection alias is written with, as an interface's
+   *  `extends` are (`Base` for `Base & { name: string }`); empty for any
+   *  other alias with `fields`. Present exactly when `fields` is. */
+  extends?: string[];
 }
 
 export interface ApiEnum {

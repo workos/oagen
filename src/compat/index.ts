@@ -59,10 +59,15 @@ export { defaultSeverityForCategory, severityMeetsThreshold } from './config.js'
 
 // Classification
 export type { ClassifiedChange, ClassificationResult } from './classify.js';
-export { classifySymbolChanges, classifyAddedSymbol, summarizeChanges } from './classify.js';
+export {
+  classifySymbolChanges,
+  classifyAddedSymbol,
+  classifyFieldRequirednessIncrease,
+  summarizeChanges,
+} from './classify.js';
 
 // Differ (legacy + new)
-export type { CompatDiffResult } from './differ.js';
+export type { CompatDiffResult, SnapshotDiffContext } from './differ.js';
 export {
   diffSurfaces,
   diffSnapshots,

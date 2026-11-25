@@ -396,17 +396,15 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
   }
 
   for (const prop of type.getProperties()) {
-    const propType = checker.getTypeOfSymbolAtLocation(prop, declarations![0]);
-    const propDecl = prop.getDeclarations()?.[0];
-    const isOptional = propDecl && ts.isPropertySignature(propDecl) ? !!propDecl.questionToken : false;
-    let typeStr = checker.typeToString(propType);
-    if (isOptional) {
-      typeStr = stripUndefined(typeStr);
-    }
+    const member = memberType(prop, declarations![0], checker);
     fields[prop.name] = {
       name: prop.name,
-      type: typeStr,
-      optional: isOptional,
+      type: member.type,
+      // A member can be optional without the `?` of a property signature: a
+      // method signature (`retry?(): void`), a member inherited through
+      // `Partial<Base>`. The checker knows those, and a caller may leave
+      // them out all the same.
+      optional: member.declaredOptional || isOptionalMember(prop),
     };
   }
 
@@ -446,7 +444,133 @@ function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker): ApiTypeAlias
   return {
     name: sym.name,
     value: checker.typeToString(type, undefined, ts.TypeFormatFlags.InTypeAlias | ts.TypeFormatFlags.NoTruncation),
+    ...objectAliasMembers(sym, type, checker),
   };
+}
+
+/**
+ * The members and supertypes of an alias that names an object shape of its
+ * own, read as an interface's are:
+ *
+ *  - an object type: `type Options = { name: string }`;
+ *  - what a mapped type comes to: `Omit<Pet, 'id'>`, `Partial<Options>`,
+ *    `Record<'a' | 'b', string>`, `{ [K in Keys]?: string }`, an
+ *    instantiation of a generic object alias (`Page<Pet>`);
+ *  - an intersection of object types: `Base & { name: string }`,
+ *    `Omit<Pet, 'id'> & Extra`.
+ *
+ * The fields are every member the checker resolves for the alias, with the
+ * optionality it resolves (a `Partial`'s members are all optional), the
+ * members of an intersection's named types included, as an interface's fields
+ * include the ones it inherits. The supertypes are the references an
+ * intersection is written with, as an interface's `extends` are.
+ *
+ * Nothing for any other alias, which the surface records by name and value:
+ *
+ *  - another declared type under a second name (`type Old = New`), whose
+ *    members are that type's own;
+ *  - an instantiation of an interface or a class (`Promise<Pet>`, `Pet[]`,
+ *    `Map<string, Pet>`), a tuple, a function or constructor type;
+ *  - a union, a primitive, a literal, a type parameter, a conditional type
+ *    that is not resolved, and an intersection with any of these
+ *    (`A & (B | C)`, `string & { brand: true }`, `T & { name: string }`).
+ */
+function objectAliasMembers(
+  sym: ts.Symbol,
+  type: ts.Type,
+  checker: ts.TypeChecker,
+): Pick<ApiTypeAlias, 'fields' | 'extends'> {
+  const declaration = sym.getDeclarations()?.find(ts.isTypeAliasDeclaration);
+  if (!declaration) return {};
+  const value = withoutParentheses(declaration.type);
+  if (ts.isTypeReferenceNode(value) && !value.typeArguments) return {};
+  if (!(type.isIntersection() ? type.types.every(isObjectShape) : isOwnObjectShape(type))) return {};
+
+  const fields: Record<string, ApiField> = {};
+  for (const prop of type.getProperties()) {
+    if (!isNamedPublicMember(prop)) continue;
+    // The member's optionality is the checker's: in `{ a?: string } & { a: string }`
+    // the first declaration has a `?` and the member is required.
+    fields[prop.name] = {
+      name: prop.name,
+      type: memberType(prop, declaration, checker).type,
+      optional: isOptionalMember(prop),
+    };
+  }
+  const written = ts.isIntersectionTypeNode(value) ? value.types.map(withoutParentheses) : [];
+  return {
+    fields: sortRecord(fields),
+    extends: written
+      .filter(ts.isTypeReferenceNode)
+      .map((member) => member.getText())
+      .sort(),
+  };
+}
+
+/**
+ * A member's type text, as an interface's field and an object-type alias's
+ * field both record it: an optional property signature (`name?: string`)
+ * without the `| undefined` its `?` adds, anything else as the checker prints
+ * it.
+ */
+function memberType(
+  prop: ts.Symbol,
+  location: ts.Node,
+  checker: ts.TypeChecker,
+): { type: string; declaredOptional: boolean } {
+  const propDecl = prop.getDeclarations()?.[0];
+  const declaredOptional = propDecl && ts.isPropertySignature(propDecl) ? !!propDecl.questionToken : false;
+  const typeStr = checker.typeToString(checker.getTypeOfSymbolAtLocation(prop, location));
+  return { type: declaredOptional ? stripUndefined(typeStr) : typeStr, declaredOptional };
+}
+
+function withoutParentheses(node: ts.TypeNode): ts.TypeNode {
+  return ts.isParenthesizedTypeNode(node) ? withoutParentheses(node.type) : node;
+}
+
+/**
+ * A member a caller reads or writes by name: not one keyed by a symbol
+ * (`[Symbol.iterator]`, which the checker names with a number that is not
+ * stable from one program to the next), and not a `#private`, `private` or
+ * `protected` member of a class an intersection takes in.
+ */
+function isNamedPublicMember(prop: ts.Symbol): boolean {
+  const escapedName = prop.escapedName as string;
+  if (escapedName.startsWith('__@') || escapedName.startsWith('__#')) return false;
+  return !prop.getDeclarations()?.some((declaration) => {
+    const modifiers = ts.canHaveModifiers(declaration) ? ts.getModifiers(declaration) : undefined;
+    return modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword,
+    );
+  });
+}
+
+/** An object type of any kind that is not called or constructed: an
+ *  interface, a class, an object literal type, a mapped type's result. Not a
+ *  union, a primitive, a type parameter or a function. */
+function isObjectShape(type: ts.Type): boolean {
+  return (
+    (type.getFlags() & ts.TypeFlags.Object) !== 0 &&
+    type.getCallSignatures().length === 0 &&
+    type.getConstructSignatures().length === 0
+  );
+}
+
+/** An object shape no declaration names: an object literal type or a mapped
+ *  type's result, and not an interface, a class, an array or a tuple, each of
+ *  which is a declared type (or an instantiation of one). */
+function isOwnObjectShape(type: ts.Type): boolean {
+  const objectFlags = isObjectShape(type) ? (type as ts.ObjectType).objectFlags : 0;
+  return (
+    (objectFlags & (ts.ObjectFlags.Anonymous | ts.ObjectFlags.Mapped)) !== 0 &&
+    (objectFlags & (ts.ObjectFlags.ClassOrInterface | ts.ObjectFlags.Reference | ts.ObjectFlags.Tuple)) === 0
+  );
+}
+
+/** Whether a caller may leave the member out, as the checker resolved it: a
+ *  `?` on any kind of member, and what a mapped type made optional. */
+function isOptionalMember(prop: ts.Symbol): boolean {
+  return (prop.getFlags() & ts.SymbolFlags.Optional) !== 0;
 }
 
 function extractEnum(sym: ts.Symbol, checker: ts.TypeChecker): ApiEnum {

@@ -90,6 +90,9 @@ export function buildSurface(
       sourceFile: struct.sourceFile,
       fields: sortRecord(fields),
       extends: [],
+      // Without a `@type t` there is no type to read `| nil` from: every
+      // field is `any` and `optional: false` by default, not by declaration.
+      ...(typeSpec ? {} : { fieldOptionalityUnknown: true as const }),
     };
     collector.add(struct.sourceFile, name);
   }

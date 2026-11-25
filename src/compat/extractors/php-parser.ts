@@ -36,6 +36,10 @@ export interface PhpProperty {
   name: string;
   type: string;
   visibility: 'public' | 'protected' | 'private';
+  /** On a promoted constructor property: whether its parameter has a
+   *  default, so `new Foo(...)` may leave it out. Absent on a property
+   *  declared in the class body, which says nothing about the constructor. */
+  optional?: boolean;
 }
 
 export interface PhpClass {
@@ -269,6 +273,7 @@ function parseMethods(classBody: SyntaxNode): { methods: PhpMethod[]; promotedPr
             name: paramName,
             type: paramType,
             visibility,
+            optional: hasDefault,
           });
         }
       }

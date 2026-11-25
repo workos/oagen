@@ -47,11 +47,19 @@ Both run during `oagen verify`. Smoke tests catch bugs. Compat checks catch brea
 
 Every detected change gets a category and severity:
 
-- **Breaking** — Will break existing callers (e.g., `parameter_removed`, `symbol_renamed`)
+- **Breaking** — Will break existing callers (e.g., `parameter_removed`, `symbol_renamed`, `field_requiredness_increased`)
 - **Soft-risk** — May affect callers depending on usage (e.g., `constructor_reordered_named_friendly`)
 - **Additive** — Safe to ship (e.g., `symbol_added`, `parameter_added_optional_terminal`)
 
 See [Compatibility IR](compatibility-ir.md) for the full category list.
+
+### Types Callers Build
+
+A field added to a type is additive for a caller that reads the type and breaking for one that has to build it. The snapshot keeps each field's optionality, each type's supertypes and a type alias's members, and the differ takes a type for one callers build when a callable's or a constructor's parameters lead to it. A required field such a type gains, and an optional one it makes required, is a breaking `field_requiredness_increased`; an optional field, and any field on a type that is only returned, stays an additive `symbol_added`.
+
+A field or a return retyped to a type that declares it extends the old one (`DetailedErrorBody extends ErrorBody`) is soft-risk: every value of the new type is still a value of the old.
+
+See [Compatibility IR → Types and Their Members](compatibility-ir.md#types-and-their-members) for what each extractor records.
 
 ### Language Policy
 

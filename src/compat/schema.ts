@@ -7,7 +7,16 @@
 
 import type { CompatSnapshot } from './ir.js';
 
-/** Current schema version for compatibility snapshots. */
+/**
+ * Current schema version for compatibility snapshots.
+ *
+ * It changes when a reader of the current version could no longer read a
+ * snapshot, or would misread one. A key added as optional (`isStatic`,
+ * `optional`, `extends`, `aliasOf`) does not change it, and neither do the
+ * `field` symbols a type alias's members are written as: the differ reads
+ * each only where both snapshots record it, so a snapshot written without
+ * them diffs as it did, against one written with them as well.
+ */
 export const COMPAT_SCHEMA_VERSION = '1';
 
 /** Validate that a parsed snapshot has a compatible schema version. */
