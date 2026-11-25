@@ -965,6 +965,44 @@ describe('#743 `bases` and `inheritedFrom` say what the same pair of plain `$ref
   });
 });
 
+describe('#743 where the rule meets #746: a property that is a `$ref` to `false`', () => {
+  const schemas = { ...tags, Never: false };
+
+  it('declares nothing, so the other declaration stands alone, a wrapper or not', async () => {
+    expect(
+      await table('3.1.0', [
+        ['a wrapper, then a `$ref` to `false`', anyOfNull('Tag'), ref('Never'), schemas],
+        ['a `$ref` to `false`, then a wrapper', ref('Never'), anyOfNull('TagOutput'), schemas],
+        // A wrapper around the `$ref` declares the property (#746), and describes no object.
+        ['a wrapper around it, then a wrapper', anyOfNull('Never'), anyOfNull('TagOutput'), schemas],
+        ['a wrapper, then a wrapper around it', anyOfNull('Tag'), anyOfNull('Never'), schemas],
+      ]),
+    ).toMatchInlineSnapshot(`
+      "a wrapper, then a \`$ref\` to \`false\`: Tag | null <from=Pet>
+      a \`$ref\` to \`false\`, then a wrapper: TagOutput | null
+      a wrapper around it, then a wrapper: unknown | null <from=Pet>
+      a wrapper, then a wrapper around it: Tag | null <from=Pet>"
+    `);
+  });
+
+  it('is no field of the inline objects two wrappers conjoin', async () => {
+    const wrap = (properties: Doc) => ({ anyOf: [{ type: 'object', properties }, nul] });
+    expect(
+      await table('3.1.0', [
+        ['on the first', wrap({ a: string, gone: ref('Never') }), wrap({ b: string }), schemas],
+        ['on the second', wrap({ a: string }), wrap({ b: string, gone: ref('Never') }), schemas],
+        ['on the first, declared by the second', wrap({ gone: ref('Never') }), wrap({ gone: string }), schemas],
+        ['on both', wrap({ a: string, gone: ref('Never') }), wrap({ gone: false }), schemas],
+      ]),
+    ).toMatchInlineSnapshot(`
+      "on the first: PetOutputTag | null { a?: string, b?: string }
+      on the second: PetOutputTag | null { a?: string, b?: string }
+      on the first, declared by the second: PetOutputTag | null { gone?: string }
+      on both: PetOutputTag | null { a?: string }"
+    `);
+  });
+});
+
 describe('#743 `combineDeclarations`: the conjunction it writes for a nullable union', () => {
   const maybe = (name: string): SchemaObject => ({ anyOf: [at(name), { type: 'null' }] });
 
