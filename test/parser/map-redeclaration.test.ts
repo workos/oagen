@@ -1604,4 +1604,41 @@ describe('#744 where the rule meets #745: a `format` the values read from a memb
     });
     expect(fieldOf(await parse(property), 'PetOutput', 'tags')?.type).toEqual({ kind: 'primitive', type: 'string' });
   });
+
+  it('a `format` on one side and limits on the other: primitive values keep the first, format or limits', async () => {
+    // The spellings #745 reads a format from: beside the type, in an `allOf` member, beside a `$ref`.
+    const formats: Record<string, unknown> = {
+      'beside the type': { type: 'string', format: 'date-time' },
+      'in an `allOf` member': all({ type: 'string' }, { format: 'date-time' }),
+      'beside a `$ref`': ref('Text', { format: 'date-time' }),
+    };
+    const limited = { type: 'string', maxLength: 40 };
+    const dated = { kind: 'primitive', type: 'string', format: 'date-time' };
+    const capped = { kind: 'primitive', type: 'string', constraints: { maxLength: 40 } };
+    for (const [label, formatted] of Object.entries(formats)) {
+      // As map values, in either member order: the first map's values, as each is typed alone.
+      const forth = await parse(redeclared('3.1.0', map(formatted), map(limited), { schemas }));
+      const back = await parse(redeclared('3.1.0', map(limited), map(formatted), { schemas }));
+      expect(valuesOf(forth), label).toEqual(dated);
+      expect(valuesOf(back), label).toEqual(capped);
+      // The same two declared for the property itself keep the first too: one rule for both.
+      const property = (first: unknown, second: unknown) =>
+        document('3.1.0', get('/pets', 'listPets', ref('PetOutput')), {
+          ...schemas,
+          Pet: { type: 'object', properties: { tags: first } },
+          PetOutput: all(ref('Pet'), { properties: { tags: second } }),
+        });
+      expect(fieldOf(await parse(property(formatted, limited)), 'PetOutput', 'tags')?.type, label).toEqual(dated);
+      expect(fieldOf(await parse(property(limited, formatted)), 'PetOutput', 'tags')?.type, label).toEqual(capped);
+    }
+    // What the map itself writes still conjoins: the stricter limit of the two maps, on the map.
+    const spec = await parse(
+      redeclared('3.1.0', map(formats['beside the type'], { minProperties: 1 }), map(limited, { minProperties: 2 })),
+    );
+    expect(fieldOf(spec, 'PetOutput', 'tags')?.type).toEqual({
+      kind: 'map',
+      valueType: dated,
+      constraints: { minProperties: 2 },
+    });
+  });
 });
