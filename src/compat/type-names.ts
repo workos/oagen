@@ -28,6 +28,43 @@ const OPTIONAL_WRAPPERS = new Set(['Optional', 'Option', 'Nullable', 'NotRequire
 /** Python's `Union[X, None]`: a union spelled as a wrapper. */
 const UNION_WRAPPER = 'Union';
 
+/**
+ * Generics that hold values of their argument for the caller to read: the
+ * promise of one (`Promise<X>`, `Awaitable[X]`) and a collection of them
+ * (`list[X]`, `Sequence[X]`, `Iterable<X>`, `Set<X>`), which is to its
+ * argument what an array (`X[]`) is to its element. Compared with the last
+ * segment of the generic's name (`typing.Sequence[X]`).
+ *
+ * A closed list, because nothing in a type text says how a generic uses its
+ * argument: `Sink<X>`, `Observer<X>` and `Comparator<X>` take an `X` where
+ * these hand one back. The names are TypeScript's and Python's, the
+ * languages with generics whose surfaces record a supertype for the differ
+ * to credit (see `handsBackItsArgument`).
+ */
+const VALUE_HOLDERS = new Set([
+  'Promise',
+  'PromiseLike',
+  'Awaitable',
+  'Array',
+  'ReadonlyArray',
+  'Set',
+  'ReadonlySet',
+  'Iterable',
+  'Iterator',
+  'IterableIterator',
+  'AsyncIterable',
+  'AsyncIterator',
+  'AsyncIterableIterator',
+  'list',
+  'List',
+  'Sequence',
+  'Collection',
+  'set',
+  'frozenset',
+  'FrozenSet',
+  'AbstractSet',
+]);
+
 const CLOSING_BRACKET = new Map([
   ['(', ')'],
   ['[', ']'],
@@ -108,6 +145,20 @@ export function genericWrapperOf(typeText: string): string | undefined {
   if (argument === undefined || splitTopLevel(argument, ',')?.length !== 1) return undefined;
   if (!GENERIC_ARGUMENT_NAME.test(presentType(argument).trim())) return undefined;
   return text.slice(0, text.length - argument.length - 2);
+}
+
+/**
+ * Whether a generic of this name (as `genericWrapperOf` returns it) is known
+ * to hand its argument back and never take it: a promise or a collection
+ * (`VALUE_HOLDERS`). A value read out of `Promise<Sub>` is still a `Base`; a
+ * `Sink<Sub>` no longer accepts one, and a generic that is not on the list
+ * may be either.
+ */
+export function handsBackItsArgument(genericName: string): boolean {
+  const name = genericName.trim();
+  return VALUE_HOLDERS.has(
+    name.slice(Math.max(name.lastIndexOf('.'), name.lastIndexOf(':'), name.lastIndexOf('\\')) + 1),
+  );
 }
 
 /** A name as a type text writes it, alone or under a module path:

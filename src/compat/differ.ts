@@ -19,7 +19,7 @@ import {
   summarizeChanges,
 } from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
-import { bareTypeName, genericWrapperOf, typeNamesIn } from './type-names.js';
+import { bareTypeName, genericWrapperOf, handsBackItsArgument, typeNamesIn } from './type-names.js';
 import { declaredTypes, declaresSupertype, inputTypes, isObjectAlias, isRecordedByNameOnly } from './type-graph.js';
 import type { DeclaredTypes } from './type-graph.js';
 
@@ -47,9 +47,11 @@ export interface SnapshotDiffContext {
   /**
    * The baseline SDK's whole snapshot, when `baseline` is a part of it (the
    * symbols a spec derives, as `oagen verify` scopes it). The scoped part is
-   * still what is compared; the whole one says which types the SDK's callers
-   * build and which fields the SDK already has, so a field the scope left out
-   * of the baseline is not taken for one the candidate added as required.
+   * still what is compared, and a type it leaves out stays outside the
+   * check. The whole one says which of the compared types the SDK's callers
+   * build (a method the scope leaves out still takes its options) and which
+   * fields the SDK already has, so a field the scope left out of the baseline
+   * is not taken for one the candidate added as required.
    */
   unscopedBaseline?: CompatSnapshot;
 }
@@ -74,9 +76,9 @@ export function diffSnapshots(
   // method now accepts) has no caller yet that a new required field breaks.
   const baselineTypes = declaredTypes(recordedBaseline);
   const candidateTypes = declaredTypes(recordedCandidate);
-  const callersBaseline = context?.unscopedBaseline ?? recordedBaseline;
-  const callersTypes = context?.unscopedBaseline ? declaredTypes(callersBaseline) : baselineTypes;
-  const takenBy = inputTypes(callersBaseline, callersTypes);
+  const takenBy = context?.unscopedBaseline
+    ? inputTypes(context.unscopedBaseline)
+    : inputTypes(recordedBaseline, baselineTypes);
   // The fields the SDK has today, where the compared baseline is a part of it.
   const fieldsOutOfScope = context?.unscopedBaseline
     ? new Set(context.unscopedBaseline.symbols.map((sym) => sym.fqName))
@@ -120,16 +122,15 @@ export function diffSnapshots(
   // Asked of a field the baseline lacks and of one it records as optional;
   // a snapshot that does not record a field's optionality (an older one, an
   // extractor that cannot tell) never has `optional: false` or `true`, so it
-  // neither raises nor answers the question. Nor does a baseline that
-  // records the owning type by name only: what it does not list, it does not
-  // say was missing.
-  const requiredOfCallers = (field: CompatSymbol, owner: string | undefined): string | undefined =>
-    field.kind === 'field' &&
-    field.optional === false &&
-    owner !== undefined &&
-    !isRecordedByNameOnly(callersTypes.get(owner))
-      ? takenBy.get(owner)
-      : undefined;
+  // neither raises nor answers the question. Nor does a compared baseline
+  // that lacks the owning type (a type that is new, or one the scope leaves
+  // out, whose fields are outside the check whoever takes it) or records it
+  // by name only: what it does not list, it does not say was missing.
+  const requiredOfCallers = (field: CompatSymbol, owner: string | undefined): string | undefined => {
+    if (field.kind !== 'field' || field.optional !== false || owner === undefined) return undefined;
+    const compared = baselineTypes.get(owner);
+    return compared !== undefined && !isRecordedByNameOnly(compared) ? takenBy.get(owner) : undefined;
+  };
 
   // Compare each baseline symbol against candidate
   for (const baseSym of baseline.symbols) {
@@ -684,12 +685,13 @@ function cascadeRenameDowngrades(
    * caller a list, `ErrorBody` → `DetailedErrorBody | undefined` a value that
    * may be missing.
    *
-   * Nor is one under a generic the SDK declares. `Sink<ErrorBody>` →
-   * `Sink<DetailedErrorBody>` narrows what `Sink<T>.accept(value: T)` takes,
-   * and the snapshot does not record whether a generic hands its argument
-   * out, takes it in, or both. A generic it does not declare is a container
-   * of the language or of a library (`Promise<T>`, `Task<T>`, `List<T>`),
-   * read as handing its value back.
+   * Nor is one under a generic that may take its argument. `Sink<ErrorBody>`
+   * → `Sink<DetailedErrorBody>` narrows what `Sink<T>.accept(value: T)`
+   * takes, and neither a type text nor the snapshot says how a generic uses
+   * its argument. So the name is read through a generic only when it is one
+   * known to hand its argument back, a promise or a collection
+   * (`handsBackItsArgument`), and the SDK declares no type of that name: a
+   * `Sequence<T>` of its own is as unknown as its `Sink<T>`.
    */
   const narrowsToDeclaredSubtype = (
     oldText: string | undefined,
@@ -699,8 +701,11 @@ function cascadeRenameDowngrades(
   ): boolean => {
     if (oldText === undefined || newText === undefined || oldT === '' || newT === '') return false;
     if (oldText.split(oldT).join('\0') !== newText.split(newT).join('\0')) return false;
-    const wrapper = genericWrapperOf(newText);
-    if (wrapper !== undefined && typeNamesIn(wrapper).some((name) => candidateTypes.has(name))) return false;
+    const generic = genericWrapperOf(newText);
+    if (generic !== undefined) {
+      if (!handsBackItsArgument(generic)) return false;
+      if (typeNamesIn(generic).some((name) => candidateTypes.has(name))) return false;
+    }
     return declaresSupertype(candidateTypes, newT, oldT);
   };
 

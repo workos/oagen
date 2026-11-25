@@ -1404,9 +1404,26 @@ export declare class Holder% { ${member.replaceAll('T', inNew(side, 'Detailed%',
         'last(): Page%<T> | undefined',
         RETURN('breaking'),
       ),
-      // A generic the SDK does not declare is a container of the language or a library.
+      // Nor is a generic the snapshot knows nothing of: this one is not exported.
+      under(
+        'a generic that is not declared',
+        'interface Hidden%<T> { accept(value: T): void }',
+        'last(): Hidden%<T>',
+        RETURN('breaking'),
+      ),
+      under('a library generic that takes its argument', '', 'last(): WritableStream<T>', RETURN('breaking')),
+      // A promise or a collection hands its argument back, as an array does.
       under('Promise', '', 'last(): Promise<T>', RETURN('soft-risk')),
+      under('PromiseLike', '', 'last(): PromiseLike<T>', RETURN('soft-risk')),
       under('Set', '', 'last(): Set<T>', RETURN('soft-risk')),
+      under('AsyncIterable', '', 'last(): AsyncIterable<T>', RETURN('soft-risk')),
+      // Unless the SDK declares a type of that name itself.
+      under(
+        'a Sequence the SDK declares',
+        'export interface Sequence<T> { push(value: T): void }',
+        'last(): Sequence<T>',
+        RETURN('breaking'),
+      ),
       under('Iterable', '', 'body: Iterable<T>', BODY('soft-risk')),
       under('Array', '', 'body: Array<T>', BODY('soft-risk')),
     ]);
@@ -2306,6 +2323,27 @@ export interface CreatePetOptions { name: string${helper} }
       spec,
     );
     expect(lines(derived.diff)).toEqual(['breaking symbol_removed Pet.name']);
+  });
+
+  it('leaves a type the scope leaves out outside the check, whoever takes it', async () => {
+    // `ManualOptions` and the method that takes it are written by hand: the
+    // spec derives neither, so neither is in the compared baseline.
+    const manual = (extra: string) => `${sdk('')}export interface ManualOptions { reason: string${extra} }
+export declare class Manual { send(options: ManualOptions): Promise<void>; }
+`;
+    const baseline = await nodeExtractor.extract(writeSdk(nodeSdk(manual(''))));
+    const added = await runCompatCheck(baseline, writeSdk(nodeSdk(manual('; urgent: boolean'))), 'node', spec);
+    const about = (name: string) => lines(added.diff).filter((line) => line.split(' ')[2].startsWith(name));
+    // As before: everything about an out-of-scope type reads as an addition.
+    expect(about('ManualOptions')).toEqual([
+      'additive symbol_added ManualOptions',
+      'additive symbol_added ManualOptions.reason',
+      'additive symbol_added ManualOptions.urgent',
+    ]);
+    expect(added.passed).toBe(true);
+    // Compared whole, the type is one the baseline's callers build.
+    const unscoped = await runCompatCheck(baseline, writeSdk(nodeSdk(manual('; urgent: boolean'))), 'node');
+    expect(lines(unscoped.diff)).toEqual(['breaking field_requiredness_increased ManualOptions.urgent']);
   });
 
   it('reads which types are taken from the whole baseline', async () => {

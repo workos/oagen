@@ -8,7 +8,13 @@ import {
   isObjectAlias,
   isRecordedByNameOnly,
 } from '../../src/compat/type-graph.js';
-import { bareTypeName, genericWrapperOf, supertypeName, typeNamesIn } from '../../src/compat/type-names.js';
+import {
+  bareTypeName,
+  genericWrapperOf,
+  handsBackItsArgument,
+  supertypeName,
+  typeNamesIn,
+} from '../../src/compat/type-names.js';
 
 /**
  * #750: what a snapshot says about its declared types, and the three readers
@@ -225,6 +231,53 @@ describe('#750 genericWrapperOf', () => {
       expect(genericWrapperOf(text)).toBeUndefined();
     },
   );
+});
+
+describe('#750 handsBackItsArgument', () => {
+  it.each([
+    'Promise',
+    'PromiseLike',
+    'Awaitable',
+    'Array',
+    'ReadonlyArray',
+    'Set',
+    'Iterable',
+    'AsyncIterable',
+    'list',
+    'List',
+    'Sequence',
+    'frozenset',
+  ])('%s holds values of its argument', (generic) => {
+    expect(handsBackItsArgument(generic)).toBe(true);
+  });
+
+  it('reads the last segment of a qualified name', () => {
+    expect(handsBackItsArgument('typing.Sequence')).toBe(true);
+    expect(handsBackItsArgument('collections.abc.Iterable')).toBe(true);
+    expect(handsBackItsArgument(' Promise ')).toBe(true);
+  });
+
+  it.each([
+    // generics that take their argument, or may
+    'Sink',
+    'Observer',
+    'Subject',
+    'WritableStream',
+    'Comparator',
+    'Action',
+    'Consumer',
+    'Dispatch',
+    // generics of the SDK's own, and names that only resemble one on the list
+    'Page',
+    'ListResource',
+    'PromiseQueue',
+    'MyPromise',
+    'promise',
+    'Sequence.Builder',
+    '',
+  ])('%s is not known to', (generic) => {
+    expect(handsBackItsArgument(generic)).toBe(false);
+  });
 });
 
 describe('#750 supertypeName', () => {
