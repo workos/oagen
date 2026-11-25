@@ -8,7 +8,7 @@ import {
   isObjectAlias,
   isRecordedByNameOnly,
 } from '../../src/compat/type-graph.js';
-import { bareTypeName, supertypeName, typeNamesIn } from '../../src/compat/type-names.js';
+import { bareTypeName, genericWrapperOf, supertypeName, typeNamesIn } from '../../src/compat/type-names.js';
 
 /**
  * #750: what a snapshot says about its declared types, and the three readers
@@ -183,6 +183,48 @@ describe('#750 typeNamesIn', () => {
     expect(typeNamesIn('')).toEqual([]);
     expect(typeNamesIn('123')).toEqual([]);
   });
+});
+
+describe('#750 genericWrapperOf', () => {
+  it.each([
+    ['Promise<Foo>', 'Promise'],
+    ['Promise<Foo | null>', 'Promise'],
+    ['Promise<Foo> | undefined', 'Promise'],
+    ['Promise<Foo>[]', 'Promise'],
+    ['Sink<Foo>', 'Sink'],
+    ['models.Page[Foo]', 'models.Page'],
+    ['list[Foo] | None', 'list'],
+    ['List<Foo?>?', 'List'],
+    ['Option<Vec<Foo>>', 'Vec'],
+    ['Iterator[*Foo]', 'Iterator'],
+  ])('%s is read through %s', (text, wrapper) => {
+    expect(genericWrapperOf(text)).toBe(wrapper);
+    expect(bareTypeName(text)).toBe('Foo');
+  });
+
+  it.each([
+    // The name stands alone, or behind an optional spelling or an array.
+    'Foo',
+    'Foo[]',
+    'Foo | null',
+    '?Foo',
+    '*Foo',
+    'Optional[Foo]',
+    'Option<Foo>',
+    'T.nilable(Foo)',
+    '(Foo | null)[]',
+    '\\Acme\\Foo',
+  ])('%s has no generic around its name', (text) => {
+    expect(genericWrapperOf(text)).toBeUndefined();
+    expect(bareTypeName(text)).toBe('Foo');
+  });
+
+  it.each(['Record<string, Foo>', 'Promise<Foo[]>', 'Foo | Bar', 'Foo[][]', '{ a: Foo }', '() => Foo', '', 'Promise<'])(
+    '%s names no single type, so nothing is read through',
+    (text) => {
+      expect(genericWrapperOf(text)).toBeUndefined();
+    },
+  );
 });
 
 describe('#750 supertypeName', () => {

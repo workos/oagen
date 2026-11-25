@@ -6,10 +6,11 @@
  * `ErrorBody`, `ErrorBody[]`, `Promise<ErrorBody>`, `ErrorBody | undefined`,
  * `?ErrorBody`, `*ErrorBody`. The differ's fork and rename rules ask which
  * declared type such a text names, and `bareTypeName` is the one place that
- * answers. `typeNamesIn` reads every name a text mentions, for following a
- * type to the types it is built from, and `supertypeName` reads a declared
- * supertype's entry. All three read text only: they take no language and no
- * snapshot, so the same text reads the same whichever extractor wrote it.
+ * answers; `genericWrapperOf` says which generic it read the name through.
+ * `typeNamesIn` reads every name a text mentions, for following a type to the
+ * types it is built from, and `supertypeName` reads a declared supertype's
+ * entry. All of them read text only: they take no language and no snapshot,
+ * so the same text reads the same whichever extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -87,6 +88,26 @@ export function bareTypeName(typeText: string): string {
     }
   }
   return text;
+}
+
+/**
+ * The generic `bareTypeName` reads a text's name through, when it reads it
+ * through one: `Promise` for `Promise<Foo>` and for `Promise<Foo | null>[]`,
+ * `models.Page` for `models.Page[Foo]`. Undefined when the name stands with no
+ * generic around it (`Foo`, `Foo[]`, `Foo | null`, and `Optional[Foo]`, which
+ * is an optional spelling) and when the text names no single type.
+ *
+ * It takes the steps `bareTypeName` takes, so the two agree on which texts
+ * have a wrapper: one generic, around one argument that is a plain name.
+ */
+export function genericWrapperOf(typeText: string): string | undefined {
+  let text = presentType(typeText.trim());
+  if (text.endsWith('[]')) text = presentType(text.slice(0, -2));
+  if (text.startsWith('\\')) text = text.slice(text.lastIndexOf('\\') + 1);
+  const argument = (ANGLE_GENERIC.exec(text) ?? SQUARE_GENERIC.exec(text))?.[1];
+  if (argument === undefined || splitTopLevel(argument, ',')?.length !== 1) return undefined;
+  if (!GENERIC_ARGUMENT_NAME.test(presentType(argument).trim())) return undefined;
+  return text.slice(0, text.length - argument.length - 2);
 }
 
 /** A name as a type text writes it, alone or under a module path:

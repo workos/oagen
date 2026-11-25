@@ -1359,6 +1359,60 @@ export declare class Holder% { ${inNew(side, after, before)}; }
     for (const [name, { expected, actual }] of Object.entries(cases)) expect(actual, name).toEqual(expected);
   });
 
+  it('keeps its severity under a generic the SDK declares', async () => {
+    const under = (name: string, declarations: string, member: string, expected: string[]): NodeCase => ({
+      name,
+      source: (side) => `export interface ErrorBody% { message: string }
+export interface Detailed% extends ErrorBody% { details: string }
+${declarations}
+export declare class Holder% { ${member.replaceAll('T', inNew(side, 'Detailed%', 'ErrorBody%'))}; }
+`,
+      expected,
+    });
+    const RETURN = (severity: string) => [`${severity} return_type_changed Holder%.last`];
+    const cases = await nodeCases([
+      // `Sink<T>.accept` takes a `T`: a caller that passed an `ErrorBody` no longer can.
+      under(
+        'a generic that takes its argument',
+        'export interface Sink%<T> { accept: (value: T) => void }',
+        'last(): Sink%<T>',
+        RETURN('breaking'),
+      ),
+      under(
+        'on a field',
+        'export interface Sink%<T> { accept: (value: T) => void }',
+        'body: Sink%<T>',
+        BODY('breaking'),
+      ),
+      // The snapshot does not say how a generic uses its argument, so one that only hands it out is not told apart.
+      under(
+        'a generic that hands its argument out',
+        'export interface Page%<T> { data: T[] }',
+        'last(): Page%<T>',
+        RETURN('breaking'),
+      ),
+      under('a generic alias', 'export type Box%<T> = { value: T };', 'last(): Box%<T>', RETURN('breaking')),
+      under(
+        'a generic class',
+        'export declare class Cell%<T> { value: T; set(value: T): void }',
+        'last(): Cell%<T>',
+        RETURN('breaking'),
+      ),
+      under(
+        'an optional one',
+        'export interface Page%<T> { data: T[] }',
+        'last(): Page%<T> | undefined',
+        RETURN('breaking'),
+      ),
+      // A generic the SDK does not declare is a container of the language or a library.
+      under('Promise', '', 'last(): Promise<T>', RETURN('soft-risk')),
+      under('Set', '', 'last(): Set<T>', RETURN('soft-risk')),
+      under('Iterable', '', 'body: Iterable<T>', BODY('soft-risk')),
+      under('Array', '', 'body: Array<T>', BODY('soft-risk')),
+    ]);
+    for (const [name, { expected, actual }] of Object.entries(cases)) expect(actual, name).toEqual(expected);
+  });
+
   it('is not what a retype to the supertype, or to a sibling, is', async () => {
     const toSupertype = await nodeDiff(
       (side) => `export interface ErrorBody { message: string }
@@ -2227,6 +2281,31 @@ export declare class Pets { createPet(options: CreatePetOptions): Promise<Pet>; 
     const unscoped = await runCompatCheck(baseline, writeSdk(nodeSdk(sdk('; tag: string'))), 'node');
     expect(unscoped.scopedToSpec).toBe(false);
     expect(lines(unscoped.diff)).toEqual(['breaking field_requiredness_increased CreatePetOptions.tag']);
+  });
+
+  it("scopes a type alias's members as it scopes an interface's fields", async () => {
+    // `helper` is a member the spec does not derive, added to the SDK by hand.
+    const models = (helper: string) => `export type Pet = { id: string; name: string${helper} };
+export interface CreatePetOptions { name: string${helper} }
+`;
+    const baseline = await nodeExtractor.extract(writeSdk(nodeSdk(models('; helper?: string'))));
+    const dropped = await runCompatCheck(baseline, writeSdk(nodeSdk(models(''))), 'node', spec);
+    expect(lines(dropped.diff)).toEqual([]);
+    expect(dropped.passed).toBe(true);
+    // Out of scope, the same change is seen on both.
+    const unscoped = await runCompatCheck(baseline, writeSdk(nodeSdk(models(''))), 'node');
+    expect(lines(unscoped.diff)).toEqual([
+      'breaking symbol_removed CreatePetOptions.helper',
+      'breaking symbol_removed Pet.helper',
+    ]);
+    // A member the spec does derive is compared.
+    const derived = await runCompatCheck(
+      baseline,
+      writeSdk(nodeSdk('export type Pet = { id: string };\nexport interface CreatePetOptions { name: string }\n')),
+      'node',
+      spec,
+    );
+    expect(lines(derived.diff)).toEqual(['breaking symbol_removed Pet.name']);
   });
 
   it('reads which types are taken from the whole baseline', async () => {

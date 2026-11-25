@@ -19,7 +19,7 @@ import {
   summarizeChanges,
 } from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
-import { bareTypeName } from './type-names.js';
+import { bareTypeName, genericWrapperOf, typeNamesIn } from './type-names.js';
 import { declaredTypes, declaresSupertype, inputTypes, isObjectAlias, isRecordedByNameOnly } from './type-graph.js';
 import type { DeclaredTypes } from './type-graph.js';
 
@@ -683,19 +683,26 @@ function cascadeRenameDowngrades(
    * around the name is not: `ErrorBody` → `DetailedErrorBody[]` hands the
    * caller a list, `ErrorBody` → `DetailedErrorBody | undefined` a value that
    * may be missing.
+   *
+   * Nor is one under a generic the SDK declares. `Sink<ErrorBody>` →
+   * `Sink<DetailedErrorBody>` narrows what `Sink<T>.accept(value: T)` takes,
+   * and the snapshot does not record whether a generic hands its argument
+   * out, takes it in, or both. A generic it does not declare is a container
+   * of the language or of a library (`Promise<T>`, `Task<T>`, `List<T>`),
+   * read as handing its value back.
    */
   const narrowsToDeclaredSubtype = (
     oldText: string | undefined,
     newText: string | undefined,
     oldT: string,
     newT: string,
-  ): boolean =>
-    oldText !== undefined &&
-    newText !== undefined &&
-    oldT !== '' &&
-    newT !== '' &&
-    oldText.split(oldT).join('\0') === newText.split(newT).join('\0') &&
-    declaresSupertype(candidateTypes, newT, oldT);
+  ): boolean => {
+    if (oldText === undefined || newText === undefined || oldT === '' || newT === '') return false;
+    if (oldText.split(oldT).join('\0') !== newText.split(newT).join('\0')) return false;
+    const wrapper = genericWrapperOf(newText);
+    if (wrapper !== undefined && typeNamesIn(wrapper).some((name) => candidateTypes.has(name))) return false;
+    return declaresSupertype(candidateTypes, newT, oldT);
+  };
 
   for (const change of changes) {
     if (change.severity !== 'breaking') continue;
