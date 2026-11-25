@@ -1187,6 +1187,22 @@ export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType
 export interface PrimitiveType {
   kind: 'primitive';
   type: 'string' | 'integer' | 'number' | 'boolean' | 'unknown';
+  /**
+   * The schema's `format`, as the document writes it (`date-time`, `uuid`,
+   * `int64`, …) and never checked against `type`. Read wherever the
+   * value's limits are read (see `constraints`; #745): beside the `type`,
+   * in an `allOf` member that only annotates or limits the schema, beside
+   * an `allOf` or a nullable `oneOf`/`anyOf` wrapper, and beside a `$ref`
+   * to a primitive component or in a member beside one, so `{ allOf: [{
+   * type: 'string' }, { format: 'date-time' }] }` and `{ $ref: Text,
+   * format: 'date-time' }` over `Text: { type: 'string' }` carry
+   * `date-time` as `{ type: 'string', format: 'date-time' }` does. The
+   * format written nearest the type stands — beside the `type` first,
+   * then a component's before the site that names it with a `$ref` — and
+   * levels of one schema that write two different formats give none.
+   * Absent on an `unknown`: a schema that writes a `format` and no `type`
+   * declares no type.
+   */
   format?: string;
   /**
    * The validation keywords of the schema this primitive was built from —

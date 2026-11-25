@@ -1,4 +1,14 @@
-import type { Model, ModelRef, Enum, EnumValue, Extensions, Field, TypeRef, Constraints } from '../ir/types.js';
+import type {
+  Model,
+  ModelRef,
+  Enum,
+  EnumValue,
+  Extensions,
+  Field,
+  TypeRef,
+  Constraints,
+  PrimitiveType,
+} from '../ir/types.js';
 import { assertNever, walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
@@ -11,7 +21,9 @@ import {
   markDerivedMapping,
   markPendingSchemaRef,
   pendingSchemaRef,
+  pendingSiteFormatOf,
   pendingSiteLimitsOf,
+  recordPendingSiteFormat,
   recordPendingSiteLimits,
   schemaRefOf,
   schemaRefTarget,
@@ -1013,9 +1025,29 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
   // model that could keep them, so `{ allOf: [{ $ref: Owner }, { $ref:
   // Limited }] }` over `Limited: { minProperties: 1 }` carries the limit,
   // as `{ minProperties: 1 }` written as the member does.
-  let out = ownConstraints(schema);
+  return conjoinedKeywords(schema, ownConstraints, combineConstraints);
+}
+
+/**
+ * What `schema` and the schemas it conjoins write between them, read by
+ * `own` at each and settled by `combine` in document order: the schema's
+ * own keywords, then each member of its `allOf` as every reader reads them
+ * (`spliceNestedAllOf`), read the same way, then the one branch of a
+ * nullable wrapper, read the same way. The one walk that decides where a
+ * value's keywords are read from, for every keyword read so: its limits
+ * (`extractConstraints`) and its `format` (`extractFormat`; #745: the
+ * limits were read here and the `format` from the schema the `type` is
+ * written on alone, so `{ allOf: [{ type: 'string' }, { format:
+ * 'date-time', maxLength: 40 }] }` kept the limit and lost the format).
+ */
+function conjoinedKeywords<T>(
+  schema: SchemaObject,
+  own: (level: SchemaObject) => T,
+  combine: (held: T, next: T) => T,
+): T {
+  let out = own(schema);
   for (const member of spliceNestedAllOf(schema).allOf ?? []) {
-    out = combineConstraints(out, extractConstraints(member));
+    out = combine(out, conjoinedKeywords(member, own, combine));
   }
   // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
   // collapses to `nullable<T>` in the IR, so that branch's keywords are the
@@ -1023,7 +1055,7 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
   // limits on the referenced model, and a genuine multi-variant union carries
   // none.
   const branch = singleNonNullBranch(schema);
-  return branch ? combineConstraints(out, extractConstraints(branch)) : out;
+  return branch ? combine(out, conjoinedKeywords(branch, own, combine)) : out;
 }
 
 /** The keywords declared strictly on `schema`, normalized — without the nullable-branch fallback. */
@@ -1055,6 +1087,81 @@ function singleNonNullBranch(schema: SchemaObject): SchemaObject | undefined {
   if (!variants) return undefined;
   const nonNull = variants.filter((v) => !isNullSchema(v));
   return nonNull.length === 1 && !nonNull[0].$ref ? nonNull[0] : undefined;
+}
+
+/**
+ * What the schemas a `format` is read from write between them: the one
+ * format they write, `undefined` when none writes any, and `null` when
+ * they write formats that differ (`agreedFormat`).
+ */
+type FormatReading = string | null | undefined;
+
+/**
+ * The `format` `schema` writes for a value its site types: the keyword
+ * when it holds a non-empty string, as the document writes it and whatever
+ * the value's type (`int32` in a member beside a `string` is carried as
+ * written, as it is beside the `type`: the parser never checks a format
+ * against a type). Anything else names no format and is read as absent, as
+ * a limit of the wrong type is (`ownConstraints`). The primitive branch of
+ * the type builder reads the keyword beside its own `type` itself, as it
+ * always did (`buildTypeRef`), and what it carries is never replaced.
+ */
+function ownFormat(schema: SchemaObject): string | undefined {
+  const { format } = schema;
+  return typeof format === 'string' && format !== '' ? format : undefined;
+}
+
+/**
+ * Two readings of a `format` as one: the format either writes when the
+ * other writes none or the same, and `null` — no format — once two differ.
+ * JSON Schema applies every level at once, and no one `format` describes a
+ * value two levels format differently, so neither is carried, whichever is
+ * written first: unlike a limit there is no stricter of the two to keep.
+ * `null` stays `null` whatever it is read with, so the reading is the same
+ * in any order.
+ */
+function agreedFormat(held: FormatReading, next: FormatReading): FormatReading {
+  if (held === undefined) return next;
+  return next === undefined || next === held ? held : null;
+}
+
+/**
+ * The `format` `schema` and the schemas it conjoins write between them,
+ * read at the places its limits are (`conjoinedKeywords`, as
+ * `extractConstraints` reads them): its own keywords, its `allOf` members'
+ * at any depth and a nullable wrapper's one branch's.
+ */
+function extractFormat(schema: SchemaObject): FormatReading {
+  return conjoinedKeywords<FormatReading>(schema, ownFormat, agreedFormat);
+}
+
+/** `{ format }` when there is one, `{}` otherwise — spread into a type or a schema so the key stays absent rather than present-but-undefined. */
+function formatEntry(format: string | undefined): { format?: string } {
+  return format === undefined ? {} : { format };
+}
+
+/** The `format` `schema` writes itself (`ownFormat`), as the keyword: `{ format }`, or `{}` when it writes none. For a reader that carries what a schema writes for the value onto another (`partsInPlace`). */
+export function formatKeyword(schema: SchemaObject): { format?: string } {
+  return formatEntry(ownFormat(schema));
+}
+
+/**
+ * `{ format }` for the format `wrapper` — a schema the parser collapses to
+ * `inner`, the member its `allOf` is read as — writes for the value where
+ * `inner` writes none itself, `{}` otherwise: what the type builder gives
+ * the type it builds from `inner` under `wrapper` (`withTypeFormat`), as a
+ * keyword of the copy that stands for the member, beside the wrapper's
+ * limits (`unwrappedAllOfMember`). So a reader that types the copy, never
+ * the wrapper — a response body read as its one member
+ * (`extractDirectResource`), two declarations of one property compared as
+ * typed (`typedDeclaration`) — reads the format the wrapper's own type
+ * carries. The wrapper's format is the one it and what it conjoins write
+ * between them (`extractFormat`), none when two differ; a member that
+ * writes a `format` keyword of its own keeps it, as the type built from it
+ * does.
+ */
+export function wrapperFormatEntry(inner: SchemaObject, wrapper: SchemaObject): { format?: string } {
+  return inner.format ? {} : formatEntry(extractFormat(wrapper) ?? undefined);
 }
 
 /**
@@ -1161,11 +1268,45 @@ function shapeConstraints(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): Constraints | undefined {
-  const reference = limitReference(schema, componentSchemas);
-  return [...(reference?.own ?? [schema]), ...(reference?.limitEntries ?? [])].reduceRight<Constraints | undefined>(
+  return shapeLevels(schema, componentSchemas).reduceRight<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, extractConstraints(level)),
     undefined,
   );
+}
+
+/**
+ * The levels a site that writes `schema` reads its keywords from, nearest
+ * first: the schema itself — or, for a reference to a component whose
+ * keywords no model alone carries (`limitReference`), the schemas on the
+ * way to the `$ref` (`own`) and then the entries the reference passes
+ * (`limitEntries`). Each level is read with what it conjoins
+ * (`conjoinedKeywords`). The one list for a site's limits
+ * (`shapeConstraints`) and its `format` (`schemaFormat`), so the two are
+ * read at the same places.
+ */
+function shapeLevels(schema: SchemaObject, componentSchemas: Record<string, SchemaObject> | undefined): SchemaObject[] {
+  const reference = limitReference(schema, componentSchemas);
+  return [...(reference?.own ?? [schema]), ...(reference?.limitEntries ?? [])];
+}
+
+/**
+ * The `format` a site that writes `schema` gives a type built with none
+ * (`withTypeFormat`; #745): the one format the levels its limits are read
+ * from write between them (`shapeLevels`, each with what it conjoins:
+ * `extractFormat`). `undefined` when no level writes one, and when two
+ * write formats that differ (`agreedFormat`).
+ */
+export function schemaFormat(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): string | undefined {
+  return formatOfLevels(shapeLevels(schema, componentSchemas));
+}
+
+/** The one `format` `levels` write between them, each read with what it conjoins (`extractFormat`); `undefined` when they write none, or formats that differ (`agreedFormat`). */
+function formatOfLevels(levels: readonly SchemaObject[]): string | undefined {
+  const agreed = levels.reduce<FormatReading>((held, level) => agreedFormat(held, extractFormat(level)), undefined);
+  return agreed ?? undefined;
 }
 
 /**
@@ -1255,13 +1396,188 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
 }
 
 /**
- * `ref`, built for `schema` by hand where a site assembles a type instead of
- * asking `schemaToTypeRef` for it (a list response's data array, a `oneOf`
- * request body), carrying the limits that site has (`schemaConstraints`),
- * as `schemaToTypeRef` would have it carry them (#545).
+ * `ref` carrying what the site that writes `schema` gives the type built
+ * for it: the `format` a type built with none takes (`schemaFormat`,
+ * `withTypeFormat`; #745) and the site's limits (`schemaConstraints`,
+ * `withTypeConstraints`; #545), both read from the same levels
+ * (`shapeLevels`). The one step by which a type takes its site's keywords:
+ * `schemaToTypeRef` takes it for every type it builds, and so does a site
+ * that assembles a type by hand instead of asking `schemaToTypeRef` for it
+ * (a list response's data array, a `oneOf` request body, a multi-type
+ * inline variant's union), so the format is read wherever the limits are.
+ * The format is asked for only when some node of `ref` can take one
+ * (`formatless`), and set before the limits, so a primitive that takes
+ * both at one site writes its keys in the order one typed from a schema
+ * that writes both itself does.
  */
-export function withSchemaConstraints(ref: TypeRef, schema: SchemaObject): TypeRef {
-  return withTypeConstraints(ref, schemaConstraints(schema, documentComponentSchemas()));
+export function withSchemaKeywords(ref: TypeRef, schema: SchemaObject): TypeRef {
+  const componentSchemas = documentComponentSchemas();
+  // A schema that names several types is typed as its list's union, or as
+  // the one variant the list collapses to: its own keywords reach that
+  // variant as its per-type copy keeps them (`formatless`).
+  const ownList = schema.$ref === undefined && namesSeveralTypes(schema);
+  withLevelsFormat(ref, () => shapeLevels(schema, componentSchemas), ownList);
+  return withTypeConstraints(ref, schemaConstraints(schema, componentSchemas));
+}
+
+/**
+ * `ref` taking the one `format` the schemas `levels` gives write between
+ * them (`formatOfLevels`) wherever a node of it can take one and has none
+ * (`withTypeFormat`). The levels are asked for, and read, only when some
+ * node can (`formatless`): a type that carries no format, or has its own
+ * already, reads nothing. `ownList` says `ref` was built for the very
+ * schema that writes the type list it is typed from, whose one variant —
+ * where the list collapsed to one — reads the list's keywords as its
+ * per-type copy keeps them (`collapsedVariantKeepsFormat`).
+ */
+function withLevelsFormat(ref: TypeRef, levels: () => readonly SchemaObject[], ownList = false): TypeRef {
+  if (ownList && !collapsedVariantKeepsFormat(ref)) return ref;
+  const awaiting = formatless(ref);
+  if (awaiting.length === 0) return ref;
+  const format = formatOfLevels(levels());
+  if (format !== undefined) for (const node of awaiting) giveFormat(node, format);
+  return ref;
+}
+
+/**
+ * `ref` taking a `format` from `entries` — the schemas a reference passes
+ * on its way to the one the type is built from, nearest first — as the
+ * type builder gives one to a type it builds through them one by one: the
+ * innermost first, each read with the entries inside it, as a site reads
+ * every level its limits are conjoined from (`shapeLevels`), so the format
+ * written nearest the type stands (`withTypeFormat`). For a type built
+ * once from the last entry and never through the others: the union of a
+ * model component that admits other types, whose aliases are entries of
+ * its chain and no sites of their own (`multiTypeModelTypeRef`; Greptile,
+ * #749: the chain was read as one level, so `Alias: { allOf: [{ $ref:
+ * Owner }, { format: 'date-time' }] }` over an `Owner` whose string is a
+ * `uuid` gave the string no format, where a `$ref` to `Owner` gives it
+ * `uuid`).
+ */
+function withEntryFormats(ref: TypeRef, entries: readonly SchemaObject[]): TypeRef {
+  for (let from = entries.length - 1; from >= 0; from--) withLevelsFormat(ref, () => entries.slice(from));
+  return ref;
+}
+
+/**
+ * `ref` carrying `format` wherever a node of it can take one and has none
+ * (`formatless`): what a site gives the type built for it, the format it
+ * writes apart from the `type` (#745). A node that has a format keeps it,
+ * so the format written nearest the type stands: a primitive's own, beside
+ * its `type`, as before; then that of each site the type is built
+ * through, innermost first, since every site takes this step as it
+ * returns (`withSchemaKeywords`) — the component a `$ref` names before the
+ * site that writes the `$ref`, a nullable wrapper's branch before the
+ * wrapper, the member an `allOf` is read as before the `allOf`. `ref` as it
+ * is when `format` is `undefined`.
+ */
+export function withTypeFormat(ref: TypeRef, format: string | undefined): TypeRef {
+  if (format !== undefined) for (const node of formatless(ref)) giveFormat(node, format);
+  return ref;
+}
+
+/**
+ * The nodes of `ref` that take the `format` of the site the type is built
+ * at (`withTypeFormat`), each one that has none yet:
+ *
+ *   - the `primitive` itself, typed `string`, `integer`, `number` or
+ *     `boolean` — whatever the format, which is carried as written, as one
+ *     beside the `type` is. An `unknown` takes none: a schema that writes
+ *     a `format` and no `type` is `unknown` with no format, as before;
+ *   - the `inner` of a `nullable` wrapper, read the same way;
+ *   - the one variant of a union of one, which is the schema the document
+ *     wrote for that variant;
+ *   - each variant of the union a type list is typed as (`typeListUnions`)
+ *     that stands for a type whose per-type copy keeps the keyword
+ *     (`variantKeepsFormat`), so `{ allOf: [{ type: ['string', 'boolean']
+ *     }, { format: 'date-time' }] }` is `string(date-time) | boolean`, as
+ *     `format` beside the list is;
+ *   - a reference `resolveSchemaPointers` has yet to settle, for a JSON
+ *     Pointer `$ref` deeper into a component (#539), which records the
+ *     format for that pass (`recordPendingSiteFormat`) as it records the
+ *     site's limits, to give the type it settles the site into.
+ *
+ * Nothing else can carry one: a `model` or `enum` reference, a `literal`,
+ * an `array`, a `map`, and the union of a `oneOf`/`anyOf` of several
+ * variants, whose variants are schemas of their own — whatever each
+ * variant is typed from. A variant that is itself what a type list
+ * collapsed or was narrowed to is the type it is, and no variant of this
+ * union's list: `{ oneOf: [{ type: ['string', 'boolean'], allOf: [{ type:
+ * 'string' }] }, { type: 'integer' }], format: 'uuid' }` is `string |
+ * integer`, as it is with `{ type: 'string' }` for its first variant
+ * (Greptile, #749: any variant recorded as some list's was taken for one
+ * of the union being read, so the `string` took the `uuid`).
+ */
+function formatless(ref: TypeRef): Array<PrimitiveType | ModelRef> {
+  switch (ref.kind) {
+    case 'primitive':
+      return ref.format === undefined && ref.type !== 'unknown' ? [ref] : [];
+    case 'nullable':
+      return formatless(ref.inner);
+    case 'union':
+      if (ref.variants.length === 1) return formatless(ref.variants[0]!);
+      if (!typeListUnions.has(ref)) return [];
+      return ref.variants.flatMap((variant) => (variantKeepsFormat(variant) ? formatless(variant) : []));
+    case 'model':
+      return isPendingSchemaRef(ref) && pendingSiteFormatOf(ref) === undefined ? [ref] : [];
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'enum':
+      return [];
+  }
+  return assertNever(ref);
+}
+
+/**
+ * Whether `ref`, the type built for the very schema that writes a type
+ * list, may take the format that schema writes: always when it is the
+ * list's union, whose variants are asked one by one (`formatless`), and,
+ * where the list collapsed to one variant, when that variant stands for a
+ * type whose per-type copy keeps the keyword (`variantKeepsFormat`). The
+ * variant is the list's copy of that type, which sheds the list's `format`
+ * for a type the keyword does not apply to, so `{ type: ['boolean',
+ * 'string'], format: 'date-time', allOf: [{ $ref: Flag }] }` over a boolean
+ * `Flag` stays a bare `boolean`, as before. The variant is `ref` itself, or
+ * what a nullable wrapper around it holds (`type: [..., 'null']`, OAS 3.0
+ * `nullable: true`). Asked at the list's own schema alone: read through
+ * anything else — a `$ref` to it, a member, a wrapper — the same variant is
+ * a type like any other, and `{ allOf: [<that schema>, { format: 'x' }] }`
+ * is `boolean(x)`, as `{ allOf: [{ type: 'boolean' }, { format: 'x' }] }`
+ * is.
+ */
+function collapsedVariantKeepsFormat(ref: TypeRef): boolean {
+  let variant = ref;
+  while (!listedVariantTypes.has(variant) && variant.kind === 'nullable') variant = variant.inner;
+  return variantKeepsFormat(variant);
+}
+
+/**
+ * Whether `variant`, a variant of a type list — of its union, or the one
+ * it collapsed to — stands for a type whose per-type copy keeps `format`
+ * (`listedVariantTypes`; `TYPE_FAMILY_KEYWORDS`: `string`, `integer`,
+ * `number`). The `boolean` copy of `{ type: ['string', 'boolean'], format:
+ * 'date-time' }` sheds the format (`typeListCopy`), so the `boolean`
+ * variant takes none the list writes elsewhere either. Asked only of a
+ * type the caller knows to be a variant of the list it reads
+ * (`formatless`): the record alone says a type was some list's variant,
+ * never whose.
+ */
+function variantKeepsFormat(variant: TypeRef): boolean {
+  const types = listedVariantTypes.get(variant);
+  return types === undefined || types.some((type) => (TYPE_FAMILY_KEYWORDS[type] ?? []).includes('format'));
+}
+
+/** Give `node` (`formatless`) `format`: a primitive carries it, before its limits as the type builder writes the two; a pending reference records it for the settle. */
+function giveFormat(node: PrimitiveType | ModelRef, format: string): void {
+  if (node.kind === 'model') {
+    recordPendingSiteFormat(node, format);
+    return;
+  }
+  const { constraints } = node;
+  delete node.constraints;
+  node.format = format;
+  if (constraints) node.constraints = constraints;
 }
 
 /**
@@ -5476,10 +5792,15 @@ const landingsBeingRead = new Set<string>();
  * `schema` carries, as its own keywords, exactly what a field written as
  * the declaration reads: its settings (`fieldReading` — a bare `$ref` to an
  * array or primitive component reads the component's text, flags, default
- * and keys, a wrapped one its own alone) and the limits its type carries
+ * and keys, a wrapped one its own alone), the limits its type carries
  * (`schemaConstraints`, conjoined through every component on the way; a
  * pointer's landing conjoined with what the site writes around the
- * pointer, the landing's first, as the settle conjoins them). The `null`
+ * pointer, the landing's first, as the settle conjoins them) and the
+ * `format` its type carries (#745): the typed schema's own, else the one
+ * the declaration's levels write (`schemaFormat`), so `at: { allOf: [{
+ * type: 'string' }, { format: 'date-time' }] }` beside `at: { type:
+ * 'string', format: 'date-time' }` is one `string` with `date-time` (the
+ * first was a plain `string`, and the two a union). The `null`
  * the declaration admits through any of the wrappers above is `nullable`,
  * and off `schema`. `shape` is the type built from `schema`
  * (`typeShape`), so two declarations are one shape exactly when the type
@@ -5621,7 +5942,19 @@ function readDeclaration(declaration: SchemaObject): Omit<TypedDeclaration, 'sha
     for (let member = allOfReadAsMember(typed); member !== undefined; member = allOfReadAsMember(typed)) {
       typed = unwrapNullableSchema(member);
     }
-    return { schema: { ...typedKeywords(typed), ...settings, ...schemaConstraints(declaration, schemas) }, nullable };
+    // The format the declaration's type carries is the schema's own, as its
+    // limits are: the typed schema's where it writes one, else the one the
+    // levels around it write (`schemaFormat`; #745).
+    const format = typed.format ? undefined : schemaFormat(declaration, schemas);
+    return {
+      schema: {
+        ...typedKeywords(typed),
+        ...settings,
+        ...schemaConstraints(declaration, schemas),
+        ...formatEntry(format),
+      },
+      nullable,
+    };
   }
   const tokens = schemaRefTokens(wrapped.reference.$ref);
   // The reference as it stays: wrapped, so the declaration reads no setting
@@ -5631,6 +5964,9 @@ function readDeclaration(declaration: SchemaObject): Omit<TypedDeclaration, 'sha
       allOf: [{ $ref: tokens ? schemaRefOf(tokens) : wrapped.reference.$ref }],
       ...settings,
       ...schemaConstraints(declaration, schemas),
+      // What the declaration writes around the `$ref`, which the type takes
+      // where the component's has none (`withTypeFormat`; #745).
+      ...formatEntry(formatOfLevels(wrapped.levels)),
     },
     nullable,
   });
@@ -5667,7 +6003,17 @@ function readDeclaration(declaration: SchemaObject): Omit<TypedDeclaration, 'sha
           (held, level) => combineConstraints(held, extractConstraints(level)),
           extractConstraints(read.schema),
         );
-  return { schema: { ...typingKeywords(read.schema), ...settings, ...limits }, nullable: nullable || read.nullable };
+  // And its format the target's own where it has one, else the one the
+  // declaration's levels write, read where the limits are (#745).
+  const format = read.schema.format
+    ? undefined
+    : tokens.length === 1
+      ? schemaFormat(declaration, schemas)
+      : formatOfLevels(wrapped.levels);
+  return {
+    schema: { ...typingKeywords(read.schema), ...settings, ...limits, ...formatEntry(format) },
+    nullable: nullable || read.nullable,
+  };
 }
 
 /**
@@ -6122,7 +6468,7 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
   const ref = multiTypeMembers(variant, modelName, modelRef);
-  return withSchemaConstraints(nullable ? asNullable(ref) : ref, variant);
+  return withSchemaKeywords(nullable ? asNullable(ref) : ref, variant);
 }
 
 /**
@@ -6175,7 +6521,7 @@ function multiTypeMembers(
     }),
     members.map(([, member]) => (member === undefined ? 'object' : String(member.type))),
   );
-  return variants.length > 1 ? { kind: 'union', variants } : modelRef;
+  return variants.length > 1 ? typeListUnion({ kind: 'union', variants }) : modelRef;
 }
 
 /** The `array` copy of the type list a model component admits other types by (`multiTypeMemberSchemas`), which its plan types and extracts (`MultiTypeModelOwner.items`); `undefined` when the list names no array. */
@@ -6532,7 +6878,9 @@ function buildNamedUnionPlan(
  * (`inlineNames`, the name `extractNamedUnionVariantModels` builds them
  * under), so the reference and the model agree whatever the mapping says.
  * Derived mappings are read from the same names, so they can only point at
- * models that exist.
+ * models that exist. The one variant of a union of one takes the `format`
+ * written beside the union where it has none, as inline (`formatless`;
+ * #745).
  */
 function namedUnionEntry(
   name: string,
@@ -6552,6 +6900,11 @@ function namedUnionEntry(
     if (raw.$ref) return schemaToTypeRef(raw);
     return schemaToTypeRef(raw, memberContexts.get(raw), name, memberProperties);
   });
+  // A union of one variant is the schema the document wrote for its
+  // variant, so the `format` written beside it is the variant's where the
+  // variant has none, as the same union written inline gives it
+  // (`formatless`; #745). A union of several carries none.
+  if (variants.length === 1) withLevelsFormat(variants[0]!, () => [schema]);
   // An explicit entry written as a pointer is settled to the model the
   // pointed schema is built as (#539, #619), and so is the entry a mapping
   // derived for a variant written as one (#682).
@@ -11231,7 +11584,9 @@ export function componentTypeRef(key: string): TypeRef {
  * carries its own model and the declaring component's other types
  * (`OwnerAlias | string`). The union carries the limits of every entry the
  * reference passes, the declaring component's first (`extractConstraints`),
- * as a `$ref` site reads them (`limitReference`).
+ * as a `$ref` site reads them (`limitReference`), and its primitive
+ * members the `format` those entries write, where they have none, the
+ * declaring component's before an alias's (`withEntryFormats`; #745).
  *
  * A component reached again while its own other types are being typed —
  * `Tree: { type: ['array', 'object'], items: { $ref: Tree }, properties }`,
@@ -11257,7 +11612,10 @@ function multiTypeModelTypeRef(key: string, modelRef: ModelRef): TypeRef {
   resolvingMultiTypeModels.add(owner.key);
   try {
     return withTypeConstraints(
-      multiTypeMembers(owner.declaration, owner.name, modelRef, owner.items, others),
+      withEntryFormats(
+        multiTypeMembers(owner.declaration, owner.name, modelRef, owner.items, others),
+        multiTypeModelEntries(chain, activeComponentSchemas),
+      ),
       multiTypeModelLimits(chain, activeComponentSchemas),
     );
   } finally {
@@ -11308,6 +11666,24 @@ function multiTypeModelEntries(
  * `resolveSchemaPointers` settles the site, which conjoins the pointed
  * schema's limits with the site's on the type and the field or parameter
  * alike (#545 review).
+ *
+ * And its `format`, read from the same levels (`withSchemaKeywords`;
+ * #745). A primitive is built with the `format` written beside its `type`
+ * and carried no other: one written in another `allOf` member, beside an
+ * `allOf` or a nullable wrapper, or beside a `$ref` was dropped, while the
+ * limits and the `description` written there were kept — `{ allOf: [{
+ * type: 'string' }, { format: 'date-time', maxLength: 40 }] }` was a plain
+ * `string` with `{ maxLength: 40 }`. A type built without a format now
+ * takes the one its site writes (`schemaFormat`), so that schema, `{
+ * $ref: Text, format: 'date-time' }` and `{ allOf: [{ $ref: Text }],
+ * format: 'date-time' }` over `Text: { type: 'string' }` are `string`
+ * with `date-time`, as `{ type: 'string', format: 'date-time' }` is.
+ * Unlike the limits, which the outer level replaces, a format a type
+ * already has stands (`withTypeFormat`): the builder returns through the
+ * site nearest the type first, so a format written beside the `type`, or
+ * by the component a `$ref` names, is never replaced by one written
+ * farther out, and a site whose levels write two different formats gives
+ * none (`agreedFormat`).
  */
 export function schemaToTypeRef(
   schema: SchemaObject,
@@ -11319,9 +11695,9 @@ export function schemaToTypeRef(
   // sibling's model like a union at field level (`reservedNamesFor`).
   reservedNames?: ReadonlySet<string>,
 ): TypeRef {
-  return withTypeConstraints(
+  return withSchemaKeywords(
     buildTypeRef(schema, contextName, parentModelName, siblingProperties, reservedNames),
-    schemaConstraints(schema, documentComponentSchemas()),
+    schema,
   );
 }
 
@@ -11796,9 +12172,39 @@ function dedupeListedTypeRefs(variants: readonly TypeRef[], stoodFor: ReadonlyAr
  * the reader that narrows such a union to the types a schema admits knows
  * which variant is which (`narrowedToOwnType`; #730) whatever the union
  * was read through on its way: a `$ref` to a component, an alias of it, a
- * nullable wrapper.
+ * nullable wrapper. Read too by the step that gives a type its site's
+ * `format` (`formatless`; #745), which a list's variants take as its
+ * per-type copies keep the keyword — asked of the variants of a union that
+ * is a list's (`typeListUnions`), and of the variant a list collapsed to
+ * where it is built, never of a type met anywhere else; a copy of a
+ * variant keeps the record (`carryTypeListMarks`).
  */
 const listedVariantTypes = new WeakMap<TypeRef, readonly string[]>();
+
+/**
+ * The unions a type list is typed as: the one `buildTypeRef` assembles
+ * from a list's per-type copies, the one a model that admits other types
+ * is read as (`multiTypeMembers`), and what a narrowing leaves of either
+ * (`narrowedToOwnType`). `listedVariantTypes` says a type was some list's
+ * variant; this says whose union a union is, which is what a reader that
+ * treats a union's variants as one list's copies must ask (`formatless`):
+ * a variant a list collapsed to keeps its record wherever it is read, a
+ * `oneOf` that holds it among other variants included.
+ */
+const typeListUnions = new WeakSet<TypeRef>();
+
+/** `union`, recorded as the union of a type list (`typeListUnions`). */
+function typeListUnion(union: TypeRef): TypeRef {
+  typeListUnions.add(union);
+  return union;
+}
+
+/** Record `to`, a copy of `from` (`cloneTypeRef`), as what `from` is to a type list: a variant standing for the JSON types `from` stands for (`listedVariantTypes`), the list's union (`typeListUnions`), when `from` is one. A structural copy would leave it a type no reader can tell from another. */
+export function carryTypeListMarks(from: TypeRef, to: TypeRef): void {
+  const types = listedVariantTypes.get(from);
+  if (types !== undefined) listedVariantTypes.set(to, types);
+  if (typeListUnions.has(from)) typeListUnions.add(to);
+}
 
 /**
  * The types a schema names itself beside `null`, as a set, or `undefined`
@@ -11913,7 +12319,10 @@ function narrowedToOwnType(schema: SchemaObject, ref: TypeRef): TypeRef {
     keptAt.map((index) => narrowed[index]!),
     keptAt.map((index) => left[index]!),
   );
-  return kept.length === 1 ? withTypeConstraints(kept[0]!, ref.constraints) : { ...ref, variants: kept };
+  if (kept.length === 1) return withTypeConstraints(kept[0]!, ref.constraints);
+  // What is left of a type list's union is that list's union still.
+  const narrowedUnion: TypeRef = { ...ref, variants: kept };
+  return typeListUnions.has(ref) ? typeListUnion(narrowedUnion) : narrowedUnion;
 }
 
 /**
@@ -12062,7 +12471,7 @@ function buildTypeRef(
         copies.map((copy) => String(copy.type)),
       );
       const ref: TypeRef =
-        variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : { kind: 'union', variants };
+        variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : typeListUnion({ kind: 'union', variants });
       return schema.type.includes('null') ? asNullable(ref) : ref;
     }
   }

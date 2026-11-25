@@ -22,6 +22,7 @@ import {
   componentUnionDispatches,
   composesOwnChain,
   axisDiscriminatorOf,
+  carryTypeListMarks,
   handedPastRef,
   documentComponentSchemas,
   declaredComponentProperty,
@@ -51,6 +52,8 @@ import {
   unwrapNullableSchema,
   withWrapperDeprecation,
   withWrapperDocs,
+  formatKeyword,
+  wrapperFormatEntry,
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
@@ -73,8 +76,10 @@ import {
   isPendingSchemaRef,
   markPendingSchemaRef,
   pendingNullVetoed,
+  pendingSiteFormatOf,
   pendingSiteLimitsOf,
   recordPendingNullVeto,
+  recordPendingSiteFormat,
   recordPendingSiteLimits,
   schemaRefTarget,
   schemaRefTokens,
@@ -1958,12 +1963,24 @@ function recordInheritedRef(ref: ModelRef, key: string): void {
  * inline enum a bare name to the lift. A copy made here carries every mark
  * its original has: the component mark, the inherited record under the same
  * field, the enum's members and link; a union's mapping is copied with its
- * variants. For a type copied to a second owner — a webhook sharing a path
- * item's minting (`extractWebhooks`). A copy made only to be serialized for
- * comparison, after its flags are spelled out (`foldedVariantKey`), needs
- * none of this.
+ * variants; and the union of a type list that it is one, with the JSON
+ * types each of its variants stands for (`carryTypeListMarks`), at any
+ * depth, so the copy of such a union takes a `format` on the variants the
+ * original would (#745: a JSON Pointer `$ref` settles into a copy of the
+ * type it lands on). For a type
+ * copied to a second owner — a webhook sharing a path item's minting
+ * (`extractWebhooks`). A copy made only to be serialized for comparison,
+ * after its flags are spelled out (`foldedVariantKey`), needs none of
+ * this.
  */
 export function cloneTypeRef(ref: TypeRef): TypeRef {
+  const copy = copiedTypeRef(ref);
+  carryTypeListMarks(ref, copy);
+  return copy;
+}
+
+/** `cloneTypeRef`, less the marks every kind of node may carry (`carryTypeListMarks`). */
+function copiedTypeRef(ref: TypeRef): TypeRef {
   switch (ref.kind) {
     case 'model': {
       const copy: ModelRef = { ...ref };
@@ -1971,6 +1988,7 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
       if (isPendingSchemaRef(ref)) {
         markPendingSchemaRef(copy);
         recordPendingSiteLimits(copy, pendingSiteLimitsOf(ref));
+        recordPendingSiteFormat(copy, pendingSiteFormatOf(ref));
         recordPendingNullVeto(copy, pendingNullVetoed(ref));
       }
       const key = inheritedModelRefs.get(ref);
@@ -2028,13 +2046,15 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
  * written into it. The copy is made as `cloneTypeRef` makes one, so every
  * mark rides along: the nested nodes are the copy's own, and a mark on the
  * copy's root — the component mark, an inherited record, an inline enum's
- * members and link — is set on `target`, which takes the root's place.
+ * members and link, what the root is to a type list — is set on `target`,
+ * which takes the root's place.
  */
 export function replaceTypeRef(target: TypeRef, source: TypeRef): void {
   const copy = cloneTypeRef(source);
   const slot = target as unknown as Record<string, unknown>;
   for (const key of Object.keys(slot)) delete slot[key];
   Object.assign(slot, copy);
+  carryTypeListMarks(copy, target);
   if (copy.kind === 'model') {
     if (isComponentModelRef(copy)) markComponentModelRef(target as ModelRef);
     const key = inheritedModelRefs.get(copy);
@@ -3231,7 +3251,10 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
  * by theirs (`annotatedTypingMember`; #555). The wrapper's own keywords,
  * conjoined with every member's, are the
  * schema's limits (see `extractConstraints`), so they ride along with the
- * member and the model built from it carries the same constraints; its
+ * member and the model built from it carries the same constraints, and so
+ * does the `format` they write where the member writes none
+ * (`wrapperFormatEntry`; #745), so a reader that types the member in the
+ * wrapper's place types what the type builder types the wrapper as; its
  * `deprecated` is the wrapper layer's alone — the wrapper's own, or an
  * annotating member's — as `Field.deprecated` reads it, and its
  * documentation — text, link, examples, extensions — is that layer's
@@ -3252,7 +3275,10 @@ export function unwrappedAllOfMember(wrapper: SchemaObject): SchemaObject {
   const layer = allOfWrapperLayer(wrapper);
   // The copy stands for the member it was spread from (`derivedCopy`), so a
   // reader that guards by identity meets a merge under the wrapper once.
-  const limited = derivedCopy({ ...member, ...extractConstraints(wrapper) }, member);
+  const limited = derivedCopy(
+    { ...member, ...extractConstraints(wrapper), ...wrapperFormatEntry(member, wrapper) },
+    member,
+  );
   return withWrapperDocs(withWrapperDeprecation(limited, layer), layer);
 }
 
@@ -4229,7 +4255,8 @@ function namesTypedSchema(
  *
  * The parts, in place of the member: what the member writes beside its
  * `$ref` that the schema reads (`declarationKeywords`: limits,
- * documentation, flags, `x-*` keys — nothing else is read beside a `$ref`,
+ * documentation, flags, `x-*` keys, and the `format` the value's type
+ * takes, `formatKeyword`, #745 — nothing else is read beside a `$ref`,
  * #618), as one member that declares no type, when it writes any; then the
  * schema the `$ref` names, the document's own object — or, when that is
  * itself a `$ref`, an alias, what it is read as in turn, so `{ $ref: Alias
@@ -4281,7 +4308,9 @@ function partsInPlace(
   if (target === undefined || target === null) return undefined;
   const named = isSchemaObject(target) && target.$ref !== undefined ? partsInPlace(target, componentSchemas) : [target];
   if (named === undefined) return undefined;
-  const keywords = declarationKeywords(reference);
+  // What the member writes beside its `$ref` for the value: the keywords a
+  // field reads, and the `format` its type takes (`formatKeyword`; #745).
+  const keywords = { ...declarationKeywords(reference), ...formatKeyword(reference) };
   return Object.keys(keywords).length > 0 ? [keywords, ...named] : named;
 }
 

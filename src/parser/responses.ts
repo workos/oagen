@@ -34,7 +34,7 @@ import {
   unionFlaggedNullable,
   warnOnUncarriedProperties,
   warnOnUnreadUnion,
-  withSchemaConstraints,
+  withSchemaKeywords,
   withWrapperDocs,
   withoutVetoedNull,
 } from './schemas.js';
@@ -692,7 +692,7 @@ function extractListResponse(
     response:
       dataType ??
       (dataProp
-        ? nullableIf(dataProp, withSchemaConstraints({ kind: 'array', items: itemTypeRef }, dataProp))
+        ? nullableIf(dataProp, withSchemaKeywords({ kind: 'array', items: itemTypeRef }, dataProp))
         : { kind: 'array', items: itemTypeRef }),
     inlineModels,
     isPaginated: true,
@@ -1289,7 +1289,7 @@ function extractDirectResource(
     return {
       // The array carries the body's own limits, as `schemaToTypeRef` would
       // have it carry them (#545); the items carry theirs.
-      response: nullableIf(schema, withSchemaConstraints({ kind: 'array', items: typed.itemType }, schema)),
+      response: nullableIf(schema, withSchemaKeywords({ kind: 'array', items: typed.itemType }, schema)),
       inlineModels: [...inlineModels, ...typed.inlineModels],
       isPaginated: false,
     };
