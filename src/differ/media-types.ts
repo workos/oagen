@@ -1,7 +1,7 @@
 import type { RequestBodyContent, ResponseContent, TypeRef } from '../ir/types.js';
 import { mediaTypeEssence, mediaTypeParameters } from '../utils/media-type.js';
 import type { RequestBodyContentTypesChange } from './types.js';
-import { sameShape, type DocumentShapes } from './shapes.js';
+import { compatibleShape, sameShape, type BodySide, type DocumentShapes } from './shapes.js';
 
 // Read in `utils`, where a secondary body's model is named from the same
 // parameters, so the differ and the parser agree on what changed a key.
@@ -219,6 +219,24 @@ export function retypedBodies(
   });
 }
 
+/**
+ * Whether any of `retyped` — pairs `retypedBodies` returned — breaks `side`:
+ * a body whose new type does not serve the code written against the old one
+ * (`compatibleShape`, #753). A body moved to a new model with every old field,
+ * each of the same type — required wherever it was for a reader, requiring
+ * nothing more for a writer — is still listed as retyped, since the
+ * generated SDK types it by another model, without being breaking.
+ */
+export function retypesBreak(
+  retyped: Array<[MediaTypeBody, MediaTypeBody]>,
+  side: BodySide,
+  shapes?: DocumentShapes,
+): boolean {
+  return retyped.some(
+    ([before, after]) => !before.type || !after.type || !compatibleShape(before.type, after.type, side, shapes),
+  );
+}
+
 /** The request-body fields a media-type comparison reads, shared by `Operation` and `Webhook`. */
 export interface RequestBodyMediaTypes {
   requestBody?: TypeRef;
@@ -232,6 +250,11 @@ export interface RequestBodyMediaTypes {
  * handler decodes the body the sender chose).
  */
 export type RequestBodySide = 'caller' | 'receiver';
+
+/** What `side` does with the request body: an operation's caller builds it, a webhook's receiver is handed it. */
+function bodySideOf(side: RequestBodySide): BodySide {
+  return side === 'caller' ? 'writer' : 'reader';
+}
 
 /**
  * How the media types of an operation's or a webhook's request body changed:
@@ -247,9 +270,12 @@ export type RequestBodySide = 'caller' | 'receiver';
  * newly use or whose body changed type is breaking (the handler must decode
  * it) and one the sender can no longer use is additive. A retype is a body
  * whose shape changed (`sameShape` through `shapes`, the two documents'
- * named types), not one whose model was only renamed. A pair whose
- * parameters other than `charset` differ is `reparameterized`, additive on
- * either side. `undefined` when nothing changed.
+ * named types), not one whose model was only renamed; it is listed either
+ * way, and breaking unless the new type still serves the side
+ * (`retypesBreak`: every body the caller built is accepted, or the receiver
+ * finds everything it read; #753). A pair whose parameters other than
+ * `charset` differ is `reparameterized`, additive on either side.
+ * `undefined` when nothing changed.
  */
 export function diffRequestBodyContentTypes(
   oldBody: RequestBodyMediaTypes,
@@ -264,7 +290,8 @@ export function diffRequestBodyContentTypes(
   if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) {
     return undefined;
   }
-  const breaking = retyped.length > 0 || (side === 'caller' ? removed.length > 0 : added.length > 0);
+  const breaking =
+    retypesBreak(retyped, bodySideOf(side), shapes) || (side === 'caller' ? removed.length > 0 : added.length > 0);
   return {
     added: added.map((body) => body.mediaType),
     removed: removed.map((body) => body.mediaType),
@@ -286,8 +313,10 @@ function requestBodyBodies(body: RequestBodyMediaTypes): MediaTypeBody[] {
 
 /**
  * Whether the representation one side's `requestBody` is read from — the
- * media type, with its shape — is one the other side declares with an
- * unchanged shape. Which side's is judged from `side`, as
+ * media type, with its shape — is one the other side declares with a shape
+ * that still serves it (`compatibleShape`: the same shape, or a new model with
+ * every old field that the caller's bodies still satisfy, or in which the
+ * receiver still finds what it read; #753). Which side's is judged from `side`, as
  * `diffRequestBodyContentTypes` is: for the caller (an operation), the old
  * spec's own body must still be declared by the new spec, since an SDK
  * built for the old spec keeps sending it; for the receiver (a webhook),
@@ -295,9 +324,9 @@ function requestBodyBodies(body: RequestBodyMediaTypes): MediaTypeBody[] {
  * since the handler built for it decodes only what it declared. The two
  * sides are always paired old against new (`pairMediaTypeBodies`, exactly
  * as the media-type diff pairs them) and compared old against new
- * (`sameShape` through `shapes`, the two documents' named types; by name
- * alone without them), so the documents are never looked up the wrong way
- * round for either side. This decides whether an encoding shift
+ * (through `shapes`, the two documents' named types; by name alone without
+ * them), so the documents are never looked up the wrong way round for
+ * either side. This decides whether an encoding shift
  * (`requestBodyEncodingShift`) breaks that side of the wire. `false` when
  * the judged side marks no own body — no media-type lists, or none read as
  * `requestBody` — so a hand-built IR without lists keeps the breaking
@@ -318,5 +347,11 @@ export function ownRepresentationKept(
   );
   if (!pair) return false;
   const [before, after] = pair;
-  return before.type !== undefined && after.type !== undefined && sameShape(before.type, after.type, shapes);
+  // One shape was always the same representation, whatever limits or union
+  // keywords it carries; a compatible one is since #753.
+  return (
+    before.type !== undefined &&
+    after.type !== undefined &&
+    (sameShape(before.type, after.type, shapes) || compatibleShape(before.type, after.type, bodySideOf(side), shapes))
+  );
 }

@@ -425,7 +425,7 @@ export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[]
  * variants and discriminator alone, and a keyword change is no widening
  * (`anyOf` → `oneOf` rejects values that match more than one branch).
  */
-function sameCompositionKinds(a: TypeRef, b: TypeRef): boolean {
+export function sameCompositionKinds(a: TypeRef, b: TypeRef): boolean {
   if (a.kind === 'nullable' && b.kind === 'nullable') return sameCompositionKinds(a.inner, b.inner);
   if (a.kind === 'array' && b.kind === 'array') return sameCompositionKinds(a.items, b.items);
   if (a.kind === 'map' && b.kind === 'map') return sameCompositionKinds(a.valueType, b.valueType);

@@ -825,13 +825,15 @@ export function flagAdmits(owner: Model, candidate: Model): boolean {
  * the component's, and the component's flip is the one that retypes:
  * deprecating `Widget` together with its identical copy, or alone while
  * the copy stays deprecated, moves the copy from `Widget` to
- * `GetLegacyWidgetWidget` — `model-added` beside a breaking
- * `responseChanged`, exit 2 — as deprecating `Widget` alone has always done
- * to a live copy. No rule keeps both flips additive without a live site
- * resolving to a deprecated model: under a deprecated `Widget` the live
- * copy must leave it, and a deprecated copy can match only one of its two
- * neighbours, its live self or its fold under a live `Widget`; the copy's
- * own flip, the edit made on the copy's side, is the one kept additive. The
+ * `GetLegacyWidgetWidget` — `model-added` beside a `responseChanged`,
+ * additive since #753 as the copy has every field of `Widget` (breaking,
+ * exit 2, before), `model-removed` the other way — as deprecating `Widget`
+ * alone has always done to a live copy. No rule keeps both flips from
+ * moving the copy without a live site resolving to a deprecated model:
+ * under a deprecated `Widget` the live copy must leave it, and a
+ * deprecated copy can match only one of its two neighbours, its live self
+ * or its fold under a live `Widget`; the copy's own flip, the edit made on
+ * the copy's side, is the one that moves nothing. The
  * other trade-off: a copy deprecated from the start beside a deprecated
  * component is a second deprecated model of the shape, on a surface
  * nothing live reaches. A model a component's field minted

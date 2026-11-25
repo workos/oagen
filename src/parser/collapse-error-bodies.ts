@@ -902,8 +902,8 @@ const ERROR_CODE_FIELDS = ['code', 'error'];
  * would give a `{ message }` body whose `message` is live a notice its
  * schema never wrote (#629), and taking the one whose `message` is
  * deprecated, as it did until #671, made that body's own flag choose
- * between `ErrorBody` and `GetNoteError404` — a breaking retype for an edit
- * that is additive on the body's own model. A field the component
+ * between `ErrorBody` and `GetNoteError404` — a retype, breaking then, for
+ * an edit that is additive on the body's own model. A field the component
  * deprecates and the member does not carry is nothing to the member; a
  * live field of the component takes the member's deprecated one as the
  * live model takes a deprecated body (`flagAdmits`), announced by `claim`

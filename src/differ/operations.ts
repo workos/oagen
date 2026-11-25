@@ -21,9 +21,10 @@ import {
   reparameterizedBodies,
   respelling,
   retypedBodies,
+  retypesBreak,
   type MediaTypeBody,
 } from './media-types.js';
-import type { DocumentShapes } from './shapes.js';
+import { compatibleShape, type DocumentShapes } from './shapes.js';
 import type {
   Change,
   ParamChange,
@@ -160,7 +161,7 @@ export function diffOperations(
     const paginationEndOfIterationChanged =
       bothPaginated && !endOfIterationEqual(oldPagination?.endOfIteration, newPagination?.endOfIteration);
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
-    const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
+    const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors, shapes);
     const errorsChanged = errorsDiff !== 'none';
     const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp, shapes);
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
@@ -180,7 +181,7 @@ export function diffOperations(
     const status = responseStatusCodeChanged
       ? { oldResponseStatusCode: oldOp.responseStatusCode, newResponseStatusCode: newOp.responseStatusCode }
       : {};
-    const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
+    const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp, shapes);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
     // Additive either way: the operation's signature is unchanged, but a
     // changelog has to say it, so a flipped flag alone is a change.
@@ -276,20 +277,32 @@ export function diffOperations(
       // requestBody: a body appearing as optional is additive — callers gain an
       // argument they may leave out, like an optional `param-added`. A body
       // appearing as required, a body disappearing, and a body changing type
-      // are breaking, except a body written as an inline union that only
-      // gained variants: callers may send the new variant but need not, as
-      // for a named union's `variant-added` (`addedUnionVariants`, #428). An
-      // absent flag reads as optional, as it does in OpenAPI.
+      // are breaking, with two exceptions. A body written as an inline union
+      // that only gained variants: callers may send the new variant but need
+      // not, as for a named union's `variant-added` (`addedUnionVariants`,
+      // #428). And a body moved to a type that accepts every body built for
+      // the old one — a new model with every old field, each of the same type,
+      // that requires nothing more (`compatibleShape` for the writer, #753).
+      // An absent flag reads as optional, as it does in OpenAPI.
       const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
-      const requestBodyWidened =
-        oldOp.requestBody && newOp.requestBody ? !!addedUnionVariants(oldOp.requestBody, newOp.requestBody) : false;
-      const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded && !requestBodyWidened;
-      // response: a new type is breaking, except a response written as an
-      // inline union that only gained variants, which a reader may now
-      // receive as it may a new enum value (#428); gaining or losing the only
-      // 2xx/3xx is breaking whatever the body.
-      const responseBreaking =
-        responseChanged && (successGainedOrLost || !addedUnionVariants(oldOp.response, newOp.response));
+      const requestBodyStillAccepted =
+        oldOp.requestBody && newOp.requestBody
+          ? !!addedUnionVariants(oldOp.requestBody, newOp.requestBody) ||
+            compatibleShape(oldOp.requestBody, newOp.requestBody, 'writer', shapes)
+          : false;
+      const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded && !requestBodyStillAccepted;
+      // response: a new type is breaking, with the same two exceptions read
+      // from the other side. A response written as an inline union that only
+      // gained variants, which a reader may now receive as it may a new enum
+      // value (#428). And a response moved to a type that gives a reader
+      // everything it read — a new model with every old field, each of the same
+      // type and required wherever it was (`compatibleShape` for the reader,
+      // #753). Gaining or losing the only 2xx/3xx is breaking whatever the
+      // body.
+      const responseStillReadable =
+        !!addedUnionVariants(oldOp.response, newOp.response) ||
+        compatibleShape(oldOp.response, newOp.response, 'reader', shapes);
+      const responseBreaking = responseChanged && (successGainedOrLost || !responseStillReadable);
       // responseStatusCode: a moved primary is breaking when the new spec no
       // longer declares the code the old primary answered with (a lone `200`
       // that became a lone `201`, a `302` that became a `301`, a `200` beside
@@ -315,15 +328,16 @@ export function diffOperations(
         requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp, 'caller', shapes);
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
-      // that changed shape, breaks them; one they can newly ask for, or one
-      // that only changed a parameter, does not.
+      // that changed shape in a way a reader notices, breaks them; one they
+      // can newly ask for, or one that only changed a parameter, does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
       // A header the SDK exposed that is gone, retyped or no longer always
       // sent breaks the code that read it; one added, respelled, deprecated
       // or now always sent does not.
       const responseHeadersBreaking = responseHeaderChanges.some((c) => c.classification === 'breaking');
       // A media type callers could send that is gone, or a secondary body
-      // that changed shape, breaks them; one they can newly send does not.
+      // that changed shape in a way a writer notices, breaks them; one they
+      // can newly send does not.
       const requestBodyContentTypesBreaking = requestBodyContentTypeChange?.classification === 'breaking';
       const fallbackBreaking = fallbackDiff === 'breaking';
       // servers: breaking exactly when the same edit to the document's
@@ -744,7 +758,9 @@ function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseH
  * body whose shape changed (`retypedBodies`), left out only when another
  * comparison reports that very body: the entry's own body on both sides,
  * for two primaries (`responseChanged`) or two errors of one code
- * (`errorsChanged`) — never for a primary paired with an alternate 2xx.
+ * (`errorsChanged`) — never for a primary paired with an alternate 2xx. It
+ * is breaking unless a reader of the old body still finds what it read in
+ * the new one (`retypesBreak`, #753).
  * Entries pair by status code (`pairContentEntries`), a lone 2xx by its
  * `responseStatusCode`; two lone primaries of different codes pair with each
  * other, and only a lone 2xx that carries no code (a hand-built IR) pairs by
@@ -785,7 +801,7 @@ function diffResponseContentTypes(
       removed: removed.map((body) => body.mediaType),
       retyped: retyped.map(([, after]) => after.mediaType),
       reparameterized: reparameterized.map(respelling),
-      classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
+      classification: removed.length > 0 || retypesBreak(retyped, 'reader', shapes) ? 'breaking' : 'additive',
     });
   }
   // An error or fallback the old spec alone declares is the errors or
@@ -916,37 +932,49 @@ function requestBodiesEqual(a: Operation['requestBody'], b: Operation['requestBo
 function classifyErrorsChange(
   oldErrors: ErrorResponse[],
   newErrors: ErrorResponse[],
+  shapes?: DocumentShapes,
 ): 'none' | 'additive' | 'breaking' {
   return classifyKeyedResponsesChange(
     new Map(oldErrors.map((e) => [e.statusCode, e])),
     new Map(newErrors.map((e) => [e.statusCode, e])),
+    shapes,
   );
 }
 
 /**
  * The fallback responses, keyed the way the spec keys them (`default`,
  * `4XX`), classified like `errors`: one added is additive (the SDK gains a
- * typed fallback), one removed or retyped is breaking.
+ * typed fallback), one removed is breaking, and one retyped is breaking
+ * unless a reader still finds what it read (`classifyKeyedResponsesChange`).
  */
-function classifyFallbackResponsesChange(oldOp: Operation, newOp: Operation): 'none' | 'additive' | 'breaking' {
+function classifyFallbackResponsesChange(
+  oldOp: Operation,
+  newOp: Operation,
+  shapes?: DocumentShapes,
+): 'none' | 'additive' | 'breaking' {
   const byKey = (op: Operation): Map<string, { type?: TypeRef }> => {
     const entries = new Map<string, { type?: TypeRef }>();
     if (op.defaultResponse) entries.set('default', op.defaultResponse);
     for (const range of op.rangeResponses ?? []) entries.set(range.range, range);
     return entries;
   };
-  return classifyKeyedResponsesChange(byKey(oldOp), byKey(newOp));
+  return classifyKeyedResponsesChange(byKey(oldOp), byKey(newOp), shapes);
 }
 
 /**
  * Responses matched by key (a status code, `default`, a range): a new key is
  * additive (the SDK gains an error class or typed fallback), a removed key is
  * breaking (it loses one), and a shared key whose body type changed is
- * breaking. A key with no body on either side is unchanged.
+ * breaking — a body gained or lost included — unless the new type gives a
+ * reader everything it read from the old one (`compatibleShape` through
+ * `shapes`: a new model with every old field, each of the same type and
+ * required wherever it was; #753), which is a change still, and additive. A
+ * key with no body on either side is unchanged.
  */
 function classifyKeyedResponsesChange<K>(
   oldByKey: Map<K, { type?: TypeRef }>,
   newByKey: Map<K, { type?: TypeRef }>,
+  shapes?: DocumentShapes,
 ): 'none' | 'additive' | 'breaking' {
   let hasAdditive = false;
   let hasBreaking = false;
@@ -963,8 +991,11 @@ function classifyKeyedResponsesChange<K>(
     const oldEntry = oldByKey.get(key);
     if (!oldEntry) continue;
     if (!oldEntry.type && !newEntry.type) continue;
-    if (!oldEntry.type || !newEntry.type || !typeRefsEqual(oldEntry.type, newEntry.type)) {
+    if (!oldEntry.type || !newEntry.type) {
       hasBreaking = true;
+    } else if (!typeRefsEqual(oldEntry.type, newEntry.type)) {
+      if (compatibleShape(oldEntry.type, newEntry.type, 'reader', shapes)) hasAdditive = true;
+      else hasBreaking = true;
     }
   }
 

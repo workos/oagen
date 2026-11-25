@@ -564,7 +564,7 @@ describe('parser to differ — a secondary inline body under a respelled key (Gr
     expect(summary.breaking).toBe(1);
   });
 
-  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped, breaking', async () => {
+  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped (additive since #753: the new body only gained an optional field)', async () => {
     const { changes } = await diffDocuments(
       versioned(1, title),
       versioned(3, { ...title, pages: { type: 'integer' } }),
@@ -578,10 +578,10 @@ describe('parser to differ — a secondary inline body under a respelled key (Gr
           removed: [],
           retyped: ['application/yaml; version=3'],
           reparameterized: [{ from: 'application/yaml; version=1', to: 'application/yaml; version=3' }],
-          classification: 'breaking',
+          classification: 'additive',
         },
       ],
-      classification: 'breaking',
+      classification: 'additive',
     });
   });
 

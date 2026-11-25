@@ -482,17 +482,31 @@ export interface OperationModified {
   /**
    * `Operation.response` changed type, or the operation gained or lost its
    * only 2xx/3xx response (`responseStatusCode` present on one side only),
-   * with or without a body. Breaking, except a response written as an
-   * inline union that only gained variants, which is additive as a named
-   * union's `variant-added` is.
+   * with or without a body. Breaking, with two exceptions for a type
+   * change: a response written as an inline union that only gained
+   * variants, which is additive as a named union's `variant-added` is; and
+   * a response moved to a type in which a reader still finds everything it
+   * read (`compatibleShape`, #753) — a model new to the spec that has every
+   * field of the old one, each of the same type and required wherever it
+   * was, bare or under the same array, map, `nullable` or union wrapper on
+   * both sides — which is additive too. A model that drops or retypes a
+   * field, or makes a required one optional, stays breaking, and so does a
+   * move between two models both specs declare, however alike (#390).
    */
   responseChanged: boolean;
   /**
    * The body appeared, disappeared, or changed type. Breaking, except that a
    * body appearing with `requestBodyRequired` not `true` is additive: callers
-   * gain an argument they may leave out, like an optional `param-added`; and
-   * so is a body written as an inline union that only gained variants, as a
-   * named union's `variant-added` is.
+   * gain an argument they may leave out, like an optional `param-added`; so
+   * is a body written as an inline union that only gained variants, as a
+   * named union's `variant-added` is; and so is a body moved to a type that
+   * accepts every body built for the old one (`compatibleShape`, #753) — a
+   * model new to the spec that has every field of the old one, each of the
+   * same type, and requires no field the old one did not, bare or under
+   * the same wrapper on both sides. A model that drops or retypes a field,
+   * requires a new one or one that was optional, or tightens a limit stays
+   * breaking, and so does a move between two models both specs declare
+   * (#390).
    */
   requestBodyChanged: boolean;
   /**
@@ -517,8 +531,9 @@ export interface OperationModified {
    * under. An SDK built for the old spec keeps serializing and labelling the
    * body as that spec said, so the change is breaking when the new spec no
    * longer accepts that representation — the media type the old body was
-   * read from is gone from `requestBodyContentTypes`, or its shape changed,
-   * compared as `retyped` is (`application/json` where the server now reads only
+   * read from is gone from `requestBodyContentTypes`, or its shape changed
+   * to one that rejects a body built for the old one, judged as a breaking
+   * `retyped` is (`application/json` where the server now reads only
    * `application/x-www-form-urlencoded`) — and additive when it still does,
    * as when a media type the parser prefers is added beside it
    * (`application/json` added beside a kept
@@ -578,6 +593,12 @@ export interface OperationModified {
    */
   paginationEndOfIterationChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
+  /**
+   * An error response was added (additive), removed (breaking), or its body
+   * changed type, appeared or disappeared: breaking, unless the body moved
+   * to a type in which a reader still finds everything it read, as for
+   * `responseChanged` (#753), which is additive.
+   */
   errorsChanged: boolean;
   /**
    * The servers the operation is actually served from changed. Each side is
@@ -742,7 +763,12 @@ export interface OperationModified {
   /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
   oldResponseStatusCode?: number;
   newResponseStatusCode?: number;
-  /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
+  /**
+   * The `default` or a `1XX`–`5XX` range response was added (additive),
+   * removed (breaking), or changed type: breaking, unless its body moved to
+   * a type in which a reader still finds everything it read, as for
+   * `responseChanged` (#753), which is additive.
+   */
   fallbackResponsesChanged: boolean;
   classification: 'additive' | 'breaking';
 }
@@ -899,7 +925,8 @@ export interface ResponseContentTypesChange {
    * already report. Two model or enum refs whose names both specs declare
    * are compared by name, nested ones included, however alike: neither was
    * renamed, so a body moved from `Note` to an identical `NoteCopy` is
-   * retyped.
+   * retyped. Listed whether or not the retype breaks a reader (see
+   * `classification`).
    */
   retyped: string[];
   /**
@@ -911,7 +938,14 @@ export interface ResponseContentTypesChange {
    * differences.
    */
   reparameterized: Array<{ from: string; to: string }>;
-  /** `breaking` when anything was removed or retyped, else `additive`. */
+  /**
+   * `breaking` when anything was removed, or retyped to a type in which a
+   * reader no longer finds everything it read (`compatibleShape`, as for
+   * `OperationModified.responseChanged`; #753), else `additive`: a body
+   * whose renamed model gained an optional field is `retyped` and
+   * additive, one moved from `Note` to a `NoteCopy` both specs declare is
+   * `retyped` and breaking.
+   */
   classification: 'additive' | 'breaking';
 }
 
@@ -929,7 +963,10 @@ export interface ResponseContentTypesChange {
  * breaking; one it can newly send is additive. For a webhook, the handler
  * decodes the body the sender chose: a media type the sender can newly use,
  * or whose body changed type, is breaking; one it can no longer use is
- * additive.
+ * additive. A body that changed type is breaking unless the new type still
+ * serves that side (`compatibleShape`, #753): it accepts every body the
+ * caller built, as for `OperationModified.requestBodyChanged`, or the
+ * handler still finds everything it read in it.
  */
 export interface RequestBodyContentTypesChange {
   /** Media types the new spec declares and the old did not: a representation the caller can newly send. */
@@ -946,7 +983,8 @@ export interface RequestBodyContentTypesChange {
    * `requestBody` is read from, which `requestBodyChanged` reports. Two
    * model or enum refs whose names both specs declare are compared by name,
    * nested ones included, however alike: neither was renamed, so a body
-   * moved from `Note` to an identical `NoteCopy` is retyped.
+   * moved from `Note` to an identical `NoteCopy` is retyped. Listed whether
+   * or not the retype breaks the node's side (see `classification`).
    */
   retyped: string[];
   /**
@@ -962,6 +1000,8 @@ export interface RequestBodyContentTypesChange {
    * From the caller's side on an operation: `breaking` when anything was
    * removed or retyped, else `additive`. From the receiver's side on a
    * webhook: `breaking` when anything was added or retyped, else `additive`.
+   * On either side a retype counts only when the new type no longer serves
+   * that side (`compatibleShape`, #753).
    */
   classification: 'additive' | 'breaking';
 }
@@ -1095,7 +1135,11 @@ export interface ReceivedRequestModified {
    * from a payload carried in its contents alone; the media types whenever
    * both carry a `requestBody` or declare `requestBodyContentTypes`, as the
    * flag is, so a payload carried in its contents alone on either side still
-   * reports the media types the sender gained or lost.
+   * reports the media types the sender gained or lost. A payload whose type
+   * changed is breaking — it is the handler's parameter type — unless the
+   * handler still finds everything it read in the new one
+   * (`compatibleShape`, #753): a model new to the spec that has every field
+   * of the old one, each of the same type and required wherever it was.
    */
   requestBodyChanged: boolean;
   /**
@@ -1103,9 +1147,11 @@ export interface ReceivedRequestModified {
    * `encoding json → form-urlencoded`): the encoding on each side, old →
    * new, as an `operation-modified` change carries them. Breaking when the
    * representation the sender now uses — the media type the new payload is
-   * read from, with its shape — is not one the old spec declared with that
-   * shape, so the handler decodes a wire format it never saw; additive when
-   * the old spec already declared it. A payload without media-type lists
+   * read from, with its shape — is not one the old spec declared with a
+   * shape the handler's reading still holds for (the same one, or one the
+   * new shape is compatible with for a reader, #753), so the handler
+   * decodes a wire format it never saw; additive when the old spec already
+   * declared it. A payload without media-type lists
    * reads as breaking. Compared only while both specs carry a `requestBody`,
    * as on an operation: a payload appearing or disappearing is `payload
    * added` / `payload removed` in `details` and carries neither field, and
