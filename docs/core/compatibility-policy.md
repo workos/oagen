@@ -222,7 +222,7 @@ Which rule decides is the policy's `parameterTypesAreStructural`.
 **By shape, where it is `true` (Node).** Both type texts are read as unions, a text that is no union as a union of one, and each member of the old union has to be accepted by a member of the new one. A member accepts another when it is
 
 - the same text;
-- an array of a type that accepts the old array's (`Old[]` → `New[]`);
+- an array, or a generic known to hand its argument back, of a type that accepts the old one's: `Old[]` → `New[]`, `Promise<Old>` → `Promise<New>`, `Set<Old>` → `Set<New>`. The generics are the ones a narrowed field or return is read through (a promise, a collection; see [above](#detected-patterns)), on the same condition that the SDK declares no type of that name itself. A `readonly` array takes a writable one (`Old[]` → `readonly New[]`), and a writable array does not take a `readonly` one;
 - an object type that keeps the old one's fields, each of the two declared (an interface, an object type alias) or written in place (`{ timeout?: number }`). It keeps them when it
   - has every field of the old type. A caller may write any of them in an object literal at the call site, and TypeScript refuses a literal that names a field the parameter's type does not have (TS2353), though it would take the same value from a variable;
   - gives each a type that accepts the old field's, which is this same question asked of the two field types, or the candidate declares that the old type extends the new one, which a compiler has then checked field by field;
@@ -230,9 +230,9 @@ Which rule decides is the policy's `parameterTypesAreStructural`.
 
 A type alias the snapshot records by its text (`type PetId = string | number`) is read as that text, on either side.
 
-So the new type may add optional fields, make required fields optional, widen a field's type and add members to a union, and `string` → `string | number`, `T` → `T | null` and a required parameter made optional (`T` → `T | undefined`) are all `soft-risk`. Nothing else is read into, and each of these is accepted as the same text only: a generic's argument (`Promise<Old>` → `Promise<New>`, since whether a `Box<Old>` is taken where a `Box<New>` is expected depends on how `Box` uses its argument), a tuple, a function type, a `readonly` array, a literal its primitive would take (`'asc'` → `string`) and `unknown`.
+So the new type may add optional fields, make required fields optional, widen a field's type and add members to a union, and `string` → `string | number`, `T` → `T | null` and a required parameter made optional (`T` → `T | undefined`) are all `soft-risk`. Nothing else is read into, and each of these is accepted as the same text only: any other generic's argument (`Sink<Old>` → `Sink<New>`, `Record<string, Old>` → `Record<string, New>`, since whether a `Sink<Old>` is taken where a `Sink<New>` is expected depends on how `Sink` uses its argument), a tuple, a function type, a literal its primitive would take (`'asc'` → `string`) and `unknown`.
 
-**By declaration, where it is `false` (every other language).** The old type declares, directly or through the types it extends, that it extends the new one, as the candidate's `extends` records it (a PHP class's base, a Python model's base under `hints.modelBaseClasses`), and the retype does nothing else: both texts are one type's name under the same optional spelling and at most one array suffix (`?RetryOptions` → `?BaseOptions`). Two classes with the same fields are not related by it.
+**By declaration, where it is `false` (every other language).** The old type declares, directly or through the types it extends, that it extends the new one, as the candidate's `extends` records it (a PHP class's base, a Python model's base under `hints.modelBaseClasses`), and the retype does nothing else: both texts are one type's name under the same optional spelling and at most one array suffix (`?RetryOptions` → `?BaseOptions`). Two classes with the same fields are not related by it, and a generic's argument is not read: a Python `list[RetryOptions]` is no `list[BaseOptions]`, since a list is written to as well as read.
 
 | A parameter retyped from → to                                                                                 | Node      | PHP, Python models |
 | ------------------------------------------------------------------------------------------------------------- | --------- | ------------------ |
@@ -245,9 +245,10 @@ So the new type may add optional fields, make required fields optional, widen a 
 | a type → one where a field is now required, is retyped to a type that does not take the old one's, or is gone | breaking  | breaking           |
 | `string` → `string \| number`, `T` → `T \| null`, a required parameter made optional                          | soft-risk | breaking           |
 | `string \| number` → `string`, `T \| null` → `T \| undefined`, an optional parameter made required            | breaking  | breaking           |
-| `Old` → `New[]`, `Old` → `Promise<New>`, `Promise<Old>` → `Promise<New>`                                      | breaking  | breaking           |
+| `Old[]` → `New[]`, `Promise<Old>` → `Promise<New>`, where `New` takes every `Old`                             | soft-risk | breaking           |
+| `Old` → `New[]`, `Old` → `Promise<New>`, `Sink<Old>` → `Sink<New>`                                            | breaking  | breaking           |
 
-The right column holds where the surface records the old type with its supertype: a PHP class with a public property of its own (one that declares none is recorded as a plain class, without a base, and its retype stays `breaking`), a Python model under `hints.modelBaseClasses`. The other extractors record no supertype, so every row is `breaking` there.
+The right column holds where the surface records the old type with its supertype: a PHP class with a public property of its own (one that declares none is recorded as a plain class, without a base, and its retype stays `breaking`), a Python model under `hints.modelBaseClasses`. The other extractors record no supertype, so every row is `breaking` there. The row of arrays and promises is Python's `list[RetryOptions]` → `list[BaseOptions]` in that column; PHP has no typed arrays.
 
 The third row is the one where the two kinds of language part. A PHP caller passes a `RetryOptions` it built, which is a `BaseOptions`. A TypeScript caller may write `get(id, { maxRetries: 2 })`, and `BaseOptions` has no `maxRetries`: the declaration says nothing a literal can use, so the new type has to keep every field there as well.
 

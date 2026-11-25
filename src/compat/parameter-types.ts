@@ -31,7 +31,14 @@
 
 import type { DeclaredTypes, RecordedMember, TypeLookup } from './type-graph.js';
 import { declaresSupertype, recordedMembers } from './type-graph.js';
-import { objectTypeMembers, soleTypeName, unionMembers } from './type-names.js';
+import {
+  handsBackItsArgument,
+  objectTypeMembers,
+  singleArgumentGeneric,
+  soleTypeName,
+  typeNamesIn,
+  unionMembers,
+} from './type-names.js';
 
 /** What `acceptsEveryValue` reads beside the two type texts. */
 export interface ParameterTypeContext {
@@ -251,14 +258,14 @@ function membersBehindAliases(members: readonly string[] | undefined, types: Typ
  * One member of the new union accepts one member of the old:
  *
  *  - the same text;
- *  - an array of a type that accepts the old array's (`Old[]` → `New[]`);
+ *  - an array, or a generic that hands its argument back, of a type that
+ *    accepts the old one's (`holderAccepts`);
  *  - an object type that keeps the old one's fields (`fieldsAccept`), each
  *    of the two a declared type or written in place.
  *
- * Nothing else is read into: a generic's argument (`Promise<Old>` →
- * `Promise<New>`: see `soleTypeName` for why), a tuple, a function type, a
- * literal a wider type would take (`'asc'` → `string`). Each is accepted as
- * the same text only.
+ * Nothing else is read into: any other generic's argument, a tuple, a
+ * function type, a literal a wider type would take (`'asc'` → `string`).
+ * Each is accepted as the same text only.
  *
  * A text the extractor cut short (`ELIDED`) is not the type: two of them
  * that read alike may differ in what was left out, so neither is accepted,
@@ -271,12 +278,55 @@ function memberAccepts(oldMember: string, newMember: string, context: ShapeConte
   const settled = context.verdicts.get(pair);
   if (settled !== undefined) return settled;
   context.verdicts.set(pair, false);
-  const verdict =
-    oldMember.endsWith('[]') && newMember.endsWith('[]')
-      ? acceptsByShape(oldMember.slice(0, -2), newMember.slice(0, -2), context)
-      : fieldsAccept(oldMember, newMember, context);
+  const verdict = holderAccepts(oldMember, newMember, context) ?? fieldsAccept(oldMember, newMember, context);
   context.verdicts.set(pair, verdict);
   return verdict;
+}
+
+/**
+ * Two types that hold values of another, weighed by what they hold; undefined
+ * when the two are not such a pair.
+ *
+ *  - Two arrays: `Old[]` → `New[]`. A `readonly` array takes a writable one
+ *    (`Old[]` → `readonly New[]`), and a writable array does not take a
+ *    `readonly` one.
+ *  - Two generics of one name around one argument, when the generic is known
+ *    to hand its argument back and never take it (`handsBackItsArgument`: a
+ *    promise, a collection) and neither snapshot declares a type of that
+ *    name: `Promise<Old>` → `Promise<New>`. This is the list a field or a
+ *    return narrowed to a declared subtype is read through, and it serves
+ *    the other way around for the same reason: a `Promise<Old>` is a
+ *    `Promise<New>` exactly when an `Old` is a `New`. Whether a `Sink<Old>`
+ *    is a `Sink<New>` depends on how `Sink` uses its argument, which neither
+ *    a type text nor the snapshot says.
+ */
+function holderAccepts(oldMember: string, newMember: string, context: ShapeContext): boolean | undefined {
+  const oldArray = arrayOf(oldMember);
+  const newArray = arrayOf(newMember);
+  if (oldArray !== undefined && newArray !== undefined) {
+    if (oldArray.readonly && !newArray.readonly) return false;
+    return acceptsByShape(oldArray.element, newArray.element, context);
+  }
+  const oldGeneric = singleArgumentGeneric(oldMember);
+  const newGeneric = singleArgumentGeneric(newMember);
+  if (oldGeneric === undefined || newGeneric === undefined || oldGeneric.generic !== newGeneric.generic) {
+    return undefined;
+  }
+  const declared = typeNamesIn(oldGeneric.generic).some(
+    (name) => context.oldTypes.get(name) !== undefined || context.newTypes.get(name) !== undefined,
+  );
+  if (declared || !handsBackItsArgument(oldGeneric.generic)) return undefined;
+  return acceptsByShape(oldGeneric.argument, newGeneric.argument, context);
+}
+
+/** An array type's element, and whether the array is `readonly`:
+ *  `Foo[]`, `(Foo | null)[]`, `readonly Foo[]`. */
+function arrayOf(member: string): { element: string; readonly: boolean } | undefined {
+  if (!member.endsWith('[]')) return undefined;
+  const element = member.slice(0, -2);
+  return element.startsWith('readonly ')
+    ? { element: element.slice('readonly '.length), readonly: true }
+    : { element, readonly: false };
 }
 
 /** The text a type alias stands for, when the snapshot records the alias by

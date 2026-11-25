@@ -140,13 +140,42 @@ describe('#752 by shape: a union that kept every member', () => {
     // a function among the members, in its parentheses or out of them
     ['() => void', '(() => void) | undefined', ACCEPTED],
     ['(() => void) | undefined', '() => void', REFUSED],
-    // nothing else is read into: each of these is the same text or it is not
-    ['Promise<string>', 'Promise<string | number>', REFUSED],
-    ['Array<string>', 'Array<string | number>', REFUSED],
+    // a readonly array takes a writable one, not the other way around
+    ['readonly string[]', 'readonly (string | number)[]', ACCEPTED],
+    ['string[]', 'readonly string[]', ACCEPTED],
+    ['string[]', 'readonly (string | number)[]', ACCEPTED],
+    ['readonly string[]', 'string[]', REFUSED],
+    ['readonly string[]', '(string | number)[]', REFUSED],
+    ['readonly string[][]', 'readonly (string | number)[][]', ACCEPTED],
+    ['(readonly string[])[]', '(readonly (string | number)[])[]', ACCEPTED],
+    // a generic known to hand its argument back, of a type that accepts the old one's
+    ['Promise<string>', 'Promise<string | number>', ACCEPTED],
+    ['Promise<string | number>', 'Promise<string>', REFUSED],
+    ['PromiseLike<string>', 'PromiseLike<string | null>', ACCEPTED],
+    ['Array<string>', 'Array<string | number>', ACCEPTED],
+    ['Set<string>', 'Set<string | number>', ACCEPTED],
+    ['ReadonlySet<string>', 'ReadonlySet<string | number>', ACCEPTED],
+    ['Iterable<string>', 'Iterable<string | number>', ACCEPTED],
+    ['Promise<string[]>', 'Promise<(string | number)[]>', ACCEPTED],
+    ['Promise<Set<string>>', 'Promise<Set<string | number>>', ACCEPTED],
+    ['Promise<string> | undefined', 'Promise<string | number> | null | undefined', ACCEPTED],
+    ['Sequence[str]', 'Sequence[str | int]', ACCEPTED],
+    ['typing.Sequence[str]', 'typing.Sequence[str | int]', ACCEPTED],
+    // ... of the same name on both sides
+    ['Promise<string>', 'PromiseLike<string | number>', REFUSED],
+    ['Set<string>', 'ReadonlySet<string | number>', REFUSED],
+    ['string[]', 'Array<string | number>', REFUSED],
+    ['Promise<string>', 'Promise<string>[]', REFUSED],
+    // any other generic may take its argument as well as hand it back
+    ['Sink<string>', 'Sink<string | number>', REFUSED],
+    ['Box<string>', 'Box<string | number>', REFUSED],
+    ['Partial<string>', 'Partial<string | number>', REFUSED],
+    ['Map<string, string>', 'Map<string, string | number>', REFUSED],
     ['Record<string, string>', 'Record<string, string | number>', REFUSED],
+    ['Promise<>', 'Promise<string>', REFUSED],
+    // nothing else is read into: each of these is the same text or it is not
     ['[string]', '[string | number]', REFUSED],
-    ['readonly string[]', 'readonly (string | number)[]', REFUSED],
-    ['string[]', 'readonly string[]', REFUSED],
+    ['readonly [string]', 'readonly [string | number]', REFUSED],
     ['() => string', '() => string | number', REFUSED],
     ['(value: string | number) => void', '(value: string) => void', REFUSED],
     ['"asc"', 'string', REFUSED],
@@ -179,6 +208,52 @@ describe('#752 by shape: a union that kept every member', () => {
     expect(byShape('"c"', cut)).toBeUndefined();
     // Three dots that cut nothing short are text like any other.
     expect(byShape('[...string[]]', '[...string[]] | undefined')).toEqual({ rule: 'shape', fields: [] });
+  });
+});
+
+describe('#752 by shape: a generic that hands its argument back', () => {
+  const OPTIONS = [
+    objectType('OldOptions', { timeout: '?number' }),
+    objectType('NewOptions', { timeout: '?number', maxRetries: '?number' }),
+  ];
+
+  it('is read through as an array is, with the rule the argument is under', () => {
+    const declared = types(...OPTIONS);
+    for (const holder of ['Promise', 'PromiseLike', 'Set', 'ReadonlySet', 'Iterable', 'AsyncIterable', 'Array']) {
+      expect([holder, byShape(`${holder}<OldOptions>`, `${holder}<NewOptions>`, declared)]).toEqual([
+        holder,
+        { rule: 'shape', fields: [{ oldType: 'OldOptions', newType: 'NewOptions' }] },
+      ]);
+      // A member dropped is a member dropped, whatever holds the value.
+      expect(byShape(`${holder}<NewOptions>`, `${holder}<OldOptions>`, declared)).toBeUndefined();
+    }
+  });
+
+  it('is not read through when a snapshot declares a type of its name', () => {
+    // The SDK's own `Sequence<T>` is as unknown as its `Sink<T>`.
+    for (const declaration of [
+      symbol('alias', 'Sequence', { extends: [], hasUnlistedMembers: false }),
+      symbol('service_accessor', 'Sequence'),
+      symbol('alias', 'Sequence'),
+    ]) {
+      const declared = types(...OPTIONS, declaration);
+      const without = types(...OPTIONS);
+      expect(byShape('Sequence<OldOptions>', 'Sequence<NewOptions>', without)).toBeDefined();
+      expect(byShape('Sequence<OldOptions>', 'Sequence<NewOptions>', declared)).toBeUndefined();
+      // Declared by either snapshot.
+      expect(byShape('Sequence<OldOptions>', 'Sequence<NewOptions>', without, declared)).toBeUndefined();
+      expect(byShape('Sequence<OldOptions>', 'Sequence<NewOptions>', declared, without)).toBeUndefined();
+    }
+  });
+
+  it('is not read through where a value is accepted by its declared type', () => {
+    // A `list[RetryOptions]` is no `list[BaseOptions]`: a list is written to.
+    const declared = types(objectType('BaseOptions', {}), objectType('RetryOptions', {}, { extends: ['BaseOptions'] }));
+    expect(byDeclaration('RetryOptions', 'BaseOptions', declared)).toBeDefined();
+    for (const holder of ['list', 'List', 'Sequence', 'Promise', 'Set', 'Iterable']) {
+      expect(byDeclaration(`${holder}[RetryOptions]`, `${holder}[BaseOptions]`, declared)).toBeUndefined();
+      expect(byDeclaration(`${holder}<RetryOptions>`, `${holder}<BaseOptions>`, declared)).toBeUndefined();
+    }
   });
 });
 
@@ -221,8 +296,10 @@ describe('#752 by shape: a type alias recorded by its text', () => {
     ['AnyOptions', 'RetryRequestOptions | string', ACCEPTED],
     ['AnyOptions', 'RetryRequestOptions', REFUSED],
     ['RequestOptions | string', 'AnyOptions', ACCEPTED],
-    // a generic's argument is not read behind its alias either
-    ['Promise<PetId>', 'Promise<AnyId>', REFUSED],
+    // behind a promise as anywhere else, and not behind a generic of the SDK's own
+    ['Promise<PetId>', 'Promise<AnyId>', ACCEPTED],
+    ['Promise<AnyId>', 'Promise<PetId>', REFUSED],
+    ['Box<PetId>', 'Box<AnyId>', REFUSED],
     // an alias that stands for itself has nothing behind it
     ['Loop', 'string', REFUSED],
     ['string', 'Loop', REFUSED],

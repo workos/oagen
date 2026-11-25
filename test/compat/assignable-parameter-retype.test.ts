@@ -654,21 +654,84 @@ retypes('#752 what stands around the type of a TypeScript parameter', [
     ),
     new: 'options: Promise<NewOptions%>',
   },
-  // A generic's argument is not read into: whether a `Box<Old>` is taken
-  // where a `Box<New>` is expected depends on how `Box` uses it.
+  // A readonly array takes a writable one, not the other way around.
+  swap(
+    'a readonly array of each',
+    'timeout?: number',
+    'timeout?: number; maxRetries?: number',
+    SOFT_RISK,
+    'options: readonly %%[]',
+  ),
+  {
+    ...swap(
+      'a writable array to a readonly one',
+      'timeout?: number',
+      'timeout?: number; maxRetries?: number',
+      SOFT_RISK,
+    ),
+    old: 'options: OldOptions%[]',
+    new: 'options: readonly NewOptions%[]',
+  },
+  {
+    ...swap(
+      'a readonly array to a writable one',
+      'timeout?: number',
+      'timeout?: number; maxRetries?: number',
+      BREAKING,
+    ),
+    old: 'options: readonly OldOptions%[]',
+    new: 'options: NewOptions%[]',
+  },
+  // A generic known to hand its argument back (#750's list) is read through
+  // as an array is.
   swap(
     'a promise of each',
     'timeout?: number',
     'timeout?: number; maxRetries?: number',
-    BREAKING,
+    SOFT_RISK,
     'options: Promise<%%>',
   ),
+  swap('a promise of each, a member made required', 'name?: string', 'name: string', BREAKING, 'options: Promise<%%>'),
+  swap(
+    'a promise of an array of each',
+    'timeout?: number',
+    'timeout?: number; maxRetries?: number',
+    SOFT_RISK,
+    'options: Promise<%%[]>',
+  ),
+  swap('a set of each', 'timeout?: number', 'timeout?: number; maxRetries?: number', SOFT_RISK, 'options: Set<%%>'),
+  swap(
+    'a readonly set of each',
+    'timeout?: number',
+    'timeout?: number; maxRetries?: number',
+    SOFT_RISK,
+    'options: ReadonlySet<%%>',
+  ),
+  // Any other generic is not: whether a `Sink<Old>` is taken where a
+  // `Sink<New>` is expected depends on how `Sink` uses its argument.
+  {
+    ...swap(
+      "the SDK's own generic that takes its argument",
+      'name: string',
+      'name?: string',
+      BREAKING,
+      'sink: Sink%<%%>',
+    ),
+    shared: 'export interface Sink%<T> { accept(value: T): void }\nexport interface OldOptions% { name: string }',
+  },
   swap(
     'a record of each',
     'timeout?: number',
     'timeout?: number; maxRetries?: number',
     BREAKING,
     'options: Record<string, %%>',
+  ),
+  swap(
+    'a map of each',
+    'timeout?: number',
+    'timeout?: number; maxRetries?: number',
+    BREAKING,
+    'options: Map<string, %%>',
   ),
   swap('Partial of each', 'timeout: number', 'timeout: number; maxRetries: number', BREAKING, 'options: Partial<%%>'),
   swap(
@@ -677,13 +740,6 @@ retypes('#752 what stands around the type of a TypeScript parameter', [
     'timeout?: number; maxRetries?: number',
     BREAKING,
     'options: [%%, string]',
-  ),
-  swap(
-    'a readonly array of each',
-    'timeout?: number',
-    'timeout?: number; maxRetries?: number',
-    BREAKING,
-    'options: readonly %%[]',
   ),
   // `(value: Old) => void` is not a `(value: New) => void` when `New` takes more.
   swap('a callback handed each', 'name: string', 'name?: string', BREAKING, 'handle: (value: %%) => void'),

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { bareTypeName, objectTypeMembers, soleTypeName, unionMembers } from '../../src/compat/type-names.js';
+import {
+  bareTypeName,
+  genericWrapperOf,
+  objectTypeMembers,
+  singleArgumentGeneric,
+  soleTypeName,
+  unionMembers,
+} from '../../src/compat/type-names.js';
 
 /**
  * `bareTypeName` reads the declared type a recorded type text names. #751:
@@ -659,6 +666,60 @@ describe('soleTypeName (#752)', () => {
   it('refuses the PHP union `bareTypeName` reads as its last member', () => {
     expect(bareTypeName('\\Acme\\Other|\\Acme\\Foo')).toBe('Foo');
     expect(soleTypeName('\\Acme\\Other|\\Acme\\Foo')).toBeUndefined();
+  });
+});
+
+describe('singleArgumentGeneric (#752)', () => {
+  it.each<[string, string, string]>([
+    ['Promise<Foo>', 'Promise', 'Foo'],
+    ['  Promise<Foo>  ', 'Promise', 'Foo'],
+    ['Promise<Foo | null>', 'Promise', 'Foo | null'],
+    ['Promise<Foo[]>', 'Promise', 'Foo[]'],
+    ['Promise<Set<Foo>>', 'Promise', 'Set<Foo>'],
+    ['Promise<{ a: A; b: B; }>', 'Promise', '{ a: A; b: B; }'],
+    ['Promise<[A, B]>', 'Promise', '[A, B]'],
+    ['Promise<Record<string, Foo>>', 'Promise', 'Record<string, Foo>'],
+    ['Promise<(a: A, b: B) => void>', 'Promise', '(a: A, b: B) => void'],
+    ['Promise<"a,b">', 'Promise', '"a,b"'],
+    ['Sequence[Foo]', 'Sequence', 'Foo'],
+    ['typing.Sequence[Foo | None]', 'typing.Sequence', 'Foo | None'],
+    ['Optional[Foo]', 'Optional', 'Foo'],
+  ])('%j is %j around %j', (text, generic, argument) => {
+    expect(singleArgumentGeneric(text)).toEqual({ generic, argument });
+  });
+
+  it.each([
+    ['Foo'],
+    ['Foo[]'],
+    ['Promise<Foo>[]'],
+    ['Promise<Foo> | null'],
+    ['Promise<A> | Promise<B>'],
+    ['Promise<A> & Extra<B>'],
+    ['Record<string, Foo>'],
+    ['Map<K, V>'],
+    ['Promise<>'],
+    ['Promise< >'],
+    ['Promise<Foo'],
+    ['Promise<Foo>>'],
+    ['<Foo>'],
+    ['[Foo]'],
+    ['{ a: Promise<Foo>; }'],
+    ['() => Promise<Foo>'],
+    ['?Promise<Foo>'],
+    [''],
+  ])('%j is not one generic around one argument', (text) => {
+    expect(singleArgumentGeneric(text)).toBeUndefined();
+  });
+
+  it('reads the generic `genericWrapperOf` (#750) reads, where that one reads any', () => {
+    for (const text of ['Promise<Foo>', 'models.Page[Foo]', 'List<Foo>', 'Iterator[*Foo]']) {
+      expect(singleArgumentGeneric(text)?.generic).toBe(genericWrapperOf(text));
+    }
+    // That reader looks through an optional spelling and an array to find
+    // its generic; this one takes a text that is the generic itself.
+    expect(genericWrapperOf('Promise<Foo>[]')).toBe('Promise');
+    expect(genericWrapperOf('Promise<Foo[]>')).toBeUndefined();
+    expect(singleArgumentGeneric('Promise<Foo[]>')).toEqual({ generic: 'Promise', argument: 'Foo[]' });
   });
 });
 

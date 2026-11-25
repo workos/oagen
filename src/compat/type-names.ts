@@ -9,13 +9,13 @@
  * answers; `genericWrapperOf` says which generic it read the name through.
  * `typeNamesIn` reads every name a text mentions, for following a type to the
  * types it is built from, and `supertypeName` reads a declared supertype's
- * entry. Three more read a parameter's type, to ask whether its new text
+ * entry. Four more read a parameter's type, to ask whether its new text
  * accepts every value of its old one: `unionMembers` takes a union apart,
- * `objectTypeMembers` an object type written in place, and `soleTypeName`
- * reads the name of a text that is one declared type and nothing a caller
- * would have to wrap a value in. All of them read text only: they take no
- * language and no snapshot, so the same text reads the same whichever
- * extractor wrote it.
+ * `objectTypeMembers` an object type written in place and
+ * `singleArgumentGeneric` a generic, and `soleTypeName` reads the name of a
+ * text that is one declared type and nothing a caller would have to wrap a
+ * value in. All of them read text only: they take no language and no
+ * snapshot, so the same text reads the same whichever extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -166,6 +166,24 @@ export function handsBackItsArgument(genericName: string): boolean {
   );
 }
 
+/**
+ * A generic around one argument, taken apart: `Promise<Foo | null>` is
+ * `Promise` around `Foo | null`, `typing.Sequence[Foo]` is `typing.Sequence`
+ * around `Foo`. The argument is whatever stands in the brackets, where
+ * `genericWrapperOf` reads a generic only around a plain name; the generic's
+ * name is as written, as `handsBackItsArgument` takes it.
+ *
+ * Undefined for a text that is not one generic around one argument: a plain
+ * name, a generic with several (`Record<string, Foo>`), a union or an
+ * intersection of generics, an array of one.
+ */
+export function singleArgumentGeneric(typeText: string): { generic: string; argument: string } | undefined {
+  const text = typeText.trim();
+  const argument = (ANGLE_GENERIC.exec(text) ?? SQUARE_GENERIC.exec(text))?.[1];
+  if (argument === undefined || argument.trim() === '' || splitTopLevel(argument, ',')?.length !== 1) return undefined;
+  return { generic: text.slice(0, text.length - argument.length - 2), argument };
+}
+
 /** A name as a type text writes it, alone or under a module path:
  *  `Foo`, `models.Foo`, `crate::models::Foo`, `\Acme\Foo`. */
 const NAME_PATH = /\\?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::|\\)[A-Za-z_$][A-Za-z0-9_$]*)*/y;
@@ -290,13 +308,12 @@ export function supertypeName(entry: string): string | undefined {
  * `?Foo`, `Optional[Foo]`, `Foo[]`, `(Foo | null)[]`, `\Acme\Foo`.
  *
  * `bareTypeName` also reads a name out of a generic's argument
- * (`Promise<Foo>`, `List<Foo>`), which suits a value callers read: whatever
- * the wrapper, they get a `Foo` out of it. For a value callers pass it does
- * not: whether a `Box<Old>` is accepted where a `Box<New>` is expected depends
- * on how `Box` uses its argument (a list that is written to, a callback's
- * parameter), which no snapshot says. So a text under a generic names no type
- * here, as a union of several types, a dotted path and an object or function
- * type name none in either reader.
+ * (`Promise<Foo>`, `List<Foo>`). Where a value is accepted by the type it was
+ * declared as, a generic of the subtype is not one of the supertype unless
+ * the generic says so: Python's `list[Sub]` is no `list[Base]`, nor is C#'s
+ * `List<Sub>` a `List<Base>`, since a list is written to as well as read. So
+ * a text under a generic names no type here, as a union of several types, a
+ * dotted path and an object or function type name none in either reader.
  */
 export function soleTypeName(typeText: string): string | undefined {
   let text = presentType(typeText.trim());
