@@ -1432,6 +1432,26 @@ function withLevelsFormat(ref: TypeRef, levels: () => readonly SchemaObject[]): 
 }
 
 /**
+ * `ref` taking a `format` from `entries` — the schemas a reference passes
+ * on its way to the one the type is built from, nearest first — as the
+ * type builder gives one to a type it builds through them one by one: the
+ * innermost first, each read with the entries inside it, as a site reads
+ * every level its limits are conjoined from (`shapeLevels`), so the format
+ * written nearest the type stands (`withTypeFormat`). For a type built
+ * once from the last entry and never through the others: the union of a
+ * model component that admits other types, whose aliases are entries of
+ * its chain and no sites of their own (`multiTypeModelTypeRef`; Greptile,
+ * #749: the chain was read as one level, so `Alias: { allOf: [{ $ref:
+ * Owner }, { format: 'date-time' }] }` over an `Owner` whose string is a
+ * `uuid` gave the string no format, where a `$ref` to `Owner` gives it
+ * `uuid`).
+ */
+function withEntryFormats(ref: TypeRef, entries: readonly SchemaObject[]): TypeRef {
+  for (let from = entries.length - 1; from >= 0; from--) withLevelsFormat(ref, () => entries.slice(from));
+  return ref;
+}
+
+/**
  * `ref` carrying `format` wherever a node of it can take one and has none
  * (`formatless`): what a site gives the type built for it, the format it
  * writes apart from the `type` (#745). A node that has a format keeps it,
@@ -11517,8 +11537,8 @@ export function componentTypeRef(key: string): TypeRef {
  * (`OwnerAlias | string`). The union carries the limits of every entry the
  * reference passes, the declaring component's first (`extractConstraints`),
  * as a `$ref` site reads them (`limitReference`), and its primitive
- * members the `format` those entries write, where they have none
- * (`withLevelsFormat`; #745).
+ * members the `format` those entries write, where they have none, the
+ * declaring component's before an alias's (`withEntryFormats`; #745).
  *
  * A component reached again while its own other types are being typed —
  * `Tree: { type: ['array', 'object'], items: { $ref: Tree }, properties }`,
@@ -11544,7 +11564,8 @@ function multiTypeModelTypeRef(key: string, modelRef: ModelRef): TypeRef {
   resolvingMultiTypeModels.add(owner.key);
   try {
     return withTypeConstraints(
-      withLevelsFormat(multiTypeMembers(owner.declaration, owner.name, modelRef, owner.items, others), () =>
+      withEntryFormats(
+        multiTypeMembers(owner.declaration, owner.name, modelRef, owner.items, others),
         multiTypeModelEntries(chain, activeComponentSchemas),
       ),
       multiTypeModelLimits(chain, activeComponentSchemas),

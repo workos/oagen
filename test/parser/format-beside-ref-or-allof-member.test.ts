@@ -700,6 +700,84 @@ describe('#745 formats that disagree', () => {
     `);
   });
 
+  it('takes a format through a chain of aliases alike, whatever the component is', async () => {
+    // A string, a type list of primitives and a model that admits a string,
+    // each named through `Base` -> `Alias` -> `AliasAlias` -> the field, with
+    // a format or none at each of the four places: the string takes the one
+    // written nearest the component, in all three (Greptile, #749: the model's
+    // chain was read as one level, so two formats on it gave none).
+    const kinds: Record<string, Schema> = {
+      string,
+      'a type list': { type: ['string', 'boolean'] },
+      'a model that admits a string': { type: ['object', 'string'], properties: { name: string } },
+    };
+    const FORMATS = [undefined, 'uuid', 'date-time'] as const;
+    const f = (format: string | undefined) => (format ? { format } : {});
+    const stringOf = (type: TypeRef | undefined): string => {
+      if (type?.kind === 'nullable') return stringOf(type.inner);
+      if (type?.kind === 'union')
+        return stringOf(type.variants.find((v) => v.kind === 'primitive' && v.type === 'string'));
+      return type?.kind === 'primitive' ? (type.format ?? 'none') : 'no string';
+    };
+    for (const beside of [true, false]) {
+      for (const f0 of FORMATS) {
+        for (const f1 of FORMATS) {
+          for (const f2 of FORMATS) {
+            for (const f3 of FORMATS) {
+              const formats: string[] = [];
+              for (const base of Object.values(kinds)) {
+                const spec = await parse(
+                  createNote('3.1.0', {
+                    Base: beside ? { ...base, ...f(f0) } : { ...base, allOf: [f(f0)] },
+                    Alias: { allOf: [ref('Base'), f(f1)] },
+                    AliasAlias: { allOf: [ref('Alias')], ...f(f2) },
+                    Note: note({ ...ref('AliasAlias'), ...f(f3) }),
+                  }),
+                );
+                formats.push(stringOf(fieldType(spec)));
+              }
+              const label = `${beside ? 'beside the type' : 'in a member'}: ${[f0, f1, f2, f3].join(' / ')}`;
+              expect(formats, label).toEqual(Array(3).fill(f0 ?? f1 ?? f2 ?? f3 ?? 'none'));
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('keeps the format a model that admits a string writes, under an alias that writes another', async () => {
+    const owner = (extra: Schema) => ({ type: ['object', 'string'], properties: { name: string }, ...extra });
+    expect(
+      await table([
+        ['the model', ref('Owner'), { Owner: owner({ allOf: [{ format: 'uuid' }] }) }],
+        [
+          'an alias that writes another',
+          ref('Alias'),
+          { Owner: owner({ allOf: [{ format: 'uuid' }] }), Alias: { allOf: [ref('Owner'), { format: 'date-time' }] } },
+        ],
+        [
+          'an alias of an alias that formats',
+          ref('AliasAlias'),
+          {
+            Owner: owner({}),
+            Alias: { allOf: [ref('Owner'), { format: 'date-time' }] },
+            AliasAlias: { allOf: [ref('Alias'), { format: 'uuid' }] },
+          },
+        ],
+        [
+          'an alias that writes two',
+          ref('Alias'),
+          { Owner: owner({}), Alias: { allOf: [ref('Owner'), { format: 'uuid' }, { format: 'date-time' }] } },
+        ],
+      ]),
+    ).toMatchInlineSnapshot(`
+      "the model: (Owner | string(uuid))
+      an alias that writes another: (Alias | string(uuid))
+      an alias of an alias that formats: (AliasAlias | string(date-time))
+      an alias that writes two: (Alias | string)"
+    `);
+  });
+
   it('reads no format from levels that write two, in either order', async () => {
     // No one format describes a value two levels format differently, and
     // neither is nearer the type than the other.
@@ -723,6 +801,36 @@ describe('#745 formats that disagree', () => {
       a member and the allOf itself: string
       two members beside a $ref: string
       two members that agree: string(uuid)"
+    `);
+  });
+});
+
+describe('#745 a schema around levels that disagree', () => {
+  it('reads them again with its own, and gives no format either', async () => {
+    // A site reads every level its limits are conjoined from: the entries a
+    // `$ref` passes, a wrapper's branch, a member's own members. Two formats
+    // among them are two formats to every schema around them.
+    const Clash = { Text: string, Clash: { allOf: [ref('Text'), { format: 'uuid' }, { format: 'date-time' }] } };
+    expect(
+      await table([
+        ['a component whose members disagree', ref('Clash'), Clash],
+        ['a format beside a $ref to it', { ...ref('Clash'), format: 'time' }, Clash],
+        ['a format in a member beside a $ref to it', { allOf: [ref('Clash'), { format: 'time' }] }, Clash],
+        [
+          'a format beside a wrapper whose branch disagrees',
+          { oneOf: [{ ...string, allOf: [{ format: 'uuid' }, { format: 'date-time' }] }, nil], format: 'time' },
+        ],
+        [
+          'a format beside an allOf whose member disagrees',
+          { allOf: [{ ...string, allOf: [{ format: 'uuid' }, { format: 'date-time' }] }], format: 'time' },
+        ],
+      ]),
+    ).toMatchInlineSnapshot(`
+      "a component whose members disagree: string
+      a format beside a $ref to it: string
+      a format in a member beside a $ref to it: string
+      a format beside a wrapper whose branch disagrees: nullable<string>
+      a format beside an allOf whose member disagrees: string"
     `);
   });
 });
