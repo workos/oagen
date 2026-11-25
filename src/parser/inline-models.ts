@@ -5949,13 +5949,28 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
  * `patternProperties` entry. `additionalProperties: {}` means "any value"
  * (typed `unknown`, nothing to extract) and does not fall through to
  * `patternProperties`, matching the type-ref branch.
+ *
+ * `additionalProperties: false` allows no member but the patterns', so the
+ * values are the first pattern's, and so they are under a `$ref` that
+ * leads to that `false` (`isDeclaredProperty`; #746: the `$ref` is an
+ * object, so it was the value schema, `unknown`, and `{ patternProperties:
+ * { '^x-': { type: 'string' } }, additionalProperties: { $ref: Never } }`
+ * was `map<unknown>` where `additionalProperties: false` leaves
+ * `map<string>`). With no pattern to type the values, such a `$ref` is
+ * the value schema it was, read for a type: `unknown`, as `false` there
+ * leaves the values. `componentSchemas` is the map the `$ref` is resolved
+ * in, the document's own when none is handed.
  */
-export function mapValueSchema(schema: SchemaObject): SchemaObject | null {
+export function mapValueSchema(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | null {
   const additional = schema.additionalProperties;
-  if (additional && typeof additional === 'object') {
+  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
+  const leftToPatterns = patterns.length > 0 && !isDeclaredProperty(additional, componentSchemas);
+  if (additional && typeof additional === 'object' && !leftToPatterns) {
     return Object.keys(additional).length > 0 ? additional : null;
   }
-  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
   return patterns[0] ?? null;
 }
 
