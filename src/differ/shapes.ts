@@ -1,7 +1,7 @@
 import type { ApiSpec, Enum, Model, TypeRef } from '../ir/types.js';
 import { typeRefConstraints } from '../ir/types.js';
 import { classifyConstraintsChange } from './classify.js';
-import { constraintsShift, type ConstrainedSite, type VariantPairing } from './constraints.js';
+import { constraintsShift, type ConstrainedSite } from './constraints.js';
 import { sameCompositionKinds, typeRefsEqual } from './models.js';
 
 /** The named types of one document, so a body's model or enum ref can be read through to its shape. */
@@ -217,7 +217,7 @@ export type BodySide = 'reader' | 'writer';
  *   (`classifyConstraintsChange`): tightened is incompatible for a writer,
  *   since a value it sends can be rejected, and any change is compatible
  *   for a reader. The levels are compared in the pairs the shape
- *   comparison made (`limitsBreak`);
+ *   comparison made (`limitsBreak`), a named union's variants' included;
  * - the model's type parameters are the same, and so are a named union's
  *   composition keyword, variants and discriminator, each variant and
  *   mapped model one shape; its deprecation does not count, so a body can
@@ -254,7 +254,7 @@ export function compatibleShape(oldType: TypeRef, newType: TypeRef, side: BodySi
   return (
     compatibleWithin(oldType, newType, side, shapes) &&
     // The limits the body's own type carries around its models, level by level in the pairs just made.
-    !limitsBreak({ type: oldType }, { type: newType }, side, 'inOrder')
+    !limitsBreak({ type: oldType }, { type: newType }, side)
   );
 }
 
@@ -302,51 +302,44 @@ function compatibleModel(oldModel: Model, newModel: Model, side: BodySide, shape
     ) {
       return false;
     }
-    // Two types the differ reads as one pair their variants as it pairs them
-    // on any field; two that are one shape under other names were matched
-    // in order.
-    const pairing = typeRefsEqual(oldField.type, newField.type) ? 'byType' : 'inOrder';
-    if (limitsBreak(oldField, newField, side, pairing)) return false;
+    if (limitsBreak(oldField, newField, side)) return false;
   }
   // A required field the old model lacks is one more thing a writer must send.
   if (side === 'writer' && newModel.fields.some((field) => field.required && !oldNames.has(field.name))) return false;
-  if (limitsBreak(oldModel, newModel, side, 'byType')) return false;
+  if (limitsBreak(oldModel, newModel, side)) return false;
   if (
     stableStringify(omitKeys(oldModel, MODEL_LENIENT_KEYS)) !== stableStringify(omitKeys(newModel, MODEL_LENIENT_KEYS))
   ) {
     return false;
   }
   if (!!oldModel.variants !== !!newModel.variants) return false;
-  if (
-    oldModel.variants &&
-    newModel.variants &&
-    (!sameVariantLimits(oldModel.variants, newModel.variants) ||
-      !sameVariants(oldModel.variants, newModel.variants, shapes, new Set(), 'alike'))
-  ) {
-    return false;
+  if (oldModel.variants && newModel.variants) {
+    if (!sameVariants(oldModel.variants, newModel.variants, shapes, new Set(), 'alike')) return false;
+    // A named union's variants carry limits as a field's union does, and are judged the same way.
+    const [before, after] = [oldModel.variants, newModel.variants].map((variants): TypeRef => ({
+      kind: 'union',
+      variants,
+    }));
+    if (limitsBreak({ type: before }, { type: after }, side)) return false;
   }
   return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, new Set(), 'alike');
 }
 
 /**
  * Whether the limits moved between two sites in a way that breaks `side`:
- * tightened, for a writer (`classifyConstraintsChange`). `pairing` is how
- * the two types' union variants were matched by the comparison that read
- * them as one type, so that every level it accepted is a level compared
- * here: by type for two the differ reads as one, in order for two that
- * are one shape under other names.
+ * tightened, for a writer (`classifyConstraintsChange`). The two types
+ * were read as one shape, so their unions' variants were matched in order,
+ * some under other names; the levels are compared in both pairings that
+ * keep each old variant with a new one of its shape (`VariantPairing`:
+ * `inOrder` and `byTypeThenOrder`), and the limits tightened only when
+ * both find a level that did. Either one finding none shows the new type
+ * admits every value the old one did.
  */
-function limitsBreak(
-  oldSite: ConstrainedSite,
-  newSite: ConstrainedSite,
-  side: BodySide,
-  pairing: VariantPairing,
-): boolean {
-  const shift = constraintsShift(oldSite, newSite, pairing);
-  return (
-    shift !== undefined &&
-    classifyConstraintsChange(shift.tightened, side === 'reader' ? 'response' : 'request') === 'breaking'
+function limitsBreak(oldSite: ConstrainedSite, newSite: ConstrainedSite, side: BodySide): boolean {
+  const tightened = (['inOrder', 'byTypeThenOrder'] as const).every(
+    (pairing) => constraintsShift(oldSite, newSite, pairing)?.tightened === true,
   );
+  return classifyConstraintsChange(tightened, side === 'reader' ? 'response' : 'request') === 'breaking';
 }
 
 /** The same `property` and mapping keys, each key's two targets compatible on `side`; absent on both sides is compatible too. */

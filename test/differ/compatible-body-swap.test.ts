@@ -615,6 +615,36 @@ describe('#753 a body moved to a model that still serves its reader or its write
       }
     });
 
+    it('reads two string variants that changed places with a `pattern` as the same union, beside the move (Greptile, #758 review round 2)', async () => {
+      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
+      const patterned = { type: 'string', pattern: '^pet_' };
+      const classified = async (site: Site, before: Schema, after: Schema) =>
+        bodyChange(
+          await diffDocuments(
+            siteDocument(openapi, site, schemas, before),
+            siteDocument(openapi, site, schemas, after),
+          ),
+        ).classification;
+      for (const site of Object.values(sites)) {
+        // The finding: `anyOf: [Pet, { anyOf: [patterned, string] }]` → `anyOf: [Pet2, { anyOf: [string, patterned] }]`.
+        expect(
+          await classified(
+            site,
+            { anyOf: [ref('Pet'), { anyOf: [patterned, string] }] },
+            { anyOf: [ref('Pet2'), { anyOf: [string, patterned] }] },
+          ),
+          site.side,
+        ).toBe('additive');
+      }
+      // A `pattern` the old union did not have rejects a request it accepted.
+      const added = [
+        { anyOf: [ref('Pet'), { anyOf: [{ type: 'integer' }, string] }] },
+        { anyOf: [ref('Pet2'), { anyOf: [{ type: 'integer' }, patterned] }] },
+      ] as const;
+      expect(await classified(sites.request, ...added)).toBe('breaking');
+      expect(await classified(sites.response, ...added)).toBe('additive');
+    });
+
     it('judges the limits of the body’s own array by side, as a field’s are', async () => {
       const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
       const array = (name: string, maxItems?: number): Schema => ({
@@ -1473,6 +1503,70 @@ describe('#753 compatibleShape', () => {
     expect(judge(str, int)).toEqual(neither);
     expect(judge({ kind: 'literal', value: 'a' }, { kind: 'literal', value: 'b' })).toEqual(neither);
     expect(judge(a, str)).toEqual(neither);
+  });
+
+  it('reads two variants of one type that changed places with their limits as the same union, beside a moved one (Greptile, #758 review round 2)', () => {
+    const patterned: TypeRef = { ...str, constraints: { pattern: '^pet_' } };
+    const union = (variants: TypeRef[]): TypeRef => ({ kind: 'union', compositionKind: 'anyOf', variants });
+    const grown: Model = { name: 'Pet2', fields: [...pet.fields, field('tag', str, false)] };
+    const shapes = shapesOf({ models: [pet] }, { models: [pet, grown] });
+    const judge = (a: TypeRef, b: TypeRef, documents = shapes) => ({
+      reader: compatibleShape(a, b, 'reader', documents),
+      writer: compatibleShape(a, b, 'writer', documents),
+    });
+    const readerOnly = { reader: true, writer: false };
+    const [a, b] = [model('Pet'), model('Pet2')];
+    // The finding: the inner union admits the same strings, its variants written the other way round.
+    expect(judge(union([a, union([patterned, str])]), union([b, union([str, patterned])]))).toEqual(both);
+    // The same in the union the moved variant is in.
+    expect(judge(union([a, patterned, str]), union([b, str, patterned]))).toEqual(both);
+    expect(judge(union([patterned, a, str]), union([str, b, patterned]))).toEqual(both);
+    // A `pattern` really added is still read, wherever it is written, and one dropped is loosened.
+    expect(judge(union([a, str, str]), union([b, str, patterned]))).toEqual(readerOnly);
+    expect(judge(union([a, str, str]), union([b, patterned, str]))).toEqual(readerOnly);
+    expect(judge(union([a, union([str, str])]), union([b, union([patterned, str])]))).toEqual(readerOnly);
+    expect(judge(union([a, patterned, str]), union([b, str, str]))).toEqual(both);
+    // Under a field, beside a variant that is one shape under another name.
+    const child = (name: string): Model => ({ name, fields: [field('id', str, true)] });
+    const array = (name: string, maxItems?: number): TypeRef => ({
+      kind: 'array',
+      items: model(name),
+      ...(maxItems === undefined ? {} : { constraints: { maxItems } }),
+    });
+    const holder = (name: string, variants: TypeRef[]): Model => ({
+      name,
+      fields: [field('value', union(variants), true)],
+    });
+    const under = (before: TypeRef[], after: TypeRef[]) => {
+      const declared = [child('Child'), child('ChildCopy'), holder('Pet', before)];
+      return judge(a, b, shapesOf({ models: declared }, { models: [...declared, holder('Pet2', after)] }));
+    };
+    expect(under([array('Child'), patterned, str], [array('ChildCopy'), str, patterned])).toEqual(both);
+    expect(under([array('Child', 10), patterned, str], [array('ChildCopy', 5), str, patterned])).toEqual(readerOnly);
+    expect(under([array('Child', 5), patterned, str], [array('ChildCopy', 10), str, patterned])).toEqual(both);
+    // Two variants that are one shape under each other's name, their limits kept in place.
+    expect(under([array('Child', 10), array('ChildCopy', 5)], [array('ChildCopy', 10), array('Child', 5)])).toEqual(
+      both,
+    );
+    expect(under([array('Child', 10), array('ChildCopy', 5)], [array('ChildCopy', 5), array('Child', 5)])).toEqual(
+      readerOnly,
+    );
+    // A named union's variants are read the same way.
+    const named = (name: string, variants: TypeRef[]): Model => ({
+      name,
+      fields: [],
+      variants,
+      compositionKind: 'anyOf',
+    });
+    const moved = (before: TypeRef[], after: TypeRef[]) =>
+      judge(
+        model('Code'),
+        model('Code2'),
+        shapesOf({ models: [named('Code', before)] }, { models: [named('Code', before), named('Code2', after)] }),
+      );
+    expect(moved([patterned, str], [str, patterned])).toEqual(both);
+    expect(moved([str, int], [patterned, int])).toEqual(readerOnly);
+    expect(moved([patterned, int], [str, int])).toEqual(both);
   });
 
   it('compares a named union’s variants and a dispatcher’s mapping as `sameShape` does', () => {
