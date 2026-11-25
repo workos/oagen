@@ -380,16 +380,16 @@ retypes('#752 a TypeScript parameter retyped between two interfaces', [
     expected: SOFT_RISK,
   },
   {
-    // The declaration vouches for the member's type, which a compiler checked.
+    // A literal type is not read as its primitive would take it, and the
+    // declaration between the two does not vouch for it.
     name: 'the old type extends the new one and only narrows a member',
     shared:
       "export interface BaseOptions% { mode?: string }\nexport interface StrictOptions% extends BaseOptions% { mode?: 'fast' | 'slow' }",
     old: 'options?: StrictOptions%',
     new: 'options?: BaseOptions%',
-    expected: SOFT_RISK,
+    expected: BREAKING,
   },
   {
-    // Without it, a literal type is not read as its primitive would take it.
     name: 'the same two shapes without the extends clause',
     shared:
       "export interface BaseOptions% { mode?: string }\nexport interface StrictOptions% { mode?: 'fast' | 'slow' }",
@@ -442,13 +442,29 @@ retypes('#752 a TypeScript parameter retyped between two interfaces', [
     expected: BREAKING,
   },
   {
-    // Not settled: the two types come back to their own pair through a member.
+    // The two types come back to their own pair through a member, which
+    // holds unless a member says otherwise.
     name: 'types that refer to themselves',
     shared: OLD('children?: OldOptions%[]; depth?: number'),
     newOnly: NEW('children?: NewOptions%[]; depth?: number; label?: string'),
     old: 'options: OldOptions%',
     new: 'options: NewOptions%',
+    expected: SOFT_RISK,
+  },
+  {
+    name: 'types that refer to themselves, a member of the new one required',
+    shared: OLD('children?: OldOptions%[]; depth?: number'),
+    newOnly: NEW('children?: NewOptions%[]; depth?: number; root: string'),
+    old: 'options: OldOptions%',
+    new: 'options: NewOptions%',
     expected: BREAKING,
+  },
+  {
+    name: 'a type that refers to itself, made optional',
+    shared: OLD('children?: OldOptions%[]; depth?: number'),
+    old: 'options: OldOptions%',
+    new: 'options?: OldOptions%',
+    expected: SOFT_RISK,
   },
 ]);
 
@@ -540,18 +556,17 @@ retypes('#752 however a TypeScript type is declared', [
     expected: SOFT_RISK,
   },
   {
-    // Printed as `{ timeout?: number | undefined; }`. Beside an interface the
-    // `undefined` of an optional member is left out, as the interface's is.
+    // Printed as `{ timeout?: number | undefined; }`: whether that `undefined`
+    // is TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text
+    // does not say, and a declared type's field is recorded without the
+    // first only.
     name: 'a shape written in place with an optional member, to an interface',
     newOnly: 'export interface RequestOptions% { timeout?: number; maxRetries?: number }',
     old: 'options: { timeout?: number }',
     new: 'options: RequestOptions%',
-    expected: SOFT_RISK,
+    expected: BREAKING,
   },
   {
-    // Beside a type alias it is weighed as written: whether it is
-    // TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text does
-    // not say, and an alias's member is recorded without the first only.
     name: 'a shape written in place with an optional member, to a type alias',
     newOnly: 'export type RequestOptions% = { timeout?: number; maxRetries?: number };',
     old: 'options: { timeout?: number }',
@@ -949,6 +964,96 @@ retypes('#752 a TypeScript parameter typed by a type alias of a union', [
   },
 ]);
 
+retypes('#752 a TypeScript parameter whose text keeps a name that changed', [
+  {
+    // `get([1])` compiles against the old SDK alone, and a type alias's text
+    // is compared nowhere else: the parameter's line is the only one.
+    name: 'an alias that lost a member, in a parameter that became nullable',
+    oldOnly: 'export type Id% = string | number;',
+    newOnly: 'export type Id% = string | boolean;',
+    old: 'ids: Id%[]',
+    new: 'ids: Id%[] | null',
+    expected: BREAKING,
+  },
+  {
+    name: 'an alias that gained a member, in a parameter that became nullable',
+    oldOnly: 'export type Id% = string | number;',
+    newOnly: 'export type Id% = string | number | boolean;',
+    old: 'ids: Id%[]',
+    new: 'ids: Id%[] | null',
+    expected: SOFT_RISK,
+  },
+  {
+    name: 'an alias that lost a member, under a generic that is not taken apart',
+    oldOnly: 'export type Id% = string | number;',
+    newOnly: 'export type Id% = string;',
+    old: 'ids: Record<string, Id%>',
+    new: 'ids?: Record<string, Id%>',
+    expected: BREAKING,
+  },
+  {
+    name: 'an unchanged alias, under a generic that is not taken apart',
+    shared: 'export type Id% = string | number;',
+    old: 'ids: Record<string, Id%>',
+    new: 'ids?: Record<string, Id%>',
+    expected: SOFT_RISK,
+  },
+  {
+    // A `Partial` of the type changes with the type.
+    name: 'an interface that lost a member, under `Partial`, in a parameter that became optional',
+    oldOnly: OLD('timeout?: number; maxRetries?: number'),
+    newOnly: OLD('timeout?: number'),
+    old: 'options: Partial<OldOptions%>',
+    new: 'options?: Partial<OldOptions%>',
+    expected: BREAKING,
+  },
+  {
+    name: 'an unchanged interface, under `Partial`, in a parameter that became optional',
+    shared: OLD('timeout?: number; maxRetries?: number'),
+    old: 'options: Partial<OldOptions%>',
+    new: 'options?: Partial<OldOptions%>',
+    expected: SOFT_RISK,
+  },
+  {
+    name: 'an alias that lost a member, among the keys of a `Pick`',
+    shared: OLD('timeout?: number; maxRetries?: number'),
+    oldOnly: "export type Keys% = 'timeout' | 'maxRetries';",
+    newOnly: "export type Keys% = 'timeout';",
+    old: 'options: Pick<OldOptions%, Keys%>',
+    new: 'options?: Pick<OldOptions%, Keys%>',
+    expected: BREAKING,
+  },
+  {
+    // `symbol_removed` says so too, on the field.
+    name: 'an interface that lost a member, in a parameter that became optional',
+    oldOnly: OLD('timeout?: number; maxRetries?: number'),
+    newOnly: OLD('timeout?: number'),
+    old: 'options: OldOptions%',
+    new: 'options?: OldOptions%',
+    expected: BREAKING,
+  },
+  {
+    name: 'an interface that gained an optional member, in a parameter that became optional',
+    oldOnly: OLD('timeout?: number'),
+    newOnly: OLD('timeout?: number; maxRetries?: number'),
+    old: 'options: OldOptions%',
+    new: 'options?: OldOptions%',
+    expected: SOFT_RISK,
+  },
+  {
+    // Both SDKs are valid: `mode` is narrowed on the base and on the type
+    // that extends it, and the parameter moves to the base. `get({ mode: 1 })`
+    // no longer compiles, whatever the candidate declares between the two.
+    name: 'a member narrowed on the old type and on the base the parameter moves to',
+    oldOnly:
+      'export interface BaseOptions% { mode?: string | number }\nexport interface RetryOptions% extends BaseOptions% {}',
+    newOnly: 'export interface BaseOptions% { mode?: string }\nexport interface RetryOptions% extends BaseOptions% {}',
+    old: 'options: RetryOptions%',
+    new: 'options: BaseOptions%',
+    expected: BREAKING,
+  },
+]);
+
 retypes('#752 a TypeScript parameter whose old type changes in the same release', [
   {
     // Code that names `OldOptions` and sets `tag` no longer passes.
@@ -1022,34 +1127,33 @@ export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
     expect(await retype(strict, '{ name?: string }', '{ name?: string; tag?: string }')).toEqual(GET(SOFT_RISK));
   });
 
-  it('is left out beside an interface, whose optional field is recorded without it either way', async () => {
+  it('is read off an interface as off a type alias: by what the checker resolved', async () => {
     const interfaces = (parameter: string) => `export interface Plain { name?: string }
 export interface OrUndefined { name?: string | undefined }
+export interface Base { name: string }
+export interface Inherited extends Partial<Base> {}
 export type Alias = { name?: string | undefined };
 export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
 `;
-    const modes: Array<Record<string, boolean>> = [
-      { strict: true },
-      { strict: true, exactOptionalPropertyTypes: true },
-    ];
-    for (const compilerOptions of modes) {
-      const between = async (from: string, to: string) =>
-        notAdditive(
-          (
-            await compatDiff(
-              nodeExtractor,
-              sdk(compilerOptions, interfaces(from)),
-              sdk(compilerOptions, interfaces(to)),
-            )
-          ).diff,
-        );
-      // Both interfaces record an optional `string`: the snapshot holds no
-      // difference to weigh, as #750's own comparison of the field holds none.
-      expect(await between('OrUndefined', 'Plain')).toEqual(GET(SOFT_RISK));
-      expect(await between('Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
-      expect(await between('Alias', 'Plain')).toEqual(GET(SOFT_RISK));
-      expect(await between('{ name?: string | undefined }', 'Plain')).toEqual(GET(SOFT_RISK));
-    }
+    const between = async (compilerOptions: Record<string, boolean>, from: string, to: string) =>
+      notAdditive(
+        (await compatDiff(nodeExtractor, sdk(compilerOptions, interfaces(from)), sdk(compilerOptions, interfaces(to))))
+          .diff,
+      );
+
+    // Without the option the two interfaces are one type, whichever way.
+    const strict = { strict: true };
+    expect(await between(strict, 'OrUndefined', 'Plain')).toEqual(GET(SOFT_RISK));
+    expect(await between(strict, 'Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+    expect(await between(strict, 'Alias', 'Plain')).toEqual(GET(SOFT_RISK));
+    // With it an interface's text is `string` for both, as every baseline
+    // holds it, and the resolved type beside it tells them apart.
+    const exact = { strict: true, exactOptionalPropertyTypes: true };
+    expect(await between(exact, 'OrUndefined', 'Plain')).toEqual(GET(BREAKING));
+    expect(await between(exact, 'Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+    expect(await between(exact, 'Alias', 'Plain')).toEqual(GET(BREAKING));
+    expect(await between(exact, 'OrUndefined', 'Alias')).toEqual(GET(SOFT_RISK));
+    expect(await between(exact, '{ name?: string | undefined }', 'Plain')).toEqual(GET(BREAKING));
   });
 
   it('is two types with it: the one that takes `undefined` is not accepted by the one that does not', async () => {
@@ -2353,6 +2457,30 @@ export declare class Pets { getPet(petId: string, options: ${options}): Promise<
     expect(notAdditive((await runCompatCheck(baseline, writeSdk(nodeSdk(sdk('WiderOptions'))), 'node')).diff)).toEqual(
       GET(SOFT_RISK),
     );
+  });
+
+  it('weighs a type the scope leaves out by what it lost, though nothing else reports it', async () => {
+    // `OldOptions` is the SDK's own, so its fields are outside the
+    // comparison: the member it loses is reported nowhere. The parameter that
+    // takes it only becomes optional, and its line is the one that says a
+    // call with `maxRetries` no longer compiles.
+    const same = (optional: string, fields: string) => `export interface Pet { id: string; name: string }
+export interface OldOptions { ${fields} }
+export declare class Pets { getPet(petId: string, options${optional}: OldOptions): Promise<Pet>; }
+`;
+    const baseline = await nodeExtractor.extract(writeSdk(nodeSdk(same('', 'timeout?: number; maxRetries?: number'))));
+    const verify = async (fields: string) =>
+      notAdditive((await runCompatCheck(baseline, writeSdk(nodeSdk(same('?', fields))), 'node', spec)).diff);
+    expect(await verify('timeout?: number; maxRetries?: number')).toEqual([
+      'soft-risk parameter_type_narrowed Pets.getPet',
+    ]);
+    expect(await verify('timeout?: number; maxRetries?: number; signal?: string')).toEqual([
+      'soft-risk parameter_type_narrowed Pets.getPet',
+    ]);
+    expect(await verify('timeout?: number')).toEqual(['breaking parameter_type_narrowed Pets.getPet']);
+    expect(await verify('timeout?: number; maxRetries: number')).toEqual([
+      'breaking parameter_type_narrowed Pets.getPet',
+    ]);
   });
 
   it('would not know the old type from the compared part alone', async () => {

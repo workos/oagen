@@ -30,8 +30,9 @@
  */
 
 import type { DeclaredTypes, RecordedMember, TypeLookup } from './type-graph.js';
-import { declaresSupertype, isObjectAlias, recordedMembers } from './type-graph.js';
+import { declaresSupertype, recordedMembers } from './type-graph.js';
 import {
+  everyNameIn,
   handsBackItsArgument,
   objectTypeMembers,
   singleArgumentGeneric,
@@ -89,7 +90,15 @@ export function acceptsEveryValue(
   // being taken only when the new type accepts both.
   const fields = new Map<string, RetypedPair>();
   const accepts = (oldTypes: TypeLookup): boolean =>
-    acceptsByShape(oldText, newText, { oldTypes, newTypes: context.candidateTypes, verdicts: new Map(), fields });
+    acceptsByShape(oldText, newText, {
+      oldTypes,
+      newTypes: context.candidateTypes,
+      verdicts: new Map(),
+      open: new Set(),
+      assumed: new Set(),
+      settledYes: [],
+      fields,
+    });
   return accepts(context.baselineTypes) && accepts(oldTypesOfCandidate(context))
     ? { rule: 'shape', fields: [...fields.values()] }
     : undefined;
@@ -173,16 +182,24 @@ interface ShapeContext {
   /** Where an old type's name is looked up: the baseline's declared types,
    *  or `oldTypesOfCandidate`. */
   oldTypes: TypeLookup;
-  /** The candidate's declared types, where a new type's name is looked up
-   *  and where a declared supertype is read. */
+  /** The candidate's declared types, where a new type's name is looked up. */
   newTypes: DeclaredTypes;
-  /** The verdict of each pair of union members asked so far, `false` while
-   *  one is being worked out. A pair is settled once however many unions and
-   *  fields lead to it, and a type that refers to itself comes back to a
-   *  pair that is still open, which ends it. */
+  /** The verdict of each pair of union members settled so far: a pair is
+   *  weighed once, however many unions and fields lead to it. */
   verdicts: Map<string, boolean>;
-  /** The pairs of declared object types found to accept each other by their
-   *  fields, for the report to name. */
+  /** The pairs being weighed. Two types that refer to themselves
+   *  (`Tree.children: Tree[]`) come back to their own pair through a field
+   *  while it is open; there it is taken to hold, since it does unless one
+   *  of its fields says otherwise. */
+  open: Set<string>;
+  /** The open pairs something was settled on the strength of. */
+  assumed: Set<string>;
+  /** The pairs settled as accepted, in the order they were: when a pair
+   *  that was taken to hold turns out not to, what was settled since it
+   *  opened is forgotten and weighed again. */
+  settledYes: string[];
+  /** The pairs of different object types found to accept each other by
+   *  their fields, for the report to name. */
   fields: Map<string, RetypedPair>;
 }
 
@@ -255,17 +272,25 @@ function membersBehindAliases(members: readonly string[] | undefined, types: Typ
 }
 
 /**
- * One member of the new union accepts one member of the old:
+ * One member of the new union accepts one member of the old. Each is read for
+ * what it is, the old one in the old snapshot and the new one in the new:
  *
- *  - the same text;
  *  - an array, or a generic that hands its argument back, of a type that
  *    accepts the old one's (`holderAccepts`);
  *  - an object type that keeps the old one's fields (`fieldsAccept`), each
  *    of the two a declared type or written in place.
  *
- * Nothing else is read into: any other generic's argument, a tuple, a
- * function type, a literal a wider type would take (`'asc'` → `string`).
- * Each is accepted as the same text only.
+ * That holds for two members of one text as well: the same name may stand
+ * for two declarations (`Options` that lost a field, `Id[]` over an alias
+ * that lost a member), and nothing else may report it, since a type alias's
+ * text is compared nowhere and `oagen verify` leaves a type the spec does
+ * not derive out of its comparison.
+ *
+ * Anything else is accepted as the same text only, and only when that text
+ * stands for one type on both sides (`readsAlike`): a primitive, a literal, a
+ * class, any other generic (`Record<string, Old>`), a tuple, a function type.
+ * So a literal is not accepted by the primitive that would take it (`'asc'` →
+ * `string`).
  *
  * A text the extractor cut short (`ELIDED`) is not the type: two of them
  * that read alike may differ in what was left out, so neither is accepted,
@@ -273,14 +298,83 @@ function membersBehindAliases(members: readonly string[] | undefined, types: Typ
  */
 function memberAccepts(oldMember: string, newMember: string, context: ShapeContext): boolean {
   if (ELIDED.test(oldMember) || ELIDED.test(newMember)) return false;
-  if (oldMember === newMember) return true;
   const pair = JSON.stringify([oldMember, newMember]);
   const settled = context.verdicts.get(pair);
   if (settled !== undefined) return settled;
-  context.verdicts.set(pair, false);
-  const verdict = holderAccepts(oldMember, newMember, context) ?? fieldsAccept(oldMember, newMember, context);
+  if (context.open.has(pair)) {
+    context.assumed.add(pair);
+    return true;
+  }
+
+  context.open.add(pair);
+  const settledBefore = context.settledYes.length;
+  const verdict =
+    holderAccepts(oldMember, newMember, context) ??
+    fieldsAccept(oldMember, newMember, context) ??
+    (oldMember === newMember && readsAlike(oldMember, context, new Set()));
+  context.open.delete(pair);
+  // What was settled on the strength of this pair holding does not stand
+  // when it does not. A "no" needs no such care: taking a pair to hold can
+  // only turn a "no" into a "yes".
+  if (!verdict && context.assumed.has(pair)) {
+    for (const forgotten of context.settledYes.splice(settledBefore)) {
+      context.verdicts.delete(forgotten);
+      context.fields.delete(forgotten);
+    }
+  }
+  context.assumed.delete(pair);
   context.verdicts.set(pair, verdict);
+  if (verdict) context.settledYes.push(pair);
   return verdict;
+}
+
+/**
+ * Whether a text that is the same on both sides stands for one type on both:
+ * every type it depends on (`everyNameIn`: an argument of `Partial<…>` and
+ * the type a template literal is built with included) that a snapshot
+ * declares is declared alike in the two.
+ *
+ *  - A type alias recorded by its text stands for the same text, and that
+ *    text reads alike in turn.
+ *  - A type whose fields are recorded whole has the same fields, each with
+ *    the same optionality and the same type text, which reads alike in turn.
+ *  - A type one side declares and the other does not is not one type.
+ *
+ * Anything else a snapshot declares (a class, an enum, a type recorded by
+ * name only) is taken for one type: nothing more is recorded of it here, and
+ * what changes of it is reported on its own lines. Each name is read once, so
+ * a type that mentions itself ends.
+ */
+function readsAlike(text: string, context: ShapeContext, read: Set<string>): boolean {
+  for (const name of everyNameIn(text)) {
+    if (read.has(name)) continue;
+    read.add(name);
+    const oldType = context.oldTypes.get(name);
+    const newType = context.newTypes.get(name);
+    if (oldType === undefined && newType === undefined) continue;
+    if (oldType === undefined || newType === undefined) return false;
+
+    const oldAlias = aliasText(context.oldTypes, name);
+    const newAlias = aliasText(context.newTypes, name);
+    if (oldAlias !== undefined || newAlias !== undefined) {
+      if (oldAlias === undefined || newAlias === undefined || oldAlias.trim() !== newAlias.trim()) return false;
+      if (!readsAlike(oldAlias, context, read)) return false;
+      continue;
+    }
+
+    const oldFields = recordedMembers(context.oldTypes, name);
+    const newFields = recordedMembers(context.newTypes, name);
+    if (oldFields === undefined && newFields === undefined) continue;
+    if (oldFields === undefined || newFields === undefined || oldFields.size !== newFields.size) return false;
+    for (const [fieldName, oldField] of oldFields) {
+      const newField = newFields.get(fieldName);
+      if (newField === undefined || newField.optional !== oldField.optional) return false;
+      // Two texts cut short may read alike and differ in what was left out.
+      if (ELIDED.test(oldField.type) || newField.type.trim() !== oldField.type.trim()) return false;
+      if (!readsAlike(oldField.type, context, read)) return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -346,40 +440,36 @@ function aliasText(types: TypeLookup, name: string): string | undefined {
  *  - it has every field of the old type, so no literal names a field it does
  *    not know;
  *  - each with a type that accepts the old field's (the same question, asked
- *    of the two field types), or the candidate declares that the old type
- *    extends the new one, which a compiler has then checked field by field;
+ *    of the two field types);
  *  - it requires no field the old type did not require, so no value comes
  *    up short.
  *
  * So the new type may add optional fields, make required ones optional and
- * widen a field's type. Both types' fields have to be known whole (see
- * `fieldsOf`), and the old type has to have some.
+ * widen a field's type. Undefined when neither is an object type whose
+ * fields are known whole (see `fieldsOf`), which leaves the two to be read
+ * as texts; "no" when only one is. A type without fields takes any object,
+ * so it is accepted by another without fields and by nothing else: it does
+ * not say what callers pass.
  *
- * Two types that refer to themselves (`Tree.children: Tree[]`) come back to
- * their own pair through a field while it is open, and are not settled.
+ * A declaration between the two is not read. `interface Old extends New`
+ * says every `Old` is a `New`, and still a literal that names a field of
+ * `Old` alone is refused where a `New` is expected, so the fields decide
+ * with or without it.
  */
-function fieldsAccept(oldType: string, newType: string, context: ShapeContext): boolean {
+function fieldsAccept(oldType: string, newType: string, context: ShapeContext): boolean | undefined {
   const oldFields = fieldsOf(oldType, context.oldTypes);
   const newFields = fieldsOf(newType, context.newTypes);
+  if (oldFields === undefined && newFields === undefined) return undefined;
   if (oldFields === undefined || newFields === undefined) return false;
-  // A type without fields takes any object, so it does not say what callers
-  // pass: the rule compares fields and has none to compare.
-  if (oldFields.size === 0) return false;
-  const declared = declaresSupertype(context.newTypes, oldType, newType);
-  const anInterface = isInterface(context.oldTypes, oldType) || isInterface(context.newTypes, newType);
+  if (oldFields.size === 0) return newFields.size === 0;
   for (const [name, newField] of newFields) {
     if (!newField.optional && oldFields.get(name)?.optional !== false) return false;
   }
   for (const [name, oldField] of oldFields) {
     const newField = newFields.get(name);
-    if (newField === undefined) return false;
-    if (declared) continue;
-    const withoutUndefined = anInterface && oldField.optional && newField.optional;
-    const oldMembers = fieldTypeMembers(oldField, withoutUndefined, context.oldTypes);
-    const newMembers = fieldTypeMembers(newField, withoutUndefined, context.newTypes);
-    if (!membersAccept(oldMembers, newMembers, context)) return false;
+    if (newField === undefined || !acceptsByShape(oldField.type, newField.type, context)) return false;
   }
-  context.fields.set(JSON.stringify([oldType, newType]), { oldType, newType });
+  if (oldType !== newType) context.fields.set(JSON.stringify([oldType, newType]), { oldType, newType });
   return true;
 }
 
@@ -389,36 +479,18 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
  * whose fields the snapshot records whole (`recordedMembers`). Undefined for
  * anything else, and for either kind when the fields are not all a value may
  * carry.
+ *
+ * A field's type is weighed as it stands, an `undefined` included. A
+ * declared type's field is read as the checker resolves it
+ * (`RecordedMember.type`): without the `undefined` optionality adds, and with
+ * one the SDK wrote under `exactOptionalPropertyTypes`, where an optional
+ * `name?: string | undefined` takes a value an optional `name?: string` does
+ * not. An object type written in place is printed with `| undefined` on each
+ * optional member where the SDK is not compiled with that option, and
+ * nothing in its text says which of the two it is. So an optional member
+ * written in place with one is not accepted by a declared field without one,
+ * though the reverse is.
  */
 function fieldsOf(member: string, types: TypeLookup): ReadonlyMap<string, RecordedMember> | undefined {
   return objectTypeMembers(member) ?? recordedMembers(types, member);
-}
-
-/** A declared type that is no type alias: an interface, a model class. Not an
- *  object type written in place, which no snapshot declares. */
-function isInterface(types: TypeLookup, typeName: string): boolean {
-  const type = types.get(typeName);
-  return type !== undefined && !isObjectAlias(type);
-}
-
-/**
- * The members of a field's type, behind its aliases, to weigh against the
- * other side's.
- *
- * A field's type is weighed as it stands, an `undefined` included: under
- * `exactOptionalPropertyTypes` an optional `name?: string | undefined` takes
- * a value an optional `name?: string` does not, and a type alias's member is
- * recorded apart there. An interface's optional field is another matter. Its
- * text carries the `undefined` its `?` adds or not by where the `?` is
- * written, whatever the SDK meant, so the differ reads two optional fields
- * as one type when either owner is an interface and they differ by that
- * `undefined` alone (`sameOptionalFieldType`, #750). The same holds here:
- * `withoutUndefined` leaves it out, on both sides, of two optional fields
- * one of which an interface owns.
- */
-function fieldTypeMembers(field: RecordedMember, withoutUndefined: boolean, types: TypeLookup): string[] | undefined {
-  const members = unionMembers(field.type);
-  if (!withoutUndefined || members === undefined) return membersBehindAliases(members, types);
-  const defined = members.filter((member) => member !== 'undefined');
-  return membersBehindAliases(defined.length > 0 ? defined : members, types);
 }

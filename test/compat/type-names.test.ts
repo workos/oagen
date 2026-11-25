@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   bareTypeName,
+  everyNameIn,
   genericWrapperOf,
   objectTypeMembers,
   singleArgumentGeneric,
   soleTypeName,
+  typeNamesIn,
   unionMembers,
 } from '../../src/compat/type-names.js';
 
@@ -720,6 +722,54 @@ describe('singleArgumentGeneric (#752)', () => {
     expect(genericWrapperOf('Promise<Foo>[]')).toBe('Promise');
     expect(genericWrapperOf('Promise<Foo[]>')).toBeUndefined();
     expect(singleArgumentGeneric('Promise<Foo[]>')).toEqual({ generic: 'Promise', argument: 'Foo[]' });
+  });
+});
+
+describe('everyNameIn (#752)', () => {
+  const names = (text: string) => everyNameIn(text).sort();
+
+  it.each<[string, string[]]>([
+    ['Foo', ['Foo']],
+    ['Foo | undefined', ['Foo', 'undefined']],
+    ['Promise<Foo[]>', ['Foo', 'Promise']],
+    ['models.Foo', ['Foo', 'models', 'models.Foo']],
+    ['\\Acme\\Foo', ['Acme', 'Foo', '\\Acme\\Foo']],
+    // what `typeNamesIn` leaves out, for following a type to what it is built from
+    ['Partial<Foo>', ['Foo', 'Partial']],
+    ['Pick<Foo, "id">', ['Foo', 'Pick', 'id']],
+    ['Partial<Foo> | Bar', ['Bar', 'Foo', 'Partial']],
+    ['Partial<Record<Id, Foo>>', ['Foo', 'Id', 'Partial', 'Record']],
+    ['Optional["Foo"]', ['Foo', 'Optional']],
+    // `$` is a letter of a name, as in `typeNamesIn`
+    ['`pet_${Id}`', ['Id', 'pet_$']],
+    ["'asc' | 'desc'", ['asc', 'desc']],
+    ['{ body: Foo; }', ['Foo', 'body']],
+    ['', []],
+    ['[]', []],
+  ])('%j → %j', (text, expected) => {
+    expect(names(text)).toEqual(expected);
+  });
+
+  it('reads every name `typeNamesIn` reads, and never fewer', () => {
+    for (const text of [
+      'Foo',
+      'Foo[] | Bar',
+      'Partial<Foo> | Bar',
+      'Pick<Foo, "id"> & Baz',
+      'Omit<Foo, "id">',
+      'Record<string, Promise<Foo | null>>',
+      '{ body: Foo; done: (error: Failure) => void; }',
+      'Optional["Foo"]',
+      "Option<&'a Foo>",
+      'crate::models::Foo',
+      'list[models.Foo] | None',
+    ]) {
+      const every = new Set(everyNameIn(text));
+      expect(typeNamesIn(text).filter((name) => !every.has(name))).toEqual([]);
+    }
+    // ... and more where a value is built from a part of the type.
+    expect(typeNamesIn('Partial<Foo>')).toEqual([]);
+    expect(everyNameIn('Partial<Foo>')).toEqual(['Partial', 'Foo']);
   });
 });
 

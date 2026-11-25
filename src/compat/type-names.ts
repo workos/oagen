@@ -9,13 +9,14 @@
  * answers; `genericWrapperOf` says which generic it read the name through.
  * `typeNamesIn` reads every name a text mentions, for following a type to the
  * types it is built from, and `supertypeName` reads a declared supertype's
- * entry. Four more read a parameter's type, to ask whether its new text
+ * entry. Five more read a parameter's type, to ask whether its new text
  * accepts every value of its old one: `unionMembers` takes a union apart,
  * `objectTypeMembers` an object type written in place and
- * `singleArgumentGeneric` a generic, and `soleTypeName` reads the name of a
- * text that is one declared type and nothing a caller would have to wrap a
- * value in. All of them read text only: they take no language and no
- * snapshot, so the same text reads the same whichever extractor wrote it.
+ * `singleArgumentGeneric` a generic, `soleTypeName` reads the name of a text
+ * that is one declared type and nothing a caller would have to wrap a value
+ * in, and `everyNameIn` reads every type a text depends on. All of them read
+ * text only: they take no language and no snapshot, so the same text reads
+ * the same whichever extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -248,6 +249,38 @@ export function typeNamesIn(typeText: string): string[] {
         continue;
       }
     }
+    names.add(path);
+    for (const segment of path.split(NAME_PATH_SEPARATOR)) if (segment !== '') names.add(segment);
+  }
+  return [...names];
+}
+
+/**
+ * Every word of a type text that could be a type's name, wherever it stands:
+ * each name path and each of its segments, as `typeNamesIn` reads them, with
+ * nothing left out. The arguments of `Partial<…>` and `Pick<…>` are read, and
+ * so is what stands in quotes (a forward reference, `Optional["Foo"]`) and in
+ * a template literal (`\`pet_\${PetId}\``).
+ *
+ * `typeNamesIn` follows a type to what a value of it is built from, and a
+ * `Partial<Foo>` is built from no whole `Foo`. This answers another
+ * question: which declared types does a text depend on at all? A text that
+ * is the same in two snapshots stands for one type only if each of them does,
+ * and a `Partial<Foo>` changes with `Foo`. It over-approximates further than
+ * `typeNamesIn` (the words of a string literal are words too), which only
+ * ever makes a caller look at more names.
+ */
+export function everyNameIn(typeText: string): string[] {
+  const names = new Set<string>();
+  let i = 0;
+  while (i < typeText.length) {
+    NAME_PATH.lastIndex = i;
+    const path = NAME_PATH.exec(typeText)?.[0];
+    if (path === undefined) {
+      i++;
+      continue;
+    }
+    i += path.length;
     names.add(path);
     for (const segment of path.split(NAME_PATH_SEPARATOR)) if (segment !== '') names.add(segment);
   }
@@ -544,24 +577,6 @@ export function withoutRepeatedIntersectionMembers(typeText: string): string {
   // stood so beside an `&`, and stands as `() => void` alone.
   const only = reduced.length === 1 && reduced[0].startsWith('(') ? enclosed(reduced[0]) : undefined;
   return only ?? reduced.join(' | ');
-}
-
-/**
- * Whether two type texts are one type once the `undefined` member of each is
- * left out: `string | undefined` and `string`, `undefined | (() => void)` and
- * `(() => void)`. For the type of a member that is optional on both sides,
- * where an `undefined` in the text is the one optionality adds and a text may
- * carry it or not. `null` is a value like any other and is not left out, and
- * a text whose brackets do not pair up is compared as it stands.
- */
-export function sameButForUndefined(one: string, other: string): boolean {
-  const members = (text: string): string[] => {
-    const all = splitTopLevel(text, '|')?.map((member) => member.trim()) ?? [text.trim()];
-    const defined = all.filter((member) => member !== 'undefined');
-    return defined.length > 0 ? defined : all;
-  };
-  const [left, right] = [members(one), members(other)];
-  return left.length === right.length && left.every((member, index) => member === right[index]);
 }
 
 /** The content of `text` when one bracket pair spans it from its first
