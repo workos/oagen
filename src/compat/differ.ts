@@ -19,7 +19,13 @@ import {
   summarizeChanges,
 } from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
-import { bareTypeName, genericWrapperOf, handsBackItsArgument, typeNamesIn } from './type-names.js';
+import {
+  bareTypeName,
+  genericWrapperOf,
+  handsBackItsArgument,
+  sameButForUndefined,
+  typeNamesIn,
+} from './type-names.js';
 import { declaredTypes, declaresSupertype, inputTypes, isObjectAlias, isRecordedByNameOnly } from './type-graph.js';
 import type { DeclaredTypes } from './type-graph.js';
 import { acceptsEveryValue } from './parameter-types.js';
@@ -138,11 +144,40 @@ export function diffSnapshots(
     return compared !== undefined && !isRecordedByNameOnly(compared) ? takenBy.get(owner) : undefined;
   };
 
+  // An optional field's type as an interface records it. Where the `?` of the
+  // member is written decides whether an interface's type text carries the
+  // `undefined` optionality adds (`a?: string` is recorded `string`; the same
+  // member inherited through `Partial<Base>`, and an optional method, keep
+  // `| undefined`), and every baseline holds the text so. A type alias's
+  // member never carries it. So where both snapshots record the field as
+  // optional and either owner is an interface, the two texts are one type
+  // when they differ by that `undefined` alone: an interface rewritten as an
+  // alias with the same members, or between two such spellings, is no
+  // change. Two aliases' members are compared as written, and so is a field
+  // either snapshot records no optionality for, as an older one does.
+  const sameOptionalFieldType = (baseSym: CompatSymbol, candSym: CompatSymbol): boolean =>
+    baseSym.kind === 'field' &&
+    candSym.kind === 'field' &&
+    baseSym.optional === true &&
+    candSym.optional === true &&
+    typeof baseSym.typeRef?.name === 'string' &&
+    typeof candSym.typeRef?.name === 'string' &&
+    !(
+      isObjectAlias(baselineTypes.get(baseSym.ownerFqName ?? '')) &&
+      isObjectAlias(candidateTypes.get(candSym.ownerFqName ?? ''))
+    ) &&
+    sameButForUndefined(baseSym.typeRef.name, candSym.typeRef.name);
+
   // Compare each baseline symbol against candidate
   for (const baseSym of baseline.symbols) {
     if (isServiceWrapperConstructor(baseSym, serviceAccessors)) continue;
     const candSym = candById.get(baseSym.id) ?? candByFqName.get(baseSym.fqName);
-    changes.push(...classifySymbolChanges(baseSym, candSym, effectivePolicy, baseline.source.language));
+    const symbolChanges = classifySymbolChanges(baseSym, candSym, effectivePolicy, baseline.source.language);
+    changes.push(
+      ...(candSym && sameOptionalFieldType(baseSym, candSym)
+        ? symbolChanges.filter((change) => change.category !== 'field_type_changed')
+        : symbolChanges),
+    );
     // Optional → required, on a type callers build. Every other change of
     // optionality is left unreported, as before the snapshot carried it.
     if (candSym && baseSym.kind === 'field' && baseSym.optional === true) {
