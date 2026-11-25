@@ -1038,6 +1038,45 @@ describe('#745 two declarations of one property', () => {
   });
 });
 
+describe('#745 beside the fixes it is stacked on', () => {
+  it('formats a property a second member annotates under the nullable $ref the first one writes (#743)', async () => {
+    const spec = await parse(
+      createNote('3.1.0', {
+        Text: string,
+        Base: {
+          type: 'object',
+          properties: { at: { anyOf: [ref('Text'), nil] }, plain: { anyOf: [ref('Text'), nil] } },
+        },
+        Note: { allOf: [ref('Base'), { properties: { at: { format: 'date-time', maxLength: 40 } } }] },
+      }),
+    );
+    // The typeless declaration fills in the first one's keywords, so the
+    // format stands beside the nullable wrapper: the type under it takes it.
+    expect(show(fieldType(spec, 'Note', 'at'))).toBe('nullable<string(date-time){"maxLength":40}>');
+    expect(show(fieldType(spec, 'Note', 'plain'))).toBe('nullable<string>');
+    expect(show(fieldType(spec, 'Base', 'at'))).toBe('nullable<string>');
+  });
+
+  it('declares no property for a $ref to false, whatever format is written beside it (#746)', async () => {
+    const spec = await parse(
+      createNote('3.1.0', {
+        Never: false,
+        Text: string,
+        Note: {
+          type: 'object',
+          properties: {
+            never: { ...ref('Never'), format: 'date-time' },
+            at: { ...ref('Text'), format: 'date-time' },
+          },
+        },
+      }),
+    );
+    expect(modelOf(spec, 'Note').fields.map(({ name, type }) => `${name}: ${show(type)}`)).toEqual([
+      'at: string(date-time)',
+    ]);
+  });
+});
+
 describe('#745 the readers the type builder shares its reading with', () => {
   it('reads the format where the limits are read: schemaFormat beside extractConstraints', () => {
     const member = { allOf: [string, { format: 'date-time', maxLength: 40 }] };
