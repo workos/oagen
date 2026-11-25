@@ -1430,6 +1430,43 @@ export declare class Holder% { ${member.replaceAll('T', inNew(side, 'Detailed%',
     for (const [name, { expected, actual }] of Object.entries(cases)) expect(actual, name).toEqual(expected);
   });
 
+  it('judges each retype where it stands: the pair is not recorded as a rename', async () => {
+    // One pair of types, retyped in four places. Only the one that is read,
+    // with nothing else changed around the name, is downgraded; it does not
+    // carry the others with it, as a recorded rename of the pair would.
+    const result = await nodeDiff((side) => {
+      const type = inNew(side, 'DetailedErrorBody', 'ErrorBody');
+      return `export interface ErrorBody { message: string }
+export interface DetailedErrorBody extends ErrorBody { details: string }
+export interface Sink<T> { accept: (value: T) => void }
+export declare class Reader { body: ${type}; list: ${inNew(side, 'DetailedErrorBody[]', 'ErrorBody')}; sink(): Sink<${type}>; }
+export interface Options { body: ${type} }
+export interface Counter { count: ${inNew(side, 'number', 'string')} }
+export declare class Client { send(options: Options): Counter; }
+`;
+    });
+    const hint = (remediation: string | undefined) =>
+      remediation === undefined
+        ? 'no hint'
+        : remediation.includes('declared subtype')
+          ? 'declared subtype'
+          : remediation.includes('recorded rename')
+            ? 'recorded rename'
+            : remediation;
+    expect(
+      result.diff.changes.map((change) => [
+        `${change.severity} ${change.category} ${change.symbol}`,
+        hint(change.remediation),
+      ]),
+    ).toEqual([
+      ['breaking return_type_changed Reader.sink', 'no hint'],
+      ['soft-risk field_type_changed Reader.body', 'declared subtype'],
+      ['breaking field_type_changed Reader.list', 'no hint'],
+      ['breaking field_type_changed Counter.count', 'no hint'],
+      ['breaking field_type_changed Options.body', 'no hint'],
+    ]);
+  });
+
   it('is not what a retype to the supertype, or to a sibling, is', async () => {
     const toSupertype = await nodeDiff(
       (side) => `export interface ErrorBody { message: string }
