@@ -113,3 +113,36 @@ describe('ALL_LANGUAGE_IDS', () => {
     expect(ALL_LANGUAGE_IDS).toContain('ios');
   });
 });
+
+/**
+ * #752: whether a value is accepted for a parameter by its shape or by the
+ * type it was declared as. Each language states it; a policy built by hand,
+ * or read from a snapshot written before the key, may not.
+ */
+describe('parameterTypesAreStructural (#752)', () => {
+  it('is true for Node, whose types are structural, and false for every other language', () => {
+    expect(getDefaultPolicy('node').parameterTypesAreStructural).toBe(true);
+    for (const language of ALL_LANGUAGE_IDS.filter((id) => id !== 'node')) {
+      expect([language, getDefaultPolicy(language).parameterTypesAreStructural]).toEqual([language, false]);
+    }
+  });
+
+  it('is overridden like any other hint', () => {
+    expect(mergePolicy(getDefaultPolicy('node'), { parameterTypesAreStructural: false })).toEqual({
+      ...getDefaultPolicy('node'),
+      parameterTypesAreStructural: false,
+    });
+    expect(
+      mergePolicy(getDefaultPolicy('php'), { parameterTypesAreStructural: true }).parameterTypesAreStructural,
+    ).toBe(true);
+    expect(mergePolicy(getDefaultPolicy('php'), {}).parameterTypesAreStructural).toBe(false);
+  });
+
+  it('may be left out of a policy written by hand', () => {
+    // The six hints every policy had before the key: still a `CompatPolicyHints`.
+    const { parameterTypesAreStructural: _left, ...before } = getDefaultPolicy('node');
+    const policy: ReturnType<typeof getDefaultPolicy> = before;
+    expect(policy.parameterTypesAreStructural).toBeUndefined();
+    expect(Object.keys(getDefaultPolicy('node'))).toHaveLength(7);
+  });
+});

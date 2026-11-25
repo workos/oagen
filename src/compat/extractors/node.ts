@@ -436,6 +436,7 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
     name: sym.name,
     fields: sortRecord(fields),
     extends: extendsNames.sort(),
+    hasUnlistedMembers: hasUnnamedMembers(type, checker),
   };
 }
 
@@ -463,7 +464,10 @@ function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker): ApiTypeAlias
  * optionality it resolves (a `Partial`'s members are all optional), the
  * members of an intersection's named types included, as an interface's fields
  * include the ones it inherits. The supertypes are the references an
- * intersection is written with, as an interface's `extends` are.
+ * intersection is written with, as an interface's `extends` are. Whether the
+ * alias has more than the fields list (`hasUnlistedMembers`) is said as for
+ * an interface, and is also true when a member was left out of them (see
+ * `isNamedPublicMember`).
  *
  * Nothing for any other alias, which the surface records by name and value:
  *
@@ -479,7 +483,7 @@ function objectAliasMembers(
   sym: ts.Symbol,
   type: ts.Type,
   checker: ts.TypeChecker,
-): Pick<ApiTypeAlias, 'fields' | 'extends'> {
+): Pick<ApiTypeAlias, 'fields' | 'extends' | 'hasUnlistedMembers'> {
   const declaration = sym.getDeclarations()?.find(ts.isTypeAliasDeclaration);
   if (!declaration) return {};
   const value = withoutParentheses(declaration.type);
@@ -487,8 +491,12 @@ function objectAliasMembers(
   if (!(type.isIntersection() ? type.types.every(isObjectShape) : isOwnObjectShape(type))) return {};
 
   const fields: Record<string, ApiField> = {};
+  let leftOut = false;
   for (const prop of type.getProperties()) {
-    if (!isNamedPublicMember(prop)) continue;
+    if (!isNamedPublicMember(prop)) {
+      leftOut = true;
+      continue;
+    }
     // The member's optionality is the checker's: in `{ a?: string } & { a: string }`
     // the first declaration has a `?` and the member is required.
     fields[prop.name] = {
@@ -504,7 +512,22 @@ function objectAliasMembers(
       .filter(ts.isTypeReferenceNode)
       .map((member) => member.getText())
       .sort(),
+    hasUnlistedMembers: leftOut || hasUnnamedMembers(type, checker),
   };
+}
+
+/**
+ * Whether a value of the type may carry what no named member says: an index
+ * signature (`[key: string]: unknown`, what `Record<string, string>` comes
+ * to), the type's own or one it inherits, a call or a construct signature.
+ * A caller may then pass keys, or a function, that the fields do not list.
+ */
+function hasUnnamedMembers(type: ts.Type, checker: ts.TypeChecker): boolean {
+  return (
+    checker.getIndexInfosOfType(type).length > 0 ||
+    type.getCallSignatures().length > 0 ||
+    type.getConstructSignatures().length > 0
+  );
 }
 
 /**

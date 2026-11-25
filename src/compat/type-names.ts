@@ -8,8 +8,13 @@
  * declared type such a text names, and `bareTypeName` is the one place that
  * answers. `typeNamesIn` reads every name a text mentions, for following a
  * type to the types it is built from, and `supertypeName` reads a declared
- * supertype's entry. All three read text only: they take no language and no
- * snapshot, so the same text reads the same whichever extractor wrote it.
+ * supertype's entry. Three more read a parameter's type, to ask whether its
+ * new text accepts every value of its old one: `unionMembers` takes a union
+ * apart, `objectTypeMembers` an object type written in place, and
+ * `soleTypeName` reads the name of a text that is one declared type and
+ * nothing a caller would have to wrap a value in. All six read text only:
+ * they take no language and no snapshot, so the same text reads the same
+ * whichever extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -208,6 +213,112 @@ export function supertypeName(entry: string): string | undefined {
 }
 
 /**
+ * The declared type a text names when nothing stands around the name but an
+ * optional spelling and at most one array suffix: `Foo`, `Foo | undefined`,
+ * `?Foo`, `Optional[Foo]`, `Foo[]`, `(Foo | null)[]`, `\Acme\Foo`.
+ *
+ * `bareTypeName` also reads a name out of a generic's argument
+ * (`Promise<Foo>`, `List<Foo>`), which suits a value callers read: whatever
+ * the wrapper, they get a `Foo` out of it. For a value callers pass it does
+ * not: whether a `Box<Old>` is accepted where a `Box<New>` is expected depends
+ * on how `Box` uses its argument (a list that is written to, a callback's
+ * parameter), which no snapshot says. So a text under a generic names no type
+ * here, as a union of several types, a dotted path and an object or function
+ * type name none in either reader.
+ */
+export function soleTypeName(typeText: string): string | undefined {
+  let text = presentType(typeText.trim());
+  if (text.endsWith('[]')) text = presentType(text.slice(0, -2));
+  return supertypeName(text);
+}
+
+/**
+ * The members of a union a text writes with `|`, each trimmed and once:
+ * `A | B`, `A|B` and `(A | B)` are `A` and `B`. A text that is no union is a
+ * union of one member, itself.
+ *
+ * The text is taken apart and nothing more: `undefined`, `null` and `None`
+ * are members like any other (`presentType` is the reader that sets them
+ * aside), an array, a generic and an object type stay whole (`(A | B)[]`,
+ * `Array<A | B>`, `{ a: A | B }`), and so does a function type, whose `|`
+ * belongs to what it returns (`(pet: Pet) => A | B`). A function among a
+ * union's members is written in parentheses, which go with the union:
+ * `(() => void) | undefined` is `() => void` and `undefined`.
+ *
+ * Returns undefined for a text that does not read as a union at all: one
+ * whose brackets or quotes do not pair up, or with a blank member (`A |`).
+ */
+export function unionMembers(typeText: string): string[] | undefined {
+  const text = typeText.trim();
+  if (text === '') return undefined;
+  if (isFunctionType(text)) return [text];
+  const parts = splitTopLevel(text, '|');
+  if (parts === undefined) return undefined;
+  const members = new Set<string>();
+  for (const part of parts) {
+    const member = part.trim();
+    if (member === '') return undefined;
+    // A parenthesized member is read as what it holds, which is shorter than
+    // the text it came from, so this ends.
+    const group = member.startsWith('(') ? enclosed(member) : undefined;
+    const held = group === undefined ? [member] : unionMembers(group);
+    if (held === undefined) return undefined;
+    for (const name of held) members.add(name);
+  }
+  return [...members];
+}
+
+/** A member's name as an object type writes it bare: an identifier or a
+ *  number. A quoted name is read out of its quotes. */
+const MEMBER_NAME = /^(?:[A-Za-z_$][A-Za-z0-9_$]*|\d+)$/;
+
+/**
+ * The members of an object type written in place, as TypeScript prints one:
+ * `{ id: string; name?: string | undefined; }` has `id`, required, and
+ * `name`, optional. Each member's type is the text after its colon, as it
+ * stands; a `readonly` in front of the name is dropped, and a quoted name is
+ * read without its quotes (`"content-type"`).
+ *
+ * Undefined for a text that is not an object type in braces, and for one
+ * with a member that is not a name and a type, since the members then do not
+ * say all a value may carry: an index signature (`[key: string]: unknown`), a
+ * call or a method signature (`retry(attempt: number): void`), an accessor,
+ * a name written twice, and the `... 12 more ...` a long type is cut down
+ * to. This is a reader for the shape a parameter's type is recorded in, not
+ * a parser of the language.
+ */
+export function objectTypeMembers(typeText: string): Map<string, { type: string; optional: boolean }> | undefined {
+  const text = typeText.trim();
+  const content = text.startsWith('{') ? enclosed(text) : undefined;
+  const parts = content === undefined ? undefined : splitTopLevel(content, ';');
+  if (parts === undefined) return undefined;
+  const members = new Map<string, { type: string; optional: boolean }>();
+  for (const part of parts) {
+    // The `;` after the last member leaves a blank one.
+    if (part.trim() === '') continue;
+    const [head, ...rest] = splitTopLevel(part, ':') ?? [];
+    const type = rest.join(':').trim();
+    if (head === undefined || type === '') return undefined;
+    let name = head.trim();
+    if (name.startsWith('readonly ')) name = name.slice('readonly '.length).trim();
+    const optional = name.endsWith('?');
+    if (optional) name = name.slice(0, -1).trim();
+    const quoted = (name[0] === '"' || name[0] === "'") && stringLiteralEnd(name, 0) === name.length;
+    if (quoted) name = name.slice(1, -1);
+    else if (!MEMBER_NAME.test(name)) return undefined;
+    if (members.has(name)) return undefined;
+    members.set(name, { type, optional });
+  }
+  return members;
+}
+
+/** A text with an arrow outside every bracket pair: TypeScript's `=>`, the
+ *  `->` of Swift, Kotlin and Rust. */
+function isFunctionType(text: string): boolean {
+  return (splitTopLevel(text, '=>')?.length ?? 1) > 1 || (splitTopLevel(text, '->')?.length ?? 1) > 1;
+}
+
+/**
  * The type a text names when the value is present: the text without its
  * optional and nullable spellings, however many are stacked
  * (`Optional[Foo | None]`, `Foo | null | undefined`).
@@ -323,9 +434,10 @@ function enclosed(text: string): string | undefined {
  *
  * `classify.ts` has a splitter of its own for Python annotations, which
  * counts square brackets only; this one reads every language's text, so it
- * counts all four kinds and skips the `>` of an arrow (`=>`, `->`).
+ * counts all four kinds and skips the `>` of an arrow (`=>`, `->`). Split at
+ * the arrow itself, it says whether a text is a function type.
  */
-function splitTopLevel(text: string, separator: '|' | ','): string[] | undefined {
+function splitTopLevel(text: string, separator: '|' | ',' | ';' | ':' | '=>' | '->'): string[] | undefined {
   const parts: string[] = [];
   const expectedClosings: string[] = [];
   let quote: string | undefined;
@@ -341,15 +453,20 @@ function splitTopLevel(text: string, separator: '|' | ','): string[] | undefined
       quote = char;
       continue;
     }
+    // No separator starts with a bracket, so asking for it first changes
+    // nothing for the brackets; an arrow is taken whole, `>` included.
+    if (expectedClosings.length === 0 && text.startsWith(separator, i)) {
+      parts.push(text.slice(start, i));
+      start = i + separator.length;
+      i = start - 1;
+      continue;
+    }
     const closing = CLOSING_BRACKET.get(char);
     if (closing !== undefined) {
       expectedClosings.push(closing);
     } else if (CLOSING_BRACKETS.has(char)) {
       if (char === '>' && (text[i - 1] === '=' || text[i - 1] === '-')) continue;
       if (expectedClosings.pop() !== char) return undefined;
-    } else if (char === separator && expectedClosings.length === 0) {
-      parts.push(text.slice(start, i));
-      start = i + 1;
     }
   }
   if (quote !== undefined || expectedClosings.length > 0) return undefined;

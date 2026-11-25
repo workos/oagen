@@ -1,0 +1,708 @@
+import { describe, it, expect } from 'vitest';
+import type { CompatSnapshot, CompatSymbol } from '../../src/compat/ir.js';
+import { acceptsEveryValue } from '../../src/compat/parameter-types.js';
+import type { ParameterTypeAcceptance } from '../../src/compat/parameter-types.js';
+import { declaredTypes } from '../../src/compat/type-graph.js';
+
+/**
+ * #752: `acceptsEveryValue` answers whether a parameter's new type takes
+ * every value of its old one, from the two type texts and what each snapshot
+ * records about the types they name. These are the rules on hand-built
+ * snapshots; test/compat/assignable-parameter-retype.test.ts runs them on
+ * SDKs, through the extractors.
+ */
+
+const symbol = (kind: CompatSymbol['kind'], fqName: string, extra: Partial<CompatSymbol> = {}): CompatSymbol => ({
+  id: `${kind}:${fqName}`,
+  kind,
+  fqName,
+  displayName: fqName,
+  visibility: 'public',
+  stability: 'stable',
+  sourceKind: 'generated_resource_constructor',
+  ...extra,
+});
+
+/**
+ * An object type with its fields, as a snapshot records an interface: each
+ * field is `name: 'type'`, or `name: '?type'` when a caller may leave it out.
+ */
+const objectType = (
+  name: string,
+  fields: Record<string, string>,
+  extra: Partial<CompatSymbol> = {},
+): CompatSymbol[] => [
+  symbol('alias', name, { extends: [], hasUnlistedMembers: false, ...extra }),
+  ...Object.entries(fields).map(([fieldName, text]) =>
+    symbol('field', `${name}.${fieldName}`, {
+      ownerFqName: name,
+      typeRef: { name: text.startsWith('?') ? text.slice(1) : text },
+      optional: text.startsWith('?'),
+    }),
+  ),
+];
+/** A type alias recorded by the text it stands for. */
+const alias = (name: string, aliasOf: string): CompatSymbol => symbol('alias', name, { aliasOf });
+
+const types = (...symbols: Array<CompatSymbol | CompatSymbol[]>) =>
+  declaredTypes({
+    schemaVersion: '1',
+    source: { extractedAt: '2026-01-01T00:00:00.000Z' },
+    policies: {} as CompatSnapshot['policies'],
+    symbols: symbols.flat(),
+  });
+const NOTHING = types();
+
+/** By shape, both snapshots declaring the same types unless told otherwise. */
+const byShape = (
+  oldText: string,
+  newText: string,
+  candidate = NOTHING,
+  baseline = candidate,
+): ParameterTypeAcceptance | undefined =>
+  acceptsEveryValue(oldText, newText, { structural: true, baselineTypes: baseline, candidateTypes: candidate });
+const byDeclaration = (oldText: string, newText: string, candidate = NOTHING, baseline = candidate) =>
+  acceptsEveryValue(oldText, newText, { structural: false, baselineTypes: baseline, candidateTypes: candidate });
+
+const ACCEPTED = true;
+const REFUSED = false;
+
+describe('#752 acceptsEveryValue: which rule is asked', () => {
+  const candidate = types(
+    objectType('BaseOptions', { timeout: '?number' }),
+    objectType('RetryOptions', { timeout: '?number' }, { extends: ['BaseOptions'] }),
+  );
+
+  it('asks the shape of the types where the policy says parameter types are structural', () => {
+    expect(byShape('string', 'string | number')).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('RetryOptions', 'BaseOptions', candidate)).toEqual({
+      rule: 'shape',
+      fields: [{ oldType: 'RetryOptions', newType: 'BaseOptions' }],
+    });
+  });
+
+  it('asks the declaration where it says they are not', () => {
+    expect(byDeclaration('RetryOptions', 'BaseOptions', candidate)).toEqual({
+      rule: 'declared-supertype',
+      oldType: 'RetryOptions',
+      newType: 'BaseOptions',
+    });
+    // A union that kept every member is the shape rule's: not asked here.
+    expect(byDeclaration('string', 'string | number')).toBeUndefined();
+  });
+
+  it.each([[undefined], [null], ['true'], ['false'], [1], [0], [[]], [{}]])(
+    'asks neither when the policy states %j for the hint',
+    (structural) => {
+      const context = { structural, baselineTypes: candidate, candidateTypes: candidate };
+      expect(acceptsEveryValue('string', 'string | number', context)).toBeUndefined();
+      expect(acceptsEveryValue('RetryOptions', 'BaseOptions', context)).toBeUndefined();
+    },
+  );
+
+  it.each([[undefined], [null], [true], [1], [['string']], [{ name: 'string' }]])(
+    'answers no for a type text that is %j',
+    (text) => {
+      const context = { structural: true, baselineTypes: NOTHING, candidateTypes: NOTHING };
+      expect(acceptsEveryValue(text, 'string', context)).toBeUndefined();
+      expect(acceptsEveryValue('string', text, context)).toBeUndefined();
+      expect(acceptsEveryValue(text, text, context)).toBeUndefined();
+    },
+  );
+});
+
+describe('#752 by shape: a union that kept every member', () => {
+  it.each<[string, string, boolean]>([
+    ['string', 'string | number', ACCEPTED],
+    ['string | number', 'string', REFUSED],
+    ['string', 'string | null', ACCEPTED],
+    ['string', 'string | undefined', ACCEPTED],
+    ['string | null', 'string', REFUSED],
+    ['string | undefined', 'string', REFUSED],
+    // `null` and `undefined` are members like any other
+    ['string | null', 'string | undefined', REFUSED],
+    ['string | null', 'string | null | undefined', ACCEPTED],
+    ['string | number', 'number | string', ACCEPTED],
+    ['string | number', 'string | boolean', REFUSED],
+    ['string|number', 'string | number | boolean', ACCEPTED],
+    ['(string | number)', 'string | number | boolean', ACCEPTED],
+    ['"asc" | "desc"', '"asc" | "desc" | "none"', ACCEPTED],
+    ['"asc" | "desc"', '"asc"', REFUSED],
+    ['string', 'number', REFUSED],
+    // an array of a type that accepts the old array's
+    ['string[]', '(string | number)[]', ACCEPTED],
+    ['(string | number)[]', 'string[]', REFUSED],
+    ['string[][]', '(string | number)[][]', ACCEPTED],
+    ['string[]', 'string[] | undefined', ACCEPTED],
+    ['string', 'string[]', REFUSED],
+    ['string[]', 'string', REFUSED],
+    ['string[]', 'string[][]', REFUSED],
+    // a function among the members, in its parentheses or out of them
+    ['() => void', '(() => void) | undefined', ACCEPTED],
+    ['(() => void) | undefined', '() => void', REFUSED],
+    // nothing else is read into: each of these is the same text or it is not
+    ['Promise<string>', 'Promise<string | number>', REFUSED],
+    ['Array<string>', 'Array<string | number>', REFUSED],
+    ['Record<string, string>', 'Record<string, string | number>', REFUSED],
+    ['[string]', '[string | number]', REFUSED],
+    ['readonly string[]', 'readonly (string | number)[]', REFUSED],
+    ['string[]', 'readonly string[]', REFUSED],
+    ['() => string', '() => string | number', REFUSED],
+    ['(value: string | number) => void', '(value: string) => void', REFUSED],
+    ['"asc"', 'string', REFUSED],
+    ['1', 'number', REFUSED],
+    ['string', 'unknown', REFUSED],
+    ['string', 'any', REFUSED],
+    ['Promise<string>', 'Promise<string> | null', ACCEPTED],
+    // a text that does not read as a union
+    ['string', 'string |', REFUSED],
+    ['| string', 'string', REFUSED],
+    ['(string', '(string | number', REFUSED],
+    ['', 'string', REFUSED],
+  ])('%j → %j: %s', (oldText, newText, accepted) => {
+    expect(byShape(oldText, newText) !== undefined).toBe(accepted);
+  });
+
+  it('does not take a text the extractor cut short for the type, the same text included', () => {
+    // What was left out of the old union may be missing from the new one.
+    const cut = '"a" | "b" | ... 12 more ... | "z"';
+    expect(byShape(cut, cut)).toBeUndefined();
+    expect(byShape(cut, `${cut} | "zz"`)).toBeUndefined();
+    expect(byShape(`${cut} | null`, `${cut} | null | undefined`)).toBeUndefined();
+    expect(byShape(cut, 'string')).toBeUndefined();
+    const object = '{ a: string; ... 4 more ...; z: string; }';
+    expect(byShape(object, `${object} | undefined`)).toBeUndefined();
+    expect(byShape(`Promise<${object}>`, `Promise<${object}> | null`)).toBeUndefined();
+    // A member the new union does show is one it has, whatever else it holds.
+    expect(byShape('"a"', cut)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('"a" | "z"', cut)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('"c"', cut)).toBeUndefined();
+    // Three dots that cut nothing short are text like any other.
+    expect(byShape('[...string[]]', '[...string[]] | undefined')).toEqual({ rule: 'shape', fields: [] });
+  });
+});
+
+describe('#752 by shape: a type alias recorded by its text', () => {
+  const declared = types(
+    alias('PetId', 'string'),
+    alias('AnyId', 'string | number'),
+    alias('Ids', 'string[]'),
+    alias('Callback', '() => void'),
+    alias('Options', 'RequestOptions'),
+    alias('AnyOptions', 'RequestOptions | string'),
+    objectType('RequestOptions', { timeout: '?number' }),
+    objectType('RetryRequestOptions', { timeout: '?number', maxRetries: '?number' }),
+    // an alias of an alias, and aliases that stand for themselves
+    alias('Id', 'PetId'),
+    alias('Loop', 'Loop'),
+    alias('LoopOrString', 'LoopOrString | string'),
+    alias('Ping', 'Pong'),
+    alias('Pong', 'Ping'),
+    alias('Broken', 'string |'),
+  );
+
+  it.each<[string, string, boolean]>([
+    ['PetId', 'string | number', ACCEPTED],
+    ['string', 'AnyId', ACCEPTED],
+    ['PetId', 'AnyId', ACCEPTED],
+    ['AnyId', 'PetId', REFUSED],
+    ['AnyId', 'string', REFUSED],
+    ['AnyId', 'string | number', ACCEPTED],
+    ['Id', 'string', ACCEPTED],
+    ['Id', 'AnyId', ACCEPTED],
+    ['PetId | undefined', 'AnyId | undefined', ACCEPTED],
+    ['PetId[]', 'AnyId[]', ACCEPTED],
+    ['Ids', '(string | number)[]', ACCEPTED],
+    ['Ids', 'AnyId[]', ACCEPTED],
+    ['Callback', '(() => void) | undefined', ACCEPTED],
+    // an alias of a declared type, and of a union with one
+    ['Options', 'RequestOptions', ACCEPTED],
+    ['Options', 'RetryRequestOptions', ACCEPTED],
+    ['AnyOptions', 'RetryRequestOptions | string', ACCEPTED],
+    ['AnyOptions', 'RetryRequestOptions', REFUSED],
+    ['RequestOptions | string', 'AnyOptions', ACCEPTED],
+    // a generic's argument is not read behind its alias either
+    ['Promise<PetId>', 'Promise<AnyId>', REFUSED],
+    // an alias that stands for itself has nothing behind it
+    ['Loop', 'string', REFUSED],
+    ['string', 'Loop', REFUSED],
+    ['Loop', 'Loop | string', REFUSED],
+    ['Ping', 'string', REFUSED],
+    ['Ping', 'Pong', REFUSED],
+    // ... but for what else it stands for
+    ['LoopOrString', 'string', ACCEPTED],
+    ['LoopOrString', 'number', REFUSED],
+    ['string', 'LoopOrString', ACCEPTED],
+    ['Broken', 'string', REFUSED],
+    ['string', 'Broken', REFUSED],
+  ])('%j → %j: %s', (oldText, newText, accepted) => {
+    expect(byShape(oldText, newText, declared) !== undefined).toBe(accepted);
+  });
+
+  it('reads an alias of an object shape by its fields, not by its text', () => {
+    const objectAlias = types(
+      objectType('OldOptions', { timeout: '?number' }, { aliasOf: '{ timeout?: number | undefined; }' }),
+      objectType(
+        'NewOptions',
+        { timeout: '?number', maxRetries: '?number' },
+        { aliasOf: '{ timeout?: number | undefined; maxRetries?: number | undefined; }' },
+      ),
+    );
+    expect(byShape('OldOptions', 'NewOptions', objectAlias)).toEqual({
+      rule: 'shape',
+      fields: [{ oldType: 'OldOptions', newType: 'NewOptions' }],
+    });
+    expect(byShape('NewOptions', 'OldOptions', objectAlias)).toBeUndefined();
+  });
+
+  it('does not read an alias a snapshot written before `aliasOf` records by name alone', () => {
+    const byNameOnly = types(symbol('alias', 'PetId'));
+    expect(byShape('PetId', 'string', byNameOnly)).toBeUndefined();
+    expect(byShape('string', 'PetId', byNameOnly)).toBeUndefined();
+  });
+
+  it('reads each alias once, however many lead to it', () => {
+    // 40 levels, each a union of the two aliases below: 2^40 ways down.
+    const levels = 40;
+    const ladder = (prefix: string) =>
+      Array.from({ length: levels }, (_, level) => [
+        alias(
+          `${prefix}A${level}`,
+          level === levels - 1 ? 'string' : `${prefix}A${level + 1} | ${prefix}B${level + 1}`,
+        ),
+        alias(
+          `${prefix}B${level}`,
+          level === levels - 1 ? 'number' : `${prefix}A${level + 1} | ${prefix}B${level + 1}`,
+        ),
+      ]).flat();
+    const declaredLadders = types(...ladder('Old'), ...ladder('New'));
+    const started = Date.now();
+    expect(byShape('OldA0', 'NewA0', declaredLadders)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('OldA0', 'string', declaredLadders)).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("#752 by shape: an object type that keeps the old one's fields", () => {
+  const pair = (oldFields: Record<string, string>, newFields: Record<string, string>) =>
+    byShape(
+      'OldOptions',
+      'NewOptions',
+      types(objectType('OldOptions', oldFields), objectType('NewOptions', newFields)),
+    );
+
+  it.each<[string, Record<string, string>, Record<string, string>, boolean]>([
+    ['the same fields', { timeout: '?number' }, { timeout: '?number' }, ACCEPTED],
+    ['an optional field added', { timeout: '?number' }, { timeout: '?number', maxRetries: '?number' }, ACCEPTED],
+    ['a required field added', { timeout: '?number' }, { timeout: '?number', retryKey: 'string' }, REFUSED],
+    ['a field made optional', { name: 'string' }, { name: '?string' }, ACCEPTED],
+    ['a field made required', { name: '?string' }, { name: 'string' }, REFUSED],
+    ['a required field kept required', { name: 'string' }, { name: 'string', tag: '?string' }, ACCEPTED],
+    ['a field retyped', { timeout: '?number' }, { timeout: '?string' }, REFUSED],
+    ['a field widened', { timeout: '?number' }, { timeout: '?number | string' }, ACCEPTED],
+    ['a field narrowed', { timeout: '?number | string' }, { timeout: '?number' }, REFUSED],
+    ['a field whose union is reordered', { order: '"asc" | "desc"' }, { order: '"desc" | "asc"' }, ACCEPTED],
+    ['an optional field dropped', { timeout: '?number', maxRetries: '?number' }, { timeout: '?number' }, REFUSED],
+    ['a required field dropped', { name: 'string', timeout: '?number' }, { timeout: '?number' }, REFUSED],
+    ['a field renamed', { timeout: '?number' }, { timeoutMs: '?number' }, REFUSED],
+    ['a field renamed in case only', { timeout: '?number' }, { Timeout: '?number' }, REFUSED],
+    // An optional field's type is recorded with or without the `undefined` its `?` adds.
+    [
+      'an optional field recorded with `| undefined`',
+      { timeout: '?number' },
+      { timeout: '?number | undefined' },
+      ACCEPTED,
+    ],
+    ['an optional field recorded without it', { timeout: '?number | undefined' }, { timeout: '?number' }, ACCEPTED],
+    ['a field that is only ever undefined', { never: '?undefined' }, { never: '?undefined' }, ACCEPTED],
+    // A required field that may be `undefined` still has to be written.
+    ['required `T | undefined` made optional `T`', { name: 'string | undefined' }, { name: '?string' }, REFUSED],
+    ['optional `T` made required `T | undefined`', { name: '?string' }, { name: 'string | undefined' }, REFUSED],
+    ['a required field gains `| undefined`', { name: 'string' }, { name: 'string | undefined' }, ACCEPTED],
+    ['a required field loses `| undefined`', { name: 'string | undefined' }, { name: 'string' }, REFUSED],
+    // A type without fields takes any object: nothing says what callers pass.
+    ['an old type without fields', {}, { timeout: '?number' }, REFUSED],
+    ['a new type without fields', { timeout: '?number' }, {}, REFUSED],
+    ['two types without fields', {}, {}, REFUSED],
+    ['a field name with a dot in it', { 'a.b': '?number' }, { 'a.b': '?number', c: '?number' }, ACCEPTED],
+  ])('%s: %s', (_, oldFields, newFields, accepted) => {
+    expect(pair(oldFields, newFields) !== undefined).toBe(accepted);
+  });
+
+  it('asks the same question of each field, through unions, arrays, aliases and nested types', () => {
+    const declared = types(
+      objectType('Retry', { max: '?number' }),
+      objectType('Retry2', { max: '?number', delay: '?number' }),
+      objectType('Retry3', { max: '?number', delay: 'number' }),
+      alias('Order', '"asc" | "desc"'),
+      alias('WiderOrder', '"asc" | "desc" | "none"'),
+      objectType('OldOptions', { retry: '?Retry', retries: 'Retry[]', order: '?Order', either: 'Retry | string' }),
+      objectType('NewOptions', {
+        retry: '?Retry2',
+        retries: 'Retry2[]',
+        order: '?WiderOrder',
+        either: 'string | Retry2',
+      }),
+      objectType('StricterOptions', {
+        retry: '?Retry3',
+        retries: 'Retry2[]',
+        order: '?WiderOrder',
+        either: 'string | Retry2',
+      }),
+      objectType('NarrowerOptions', { retry: '?Retry2', retries: 'Retry2[]', order: '?Order', either: 'Retry2' }),
+    );
+    expect(byShape('OldOptions', 'NewOptions', declared)).toEqual({
+      rule: 'shape',
+      fields: [
+        { oldType: 'Retry', newType: 'Retry2' },
+        { oldType: 'OldOptions', newType: 'NewOptions' },
+      ],
+    });
+    // A nested type that requires a field more.
+    expect(byShape('OldOptions', 'StricterOptions', declared)).toBeUndefined();
+    // A union field that lost a member.
+    expect(byShape('OldOptions', 'NarrowerOptions', declared)).toBeUndefined();
+    // And never the other way around.
+    expect(byShape('NewOptions', 'OldOptions', declared)).toBeUndefined();
+  });
+
+  it('weighs each member of a union of object types on its own', () => {
+    const declared = types(
+      objectType('A', { a: 'string' }),
+      objectType('B', { b: 'string' }),
+      objectType('AB', { a: '?string', b: '?string' }),
+      objectType('NeedsA', { a: 'string', b: '?string' }),
+    );
+    expect(byShape('A | B', 'AB', declared)).toBeDefined();
+    expect(byShape('A | B', 'AB | undefined', declared)).toBeDefined();
+    // `B` has no `a` to give.
+    expect(byShape('A | B', 'NeedsA', declared)).toBeUndefined();
+    expect(byShape('A', 'NeedsA | B', declared)).toBeDefined();
+    expect(byShape('A | B', 'NeedsA | B', declared)).toBeDefined();
+  });
+
+  it('does not settle two types that refer to themselves', () => {
+    const declared = types(
+      objectType('Tree', { children: '?Tree[]', depth: '?number' }),
+      objectType('Tree2', { children: '?Tree2[]', depth: '?number', label: '?string' }),
+      objectType('Ping', { pong: '?Pong' }),
+      objectType('Pong', { ping: '?Ping' }),
+      objectType('Ping2', { pong: '?Pong2' }),
+      objectType('Pong2', { ping: '?Ping2' }),
+    );
+    expect(byShape('Tree', 'Tree2', declared)).toBeUndefined();
+    expect(byShape('Ping', 'Ping2', declared)).toBeUndefined();
+    // The same type on both sides is the same text.
+    expect(byShape('Tree', 'Tree | undefined', declared)).toBeDefined();
+  });
+
+  it('settles each pair of types once, however many fields lead to it', () => {
+    // 30 levels, each type with two fields of the type below.
+    const levels = 30;
+    const tower = (prefix: string, leaf: Record<string, string>) =>
+      Array.from({ length: levels }, (_, level) =>
+        objectType(
+          `${prefix}${level}`,
+          level === levels - 1 ? leaf : { left: `?${prefix}${level + 1}`, right: `?${prefix}${level + 1}` },
+        ),
+      ).flat();
+    const declared = types(
+      ...tower('Old', { timeout: '?number' }),
+      ...tower('New', { timeout: '?number', maxRetries: '?number' }),
+      ...tower('Bad', { timeout: '?string' }),
+    );
+    const started = Date.now();
+    expect(byShape('Old0', 'New0', declared)).toBeDefined();
+    expect(byShape('Old0', 'Bad0', declared)).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  describe('where the candidate declares that the old type extends the new one', () => {
+    const declared = (
+      retry: Record<string, string>,
+      base: Record<string, string>,
+      declaration: string[] = ['BaseOptions'],
+    ) => types(objectType('BaseOptions', base), objectType('RetryOptions', retry, { extends: declaration }));
+
+    it('still needs the new type to have every field of the old one', () => {
+      // `get(id, { maxRetries: 2 })` names a field `BaseOptions` does not have.
+      const widened = declared({ timeout: '?number', maxRetries: '?number' }, { timeout: '?number' });
+      expect(byShape('RetryOptions', 'BaseOptions', widened)).toBeUndefined();
+      expect(byShape('RetryOptions | undefined', 'BaseOptions | undefined', widened)).toBeUndefined();
+      // Where a value is accepted by its declared type, the declaration is enough.
+      expect(byDeclaration('RetryOptions', 'BaseOptions', widened)).toBeDefined();
+    });
+
+    it('takes the declaration for the field types, which a compiler has checked', () => {
+      const narrowed = declared({ mode: '?"fast" | "slow"' }, { mode: '?string' });
+      expect(byShape('StrictOptions', 'BaseOptions', narrowed)).toBeUndefined();
+      expect(byShape('RetryOptions', 'BaseOptions', narrowed)).toBeDefined();
+      // Without the declaration a literal's primitive is not read.
+      expect(
+        byShape('RetryOptions', 'BaseOptions', declared({ mode: '?"fast" | "slow"' }, { mode: '?string' }, [])),
+      ).toBeUndefined();
+    });
+
+    it('reads the declaration from the candidate', () => {
+      const candidate = declared({ mode: '?"fast"' }, { mode: '?string' }, []);
+      const baseline = declared({ mode: '?"fast"' }, { mode: '?string' });
+      expect(byShape('RetryOptions', 'BaseOptions', candidate, baseline)).toBeUndefined();
+      expect(byShape('RetryOptions', 'BaseOptions', baseline, candidate)).toBeDefined();
+    });
+  });
+});
+
+describe('#752 by shape: an object type written in place', () => {
+  const declared = types(
+    objectType('RequestOptions', { timeout: '?number' }),
+    objectType('RetryRequestOptions', { timeout: '?number', maxRetries: '?number' }),
+  );
+
+  it.each<[string, string, boolean]>([
+    [
+      '{ timeout?: number | undefined; }',
+      '{ timeout?: number | undefined; maxRetries?: number | undefined; }',
+      ACCEPTED,
+    ],
+    [
+      '{ timeout?: number | undefined; maxRetries?: number | undefined; }',
+      '{ timeout?: number | undefined; }',
+      REFUSED,
+    ],
+    ['{ timeout?: number | undefined; }', '{ timeout?: number | undefined; retryKey: string; }', REFUSED],
+    ['{ name: string; }', '{ name?: string | undefined; }', ACCEPTED],
+    ['{ name?: string | undefined; }', '{ name: string; }', REFUSED],
+    ['{ timeout?: number | undefined; }', '{ timeout?: string | undefined; }', REFUSED],
+    ['{ timeout?: number | undefined; }', '{ timeout?: string | number | undefined; }', ACCEPTED],
+    // nested, in an array, in a union
+    ['{ filter?: { name?: string; }; }', '{ filter?: { name?: string; tag?: string; }; }', ACCEPTED],
+    ['{ filter?: { name?: string; tag?: string; }; }', '{ filter?: { name?: string; }; }', REFUSED],
+    ['{ timeout?: number; }[]', '{ timeout?: number; maxRetries?: number; }[]', ACCEPTED],
+    ['{ timeout?: number; } | string', '{ timeout?: number; maxRetries?: number; } | string | number', ACCEPTED],
+    // one side declared, the other written in place
+    ['RequestOptions', '{ timeout?: number | undefined; maxRetries?: number | undefined; }', ACCEPTED],
+    ['{ timeout?: number | undefined; }', 'RetryRequestOptions', ACCEPTED],
+    ['RetryRequestOptions', '{ timeout?: number | undefined; }', REFUSED],
+    ['{ timeout?: number | undefined; maxRetries?: number | undefined; }', 'RequestOptions', REFUSED],
+    ['{ retry?: RequestOptions; }', '{ retry?: RetryRequestOptions; }', ACCEPTED],
+    // a type whose members do not say all a value may carry
+    ['{ timeout?: number; [key: string]: unknown; }', '{ timeout?: number; }', REFUSED],
+    ['{ timeout?: number; }', '{ timeout?: number; [key: string]: unknown; }', REFUSED],
+    ['{ retry(attempt: number): void; }', '{ retry(attempt: number): void; timeout?: number; }', REFUSED],
+    ['{}', '{ timeout?: number; }', REFUSED],
+    ['{ a: string; ... 4 more ...; z: string; }', '{ a: string; ... 4 more ...; z: string; } | undefined', REFUSED],
+  ])('%j → %j: %s', (oldText, newText, accepted) => {
+    expect(byShape(oldText, newText, declared) !== undefined).toBe(accepted);
+  });
+});
+
+describe('#752 by shape: what the snapshot has to record of a type', () => {
+  const NEW = objectType('NewOptions', { timeout: '?number', maxRetries: '?number' });
+  const accepts = (...oldType: CompatSymbol[]) =>
+    byShape('OldOptions', 'NewOptions', types(oldType, NEW)) !== undefined;
+  const [oldSymbol, oldField] = objectType('OldOptions', { timeout: '?number' });
+
+  it('settles a type recorded whole', () => {
+    expect(accepts(oldSymbol, oldField)).toBe(true);
+  });
+
+  it.each<[string, CompatSymbol[]]>([
+    ['a type the snapshot does not declare', []],
+    ['a type recorded by name only', [symbol('alias', 'OldOptions')]],
+    ['a type without `extends`', [{ ...oldSymbol, extends: undefined }, oldField]],
+    [
+      'a type that does not say its fields are all there is',
+      [{ ...oldSymbol, hasUnlistedMembers: undefined }, oldField],
+    ],
+    ['a type with an index or a call signature', [{ ...oldSymbol, hasUnlistedMembers: true }, oldField]],
+    ['a class', [symbol('service_accessor', 'OldOptions'), { ...oldField, kind: 'property' }]],
+    ['an enum', [symbol('enum', 'OldOptions')]],
+    ['a field of unknown optionality', [oldSymbol, { ...oldField, optional: undefined }]],
+    ['a field without a type', [oldSymbol, { ...oldField, typeRef: undefined }]],
+    [
+      'a property among the fields',
+      [oldSymbol, oldField, { ...oldField, id: 'p', fqName: 'OldOptions.extra', kind: 'property' }],
+    ],
+    ['a type that extends one the snapshot does not declare', [{ ...oldSymbol, extends: ['Elsewhere'] }, oldField]],
+    ['a type that extends an instantiation', [{ ...oldSymbol, extends: ['Partial<Base>'] }, oldField]],
+  ])('does not settle %s', (_, oldType) => {
+    expect(accepts(...oldType)).toBe(false);
+    // ... on the new side either.
+    const renamed = oldType.map((sym) => ({
+      ...sym,
+      fqName: sym.fqName.replace('OldOptions', 'NewOptions'),
+      ...(sym.ownerFqName ? { ownerFqName: 'NewOptions' } : {}),
+    }));
+    expect(byShape('OldOptions', 'NewOptions', types(oldSymbol, oldField, renamed))).toBeUndefined();
+  });
+});
+
+describe('#752 by shape: the old type is read from both snapshots', () => {
+  const NEW = objectType('NewOptions', { timeout: '?number', tag: '?number' });
+
+  it("refuses a retype the candidate's declaration of the old type does not fit", () => {
+    // The old type gains an optional `tag: string`; code that names it and
+    // sets `tag` no longer passes for a `NewOptions`, whose `tag` is a number.
+    const baseline = types(objectType('OldOptions', { timeout: '?number' }));
+    const candidate = types(objectType('OldOptions', { timeout: '?number', tag: '?string' }), NEW);
+    expect(byShape('OldOptions', 'NewOptions', candidate, baseline)).toBeUndefined();
+    expect(
+      byShape('OldOptions', 'NewOptions', types(objectType('OldOptions', { timeout: '?number' }), NEW), baseline),
+    ).toBeDefined();
+  });
+
+  it("refuses a retype the baseline's declaration of the old type does not fit", () => {
+    // What callers pass today has a `mode` the new type does not know.
+    const baseline = types(objectType('OldOptions', { timeout: '?number', mode: '?string' }));
+    const candidate = types(objectType('OldOptions', { timeout: '?number' }), NEW);
+    expect(byShape('OldOptions', 'NewOptions', candidate, baseline)).toBeUndefined();
+  });
+
+  it('reads a type alias on both sides as well', () => {
+    // `PetId` was `string | number`; the candidate narrows it to `string` and
+    // retypes the parameter to `string`. A caller passing `5` no longer may.
+    expect(
+      byShape('PetId', 'string', types(alias('PetId', 'string')), types(alias('PetId', 'string | number'))),
+    ).toBeUndefined();
+    // The other way: the alias widens under the callers' feet.
+    expect(
+      byShape('PetId', 'string', types(alias('PetId', 'string | number')), types(alias('PetId', 'string'))),
+    ).toBeUndefined();
+    expect(byShape('PetId', 'string', types(alias('PetId', 'string')), types(alias('PetId', 'string')))).toBeDefined();
+  });
+
+  it('reads a type the candidate dropped as the baseline declares it', () => {
+    const baseline = types(objectType('OldOptions', { timeout: '?number' }));
+    expect(byShape('OldOptions', 'NewOptions', types(NEW), baseline)).toBeDefined();
+    expect(
+      byShape('OldOptions', 'NewOptions', types(objectType('NewOptions', { tag: '?number' })), baseline),
+    ).toBeUndefined();
+  });
+
+  it('reads the new type from the candidate alone', () => {
+    const baseline = types(
+      objectType('OldOptions', { timeout: '?number' }),
+      objectType('NewOptions', { timeout: '?string' }),
+    );
+    const candidate = types(objectType('OldOptions', { timeout: '?number' }), NEW);
+    expect(byShape('OldOptions', 'NewOptions', candidate, baseline)).toBeDefined();
+    expect(byShape('OldOptions', 'NewOptions', baseline, candidate)).toBeUndefined();
+  });
+});
+
+describe('#752 by declaration: the old type declares that it extends the new one', () => {
+  const candidate = types(
+    objectType('BaseOptions', { timeout: '?number' }),
+    objectType('MidOptions', {}, { extends: ['BaseOptions'] }),
+    objectType('RetryOptions', { maxRetries: '?number' }, { extends: ['MidOptions'] }),
+    objectType('SameFields', { timeout: '?number' }),
+    objectType('PartOptions', {}, { extends: ['Partial<BaseOptions>'] }),
+    objectType('Options', {}, { extends: ['BaseOptions'] }),
+    objectType('Optional', {}, { extends: ['BaseOptions'] }),
+  );
+  const accepted = (oldText: string, newText: string, declared = candidate, baseline = declared) =>
+    byDeclaration(oldText, newText, declared, baseline) !== undefined;
+
+  it.each<[string, string]>([
+    ['MidOptions', 'BaseOptions'],
+    // through a chain
+    ['RetryOptions', 'BaseOptions'],
+    ['RetryOptions', 'MidOptions'],
+    // under the same optional spelling, as each language writes one
+    ['?RetryOptions', '?BaseOptions'],
+    ['RetryOptions?', 'BaseOptions?'],
+    ['RetryOptions | None', 'BaseOptions | None'],
+    ['Optional[RetryOptions]', 'Optional[BaseOptions]'],
+    ['RetryOptions | null', 'BaseOptions | null'],
+    ['RetryOptions | undefined', 'BaseOptions | undefined'],
+    ['null|RetryOptions', 'null|BaseOptions'],
+    ['*RetryOptions', '*BaseOptions'],
+    ['Option<RetryOptions>', 'Option<BaseOptions>'],
+    ['T.nilable(RetryOptions)', 'T.nilable(BaseOptions)'],
+    // one array suffix, and PHP's namespace
+    ['RetryOptions[]', 'BaseOptions[]'],
+    ['?RetryOptions[]', '?BaseOptions[]'],
+    ['\\Acme\\RetryOptions', '\\Acme\\BaseOptions'],
+    ['?\\Acme\\RetryOptions', '?\\Acme\\BaseOptions'],
+    // a name that is part of the other, and one a wrapper shares
+    ['Options', 'BaseOptions'],
+    ['Optional[Options]', 'Optional[BaseOptions]'],
+  ])('%j → %j is accepted', (oldText, newText) => {
+    expect(accepted(oldText, newText)).toBe(true);
+    // The new type that extends the old one asks for more than callers pass.
+    expect(accepted(newText, oldText)).toBe(false);
+  });
+
+  it.each<[string, string]>([
+    // the retype also changes what stands around the name
+    ['RetryOptions', '?BaseOptions'],
+    ['?RetryOptions', 'BaseOptions'],
+    ['RetryOptions', 'BaseOptions | None'],
+    ['RetryOptions | None', 'BaseOptions'],
+    ['RetryOptions | null', 'BaseOptions | undefined'],
+    ['Optional[RetryOptions]', 'BaseOptions | None'],
+    ['RetryOptions', 'BaseOptions[]'],
+    ['RetryOptions[]', 'BaseOptions'],
+    ['RetryOptions', 'Promise<BaseOptions>'],
+    ['\\Acme\\RetryOptions', '\\Other\\BaseOptions'],
+    ['RetryOptions | null', 'BaseOptions|null'],
+    // a generic's argument: whether a list of the subtype is taken depends on the list
+    ['List<RetryOptions>', 'List<BaseOptions>'],
+    ['list[RetryOptions]', 'list[BaseOptions]'],
+    ['Array<RetryOptions>', 'Array<BaseOptions>'],
+    ['Promise<RetryOptions>', 'Promise<BaseOptions>'],
+    ['Vec<RetryOptions>', 'Vec<BaseOptions>'],
+    ['RetryOptions[][]', 'BaseOptions[][]'],
+    ['Record<string, RetryOptions>', 'Record<string, BaseOptions>'],
+    // a union with another type
+    ['RetryOptions | string', 'BaseOptions | string'],
+    ['RetryOptions', 'BaseOptions | string'],
+    // no declaration: the same fields, an instantiation, the same type
+    ['SameFields', 'BaseOptions'],
+    ['BaseOptions', 'SameFields'],
+    ['PartOptions', 'BaseOptions'],
+    ['BaseOptions', 'BaseOptions'],
+    ['RetryOptions', 'Elsewhere'],
+    ['Elsewhere', 'BaseOptions'],
+    ['string', 'string | int'],
+    ['string', '?string'],
+    ['', 'BaseOptions'],
+  ])('%j → %j is not', (oldText, newText) => {
+    expect(accepted(oldText, newText)).toBe(false);
+  });
+
+  it('reads a type named like a wrapper by its name, and does not tell it from the wrapper around it', () => {
+    expect(accepted('Optional', 'BaseOptions')).toBe(true);
+    expect(accepted('Optional[]', 'BaseOptions[]')).toBe(true);
+    expect(accepted('Optional', 'Optional[BaseOptions]')).toBe(false);
+    // `Optional` the type under `Optional` the wrapper: what stands around
+    // the name is not told apart from the name, so the retype is not credited.
+    expect(accepted('Optional[Optional]', 'Optional[BaseOptions]')).toBe(false);
+  });
+
+  it('reads the declaration from the candidate, whatever the baseline says', () => {
+    const without = types(objectType('BaseOptions', {}), objectType('RetryOptions', {}));
+    // Declared since: the value callers pass is built from the type as it is now.
+    expect(accepted('RetryOptions', 'BaseOptions', candidate, without)).toBe(true);
+    // No longer declared, or the old type is gone.
+    expect(accepted('RetryOptions', 'BaseOptions', without, candidate)).toBe(false);
+    expect(accepted('RetryOptions', 'BaseOptions', types(objectType('BaseOptions', {})), candidate)).toBe(false);
+    // A snapshot written before `extends`.
+    expect(
+      accepted('RetryOptions', 'BaseOptions', types(symbol('alias', 'BaseOptions'), symbol('alias', 'RetryOptions'))),
+    ).toBe(false);
+  });
+
+  it('needs no field of either type, only the declaration', () => {
+    const classes = types(
+      symbol('alias', 'BaseOptions', { extends: [] }),
+      symbol('alias', 'RetryOptions', { extends: ['BaseOptions'] }),
+      symbol('field', 'RetryOptions.maxRetries', { ownerFqName: 'RetryOptions', typeRef: { name: 'int' } }),
+    );
+    expect(accepted('RetryOptions', 'BaseOptions', classes)).toBe(true);
+    // A supertype the snapshot does not declare itself is still declared.
+    expect(accepted('RetryOptions', 'Vendor', types(symbol('alias', 'RetryOptions', { extends: ['Vendor'] })))).toBe(
+      true,
+    );
+  });
+});

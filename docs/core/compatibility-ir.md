@@ -42,6 +42,7 @@ interface CompatSymbol {
   isStatic?: boolean; // a callable
   optional?: boolean; // a field: may a caller leave it out
   extends?: string[]; // a type whose members are recorded: its supertypes
+  hasUnlistedMembers?: boolean; // such a type: may a value carry more than its fields
   aliasOf?: string; // a type alias: the type text it stands for
   sourceFile?: string;
 }
@@ -72,13 +73,14 @@ interface CompatSymbol {
 
 ### Types and Their Members
 
-A type is a symbol other symbols name as their owner (`ownerFqName`). An interface, a model class and a type alias are each an `alias` symbol; a service class is a `service_accessor`. Three keys say what the snapshot keeps about a type, beside its name:
+A type is a symbol other symbols name as their owner (`ownerFqName`). An interface, a model class and a type alias are each an `alias` symbol; a service class is a `service_accessor`. Four keys say what the snapshot keeps about a type, beside its name:
 
-| Key        | On                                | Holds                                                                                               |
-| ---------- | --------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `optional` | a `field`                         | whether a caller that builds the owning type may leave the field out (`false`: it must be supplied) |
-| `extends`  | a type whose members are recorded | the supertypes its declaration names, as written; `[]` when it names none                           |
-| `aliasOf`  | a type alias                      | the type text the alias stands for, as the extractor recorded it                                    |
+| Key                  | On                                | Holds                                                                                                        |
+| -------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `optional`           | a `field`                         | whether a caller that builds the owning type may leave the field out (`false`: it must be supplied)          |
+| `extends`            | a type whose members are recorded | the supertypes its declaration names, as written; `[]` when it names none                                    |
+| `hasUnlistedMembers` | a type whose members are recorded | whether a value may carry members no `field` lists; `false` when the extractor looked and the fields are all |
+| `aliasOf`            | a type alias                      | the type text the alias stands for, as the extractor recorded it                                             |
 
 Each is left out where it does not apply or is not known, never written as `null`.
 
@@ -93,10 +95,10 @@ export type CreatePetOptions = { name: string; ownerId: string };
 ```
 
 ```jsonc
-{ "id": "iface:UpdatePetOptions", "kind": "alias", "extends": [] }
+{ "id": "iface:UpdatePetOptions", "kind": "alias", "extends": [], "hasUnlistedMembers": false }
 { "id": "field:UpdatePetOptions.name", "kind": "field", "typeRef": { "name": "string" }, "optional": true }
 { "id": "field:UpdatePetOptions.ownerId", "kind": "field", "typeRef": { "name": "string" }, "optional": false }
-{ "id": "alias:CreatePetOptions", "kind": "alias", "extends": [], "aliasOf": "{ name: string; ownerId: string; }" }
+{ "id": "alias:CreatePetOptions", "kind": "alias", "extends": [], "hasUnlistedMembers": false, "aliasOf": "{ name: string; ownerId: string; }" }
 { "id": "field:CreatePetOptions.name", "kind": "field", "typeRef": { "name": "string" }, "optional": false }
 { "id": "field:CreatePetOptions.ownerId", "kind": "field", "typeRef": { "name": "string" }, "optional": false }
 ```
@@ -122,9 +124,11 @@ Where the surface cannot tell which fields may be left out and would only write 
 
 **Supertypes.** `extends` is what the surface states (`ApiInterface.extends`, `ApiTypeAlias.extends`): the `extends` of a TypeScript interface, the types an intersection alias is written with, a PHP class's base, and a Python model's base once the extractor is told what a model is (`hints.modelBaseClasses`). The other surfaces read no supertype, and their types carry `extends: []`; a class (`service_accessor`) carries none.
 
+**Members the fields do not list.** A value of a type may carry more than its named members: an index signature takes any key (`[key: string]: unknown`, what `Record<string, string>` comes to), a call or a construct signature makes the value a function. `hasUnlistedMembers` says whether the type has any of these, its own or inherited, as the surface states it (`ApiInterface.hasUnlistedMembers`, `ApiTypeAlias.hasUnlistedMembers`). The `nodeExtractor` asks the type checker and writes it on every interface and every alias with members, `true` or `false`; for an alias it is also `true` when a member was left out of the fields (one keyed by a symbol, a private member of a class an intersection takes in). The other extractors do not look and write no key. The differ reads it for one thing: a parameter retyped from one object type to another is weighed field by field only when both say `false` (see [Compatibility Policy → A parameter retyped to a type that takes every old argument](compatibility-policy.md#a-parameter-retyped-to-a-type-that-takes-every-old-argument)). A change of it is not reported.
+
 **Which types callers build.** A snapshot records no direction, so the differ tells one this way: a type is one callers build when it is reachable from the type of a parameter of a callable or a constructor, through the types of its members, its supertypes and the text a type alias stands for. Each type text is read for every name it mentions (a union's members, an array's element, a generic's arguments), except the argument of `Partial<…>` and `Pick<…>`, which take the required members off it. A type that is both taken and returned counts as taken. The types are read from the baseline: the callers that exist today call its callables. Where `oagen verify` compares a baseline scoped to what the spec derives (`--scope spec-only`), they are read from the whole baseline, and so is which fields the SDK already has: a field the scope leaves out of the comparison is not taken for one the candidate added. An extractor that records no parameter types (Elixir's and Ruby's record each as `any` or `Object`) names no type a callable takes, so no field is reported as newly required there.
 
-**Snapshots written before these keys.** `schemaVersion` stays `"1"`: every key above is optional, and a reader that does not know one ignores it. The differ reads each only where it is defined. A baseline without `optional` cannot show a field that became required; a baseline without `extends` credits no supertype (the candidate's own `extends` is what a retype is judged by). The members of a type alias are compared only when both snapshots record them: against an alias the other snapshot records by name alone, they are neither added nor removed, so a baseline written before aliases carried members reports nothing new against a candidate extracted from the same sources.
+**Snapshots written before these keys.** `schemaVersion` stays `"1"`: every key above is optional, and a reader that does not know one ignores it. The differ reads each only where it is defined. A baseline without `optional` cannot show a field that became required; a baseline without `extends` credits no supertype (the candidate's own `extends` is what a retype is judged by); a type without `hasUnlistedMembers` is not weighed field by field. The same holds for `policies.parameterTypesAreStructural`: a baseline whose `policies` lack it has every retyped parameter reported as it was before the key existed. The members of a type alias are compared only when both snapshots record them: against an alias the other snapshot records by name alone, they are neither added nor removed, so a baseline written before aliases carried members reports nothing new against a candidate extracted from the same sources.
 
 ## CompatParameter
 
@@ -175,7 +179,7 @@ interface ParameterSensitivity {
 | `parameter_removed`                            | A parameter was removed                                                                     |
 | `parameter_renamed`                            | A parameter was renamed                                                                     |
 | `parameter_requiredness_increased`             | Optional → required                                                                         |
-| `parameter_type_narrowed`                      | Parameter type changed                                                                      |
+| `parameter_type_narrowed`                      | Parameter type changed (soft-risk when the new type takes every value of the old one)       |
 | `parameter_position_changed_order_sensitive`   | Parameter moved in order-sensitive language                                                 |
 | `constructor_position_changed_order_sensitive` | Constructor param moved in order-sensitive language                                         |
 | `named_arg_name_removed`                       | Named argument removed                                                                      |
@@ -183,6 +187,8 @@ interface ParameterSensitivity {
 | `overload_removed`                             | Method overload removed                                                                     |
 | `union_wrapper_migration_without_compat_alias` | Union wrapper migration without backward compat                                             |
 | `field_requiredness_increased`                 | A type callers build gained a required field, or one of its fields went optional → required |
+
+`parameter_type_narrowed` is reported for any parameter whose type text changed, whichever way. It keeps its category and is downgraded to `soft-risk`, with a hint, when the new type accepts every value of the old one: see [Compatibility Policy → A parameter retyped to a type that takes every old argument](compatibility-policy.md#a-parameter-retyped-to-a-type-that-takes-every-old-argument).
 
 `field_requiredness_increased` is the counterpart of `parameter_requiredness_increased` for the members of the types a callable takes (see [Which types callers build](#types-and-their-members)): an options object's fields are its parameters in all but name. It replaces the `symbol_added` such a field was reported as; a field is never reported as both. `new.takenBy` names the callable or constructor whose parameters lead to the type.
 
@@ -262,7 +268,7 @@ This enrichment happens after extraction, as a post-step in the CLI. Extractors 
 
 ### Bridge: ApiSurface → CompatSnapshot
 
-The `apiSurfaceToSnapshot()` function converts an `ApiSurface` to a `CompatSnapshot`, applying language-appropriate passing styles and sensitivity flags. This is what `extractSnapshot()` uses internally. It keeps what the surface states about each type (see [Types and Their Members](#types-and-their-members)): a field's `optional`, an interface's `extends`, a type alias's `value` as `aliasOf`, and an alias's `fields` as `field` symbols.
+The `apiSurfaceToSnapshot()` function converts an `ApiSurface` to a `CompatSnapshot`, applying language-appropriate passing styles and sensitivity flags. This is what `extractSnapshot()` uses internally. It keeps what the surface states about each type (see [Types and Their Members](#types-and-their-members)): a field's `optional`, an interface's `extends` and `hasUnlistedMembers`, a type alias's `value` as `aliasOf`, and an alias's `fields` as `field` symbols. The snapshot's `policies` are the language's defaults (see [Compatibility Policy → Language Policy](compatibility-policy.md#language-policy)), `parameterTypesAreStructural` among them.
 
 ```ts
 import { apiSurfaceToSnapshot } from "@workos/oagen";

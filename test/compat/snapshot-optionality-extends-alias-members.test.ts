@@ -1389,7 +1389,7 @@ export declare class PetsError extends Error { body: ${inNew(side, 'DetailedErro
     expect(newlyAdded.diff.changes[0].remediation).toContain('Schema "DetailedErrorBody" looks like "ErrorBody"');
   });
 
-  it('keeps its severity on a field callers write, and on a parameter', async () => {
+  it('keeps its severity on a field callers write; a parameter is weighed by its own rule (#752)', async () => {
     const written = await nodeDiff(
       (side) => `export interface OwnerRef { id: string }
 export interface DetailedOwnerRef extends OwnerRef { email: string }
@@ -1416,7 +1416,11 @@ export interface RetryRequestOptions extends RequestOptions { maxRetries?: numbe
 export declare class PetsClient { get(petId: string, options?: ${inNew(side, 'RetryRequestOptions', 'RequestOptions')}): Promise<string>; }
 `,
     );
-    expect(parameter.lines).toEqual(['breaking parameter_type_narrowed PetsClient.get']);
+    // #752: the parameter is no longer weighed by this rule. `RetryRequestOptions`
+    // has every field of `RequestOptions` and requires none more, so it takes
+    // every argument callers pass (test/compat/assignable-parameter-retype.test.ts).
+    expect(parameter.lines).toEqual(['soft-risk parameter_type_narrowed PetsClient.get']);
+    expect(parameter.diff.changes[0].remediation).not.toContain('declared subtype');
   });
 });
 

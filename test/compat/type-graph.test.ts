@@ -7,6 +7,7 @@ import {
   inputTypes,
   isObjectAlias,
   isRecordedByNameOnly,
+  recordedMembers,
 } from '../../src/compat/type-graph.js';
 import { bareTypeName, supertypeName, typeNamesIn } from '../../src/compat/type-names.js';
 
@@ -479,5 +480,167 @@ describe('#750 inputTypes', () => {
       expect(build, label).not.toThrow();
       expect(build().has('Options'), label).toBe(true);
     }
+  });
+});
+
+/**
+ * #752: the members a value of a type has, each required or not, when the
+ * snapshot records them all. The parameter rule compares two types by them,
+ * so anything short of a whole record is no record.
+ */
+describe('#752 recordedMembers', () => {
+  const whole = (name: string, extra: Partial<CompatSymbol> = {}) =>
+    type(name, { extends: [], hasUnlistedMembers: false, ...extra });
+  const optional = (owner: string, name: string, typeText = 'number') =>
+    field(owner, name, typeText, { optional: true });
+  const required = (owner: string, name: string, typeText = 'string') =>
+    field(owner, name, typeText, { optional: false });
+  const members = (typeName: string, ...symbols: CompatSymbol[]) => {
+    const read = recordedMembers(declaredTypes(snapshot(...symbols)), typeName);
+    return (
+      read &&
+      Object.fromEntries([...read].map(([name, member]) => [name, `${member.optional ? '?' : ''}${member.type}`]))
+    );
+  };
+
+  it('reads the fields of a type recorded whole, each with its type and whether it may be left out', () => {
+    expect(members('Options', whole('Options'), optional('Options', 'timeout'), required('Options', 'name'))).toEqual({
+      timeout: '?number',
+      name: 'string',
+    });
+    expect(members('Empty', whole('Empty'))).toEqual({});
+    // A member's name is what follows the type's, dots and all.
+    expect(members('Options', whole('Options'), optional('Options', 'a.b'))).toEqual({ 'a.b': '?number' });
+    // A second symbol of a name adds nothing.
+    expect(
+      members('Options', whole('Options'), optional('Options', 'timeout'), required('Options', 'timeout')),
+    ).toEqual({ timeout: '?number' });
+  });
+
+  it('reads the members a type inherits beside its own, whichever of the two the extractor lists them under', () => {
+    const base = [whole('Base'), optional('Base', 'timeout')];
+    // Listed under the supertype only (a class that declares its own properties).
+    expect(members('Retry', ...base, whole('Retry', { extends: ['Base'] }), optional('Retry', 'maxRetries'))).toEqual({
+      maxRetries: '?number',
+      timeout: '?number',
+    });
+    // Listed under the subtype as well, with the type the subtype gives it (TypeScript).
+    expect(
+      members(
+        'Retry',
+        ...base,
+        whole('Retry', { extends: ['Base'] }),
+        required('Retry', 'timeout', '5'),
+        optional('Retry', 'maxRetries'),
+      ),
+    ).toEqual({ timeout: '5', maxRetries: '?number' });
+    // Through a chain, and through PHP's namespace.
+    expect(
+      members(
+        'Leaf',
+        ...base,
+        whole('Mid', { extends: ['\\Acme\\Base'] }),
+        required('Mid', 'name'),
+        whole('Leaf', { extends: ['Mid'] }),
+      ),
+    ).toEqual({ name: 'string', timeout: '?number' });
+  });
+
+  it('reads a member two supertypes declare alike, and settles none they declare differently', () => {
+    const left = [whole('Left'), optional('Left', 'timeout')];
+    const both = (right: CompatSymbol) => [
+      ...left,
+      whole('Right'),
+      right,
+      whole('Both', { extends: ['Left', 'Right'] }),
+    ];
+    expect(members('Both', ...both(optional('Right', 'timeout')))).toEqual({ timeout: '?number' });
+    expect(members('Both', ...both(required('Right', 'timeout', 'number')))).toBeUndefined();
+    expect(members('Both', ...both(optional('Right', 'timeout', 'string')))).toBeUndefined();
+    // The subtype's own record of the member settles it.
+    expect(
+      members('Both', ...both(optional('Right', 'timeout', 'string')), required('Both', 'timeout', 'never')),
+    ).toEqual({ timeout: 'never' });
+  });
+
+  it.each<[string, CompatSymbol[]]>([
+    ['a type the snapshot does not declare', []],
+    ['a type recorded by name only', [type('Options')]],
+    ['a type alias recorded by its text', [type('Options', { aliasOf: 'string' })]],
+    ['a type with `extends` that does not say its fields are all there is', [type('Options', { extends: [] })]],
+    ['a type with members its fields do not list', [type('Options', { extends: [], hasUnlistedMembers: true })]],
+    ['a class', [symbol('service_accessor', 'Options', { extends: [], hasUnlistedMembers: false })]],
+    ['an enum', [symbol('enum', 'Options', { extends: [], hasUnlistedMembers: false })]],
+    ['a field of unknown optionality', [whole('Options'), field('Options', 'timeout', 'number')]],
+    [
+      'a field without a type',
+      [whole('Options'), symbol('field', 'Options.timeout', { ownerFqName: 'Options', optional: true })],
+    ],
+    [
+      'a property among its members',
+      [
+        whole('Options'),
+        symbol('property', 'Options.timeout', { ownerFqName: 'Options', typeRef: { name: 'number' }, optional: true }),
+      ],
+    ],
+    [
+      'a member named otherwise than under the type',
+      [whole('Options'), field('Options', 'timeout', 'number', { fqName: 'timeout', optional: true })],
+    ],
+    ['a member with no name after the type', [whole('Options'), field('Options', '', 'number', { optional: true })]],
+    ['a supertype the snapshot does not declare', [whole('Options', { extends: ['Elsewhere'] })]],
+    ['a supertype that is an instantiation', [whole('Base'), whole('Options', { extends: ['Partial<Base>'] })]],
+    ['a supertype recorded by name only', [type('Base'), whole('Options', { extends: ['Base'] })]],
+    [
+      'a supertype with members its fields do not list',
+      [type('Base', { extends: [], hasUnlistedMembers: true }), whole('Options', { extends: ['Base'] })],
+    ],
+    [
+      'a supertype with a field of unknown optionality',
+      [whole('Base'), field('Base', 'timeout', 'number'), whole('Options', { extends: ['Base'] })],
+    ],
+    [
+      'a supertype two levels up that is not recorded',
+      [whole('Mid', { extends: ['Elsewhere'] }), whole('Options', { extends: ['Mid'] })],
+    ],
+  ])('records nothing for %s', (_, symbols) => {
+    expect(members('Options', ...symbols)).toBeUndefined();
+  });
+
+  it.each([[true], [1], ['false'], [null], [[]], [{}]])(
+    'takes only `false` for the fields being all there is, not %j',
+    (stated) => {
+      const marked = type('Options', { extends: [], hasUnlistedMembers: stated as unknown as boolean });
+      expect(members('Options', marked, optional('Options', 'timeout'))).toBeUndefined();
+    },
+  );
+
+  it.each([[true], [1], ['Base'], [null], [{}], [[null]], [[1]], [[['Base']]]])(
+    'records nothing for a type whose `extends` is %j',
+    (entries) => {
+      const odd = whole('Options', { extends: entries as unknown as string[] });
+      expect(members('Options', whole('Base'), odd, optional('Options', 'timeout'))).toBeUndefined();
+    },
+  );
+
+  it('reads each type of a chain once, so a type that extends itself ends', () => {
+    expect(members('Loop', whole('Loop', { extends: ['Loop'] }), optional('Loop', 'timeout'))).toEqual({
+      timeout: '?number',
+    });
+    const ping = [whole('Ping', { extends: ['Pong'] }), optional('Ping', 'a')];
+    const pong = [whole('Pong', { extends: ['Ping'] }), optional('Pong', 'b')];
+    expect(members('Ping', ...ping, ...pong)).toEqual({ a: '?number', b: '?number' });
+    expect(members('Pong', ...ping, ...pong)).toEqual({ b: '?number', a: '?number' });
+
+    // A diamond 25 levels deep: 2^25 ways up, 50 types.
+    const levels = 25;
+    const diamond = Array.from({ length: levels }, (_, level) =>
+      ['L', 'R'].map((sideName) =>
+        whole(`${sideName}${level}`, { extends: level === levels - 1 ? [] : [`L${level + 1}`, `R${level + 1}`] }),
+      ),
+    ).flat();
+    const started = Date.now();
+    expect(members('L0', ...diamond, optional(`L${levels - 1}`, 'timeout'))).toEqual({ timeout: '?number' });
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
