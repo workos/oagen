@@ -3410,8 +3410,10 @@ export function resetCombinedDeclarations(): void {
  * from each declaration (`fieldSettings`) — its text, `default`, examples
  * and keys, the later's over the earlier's, a flag either sets — and the
  * limits of both, the stricter bound standing (`combineConstraints`) —
- * and the first declaration itself where the second adds none of it; any
- * two declarations that each
+ * and the first declaration itself where the second adds none of it, or
+ * where either is one no reader could read at every depth
+ * (`isReadableSchema`), a later declaration meeting the conjunction under
+ * the same condition (`novelConjunctions`); any two declarations that each
  * describe an object — an inline object, a `$ref` to an object component,
  * or an `allOf` that reaches one (`describesObject`, `composesObject`,
  * the component the document's: `componentSchemaOf`), written as it is or
@@ -3595,7 +3597,9 @@ function combineUnrecorded(held: SchemaObject, next: SchemaObject): SchemaObject
  * The conjunctions no reader made before the step that makes them did,
  * and every declaration combined from one since (`combineAfresh`): those
  * that exist because a nullable `oneOf`/`anyOf` wrapper was opened
- * (`openedNullableUnion`; workos/oagen#743). Where one of these stands,
+ * (`openedNullableUnion`; workos/oagen#743), and those of two maps
+ * (`conjoinMapDeclarations`; workos/oagen#744), whose first stood as
+ * written before, whatever the second declared. Where one of these stands,
  * the first declaration stood as written before, a wrapper that described
  * no object, and whatever a later member declared for the property was
  * read by no conjunction: `tag: { anyOf: [{ $ref: Tag }, { type: 'null' }]
@@ -3898,7 +3902,10 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * Both declarations are read only where a reader can read them at every
  * depth (`isReadableSchema`): a map declared second was dropped unread
  * before (workos/oagen#744), so a document may hold anything there and
- * parse; such a pair keeps the first as written.
+ * parse; such a pair keeps the first as written. And the conjunction is
+ * one no reader made before (`novelConjunctions`), so a third declaration
+ * of the property is combined with it under the same condition, and is
+ * otherwise left unread, the conjunction standing as the first map did.
  */
 function conjoinMapDeclarations(first: SchemaObject, second: SchemaObject): SchemaObject | undefined {
   const firstMap = mapSchemaOf(first);
@@ -3921,11 +3928,15 @@ function conjoinMapDeclarations(first: SchemaObject, second: SchemaObject): Sche
     (nullable || !schemaAdmitsNull(first)) &&
     stableStringify(settings) === stableStringify(held);
   if (addsNothing) return first;
-  return {
+  const conjunction: SchemaObject = {
     ...settings,
     type: nullable ? ['object', 'null'] : 'object',
     ...(values !== undefined && { additionalProperties: values }),
   };
+  // No reader made this conjunction before, so it meets a later declaration
+  // only where a reader can read that one too (`novelConjunctions`).
+  novelConjunctions.add(conjunction);
+  return conjunction;
 }
 
 /**

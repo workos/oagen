@@ -1537,4 +1537,71 @@ describe('#744 a document that parsed still parses', () => {
         fails: null"
     `);
   });
+
+  it('a third declaration meets the conjunction of two maps only where a reader can read it', async () => {
+    const [wide, narrow] = [map(ref('Tag')), map(ref('TagOutput'))];
+    const three = async (third: unknown): Promise<string> => {
+      const spec = await parse(redeclared('3.1.0', wide, narrow, { schemas, more: [third] })).catch((e: Error) => e);
+      return spec instanceof Error ? 'fails' : tagsLine(spec);
+    };
+    const lines: string[] = [];
+    for (const [label, third] of [
+      // Read at every depth: typed or not, it is combined with the conjunction.
+      ['a nullable map of `Other`', map(ref('Other'), { type: ['object', 'null'] })],
+      ['a description', { description: 'Tags by name.' }],
+      ['an inline object', { type: 'object', properties: { a: string } }],
+      // Not read at every depth: before, each met the first map as written, which no step conjoined
+      // with anything — the typed ones dropped, the typeless ones annotating it, `items: null`
+      // failing the parse. Each is left unread now, and the conjunction stands as the first map did.
+      ['a map whose `required` is no list', { ...map(ref('Other')), required: 5 }],
+      ['an `allOf` whose `required` is no list', { allOf: [ref('Other')], required: 5 }],
+      ['a description beside a `required` that is no list', { description: 'Tags by name.', required: 5 }],
+      ['`items: null`', { items: null }],
+    ] as const) {
+      lines.push(`${label}: ${await three(third)}`);
+    }
+    expect(lines.join('\n')).toMatchInlineSnapshot(`
+      "a nullable map of \`Other\`: Record<string, PetOutputTags> PetOutputTags { label: string, color: string, other?: string }
+      a description: Record<string, TagOutput> <description="Tags by name.">
+      an inline object: Record<string, TagOutput>
+      a map whose \`required\` is no list: Record<string, TagOutput>
+      an \`allOf\` whose \`required\` is no list: Record<string, TagOutput>
+      a description beside a \`required\` that is no list: Record<string, TagOutput>
+      \`items: null\`: Record<string, TagOutput>"
+    `);
+  });
+});
+
+describe('#744 where the rule meets #745: a `format` the values read from a member or beside a `$ref`', () => {
+  const schemas = { ...tags, Text: { type: 'string' } };
+  const valuesOf = (spec: ApiSpec): TypeRef | undefined => {
+    const type = fieldOf(spec, 'PetOutput', 'tags')?.type;
+    return type?.kind === 'map' ? type.valueType : undefined;
+  };
+
+  it('is the values’ own, whichever map brings them', async () => {
+    const member = map(all({ type: 'string' }, { format: 'date-time' }));
+    const beside = map(ref('Text', { format: 'date-time' }));
+    const dated = { kind: 'primitive', type: 'string', format: 'date-time' };
+    // A map that declares no values takes the other's, read as they are alone.
+    for (const values of [member, beside]) {
+      expect(valuesOf(await parse(direct('3.1.0', values, { schemas })))).toEqual(dated);
+      expect(valuesOf(await parse(redeclared('3.1.0', { type: 'object' }, values, { schemas })))).toEqual(dated);
+      expect(valuesOf(await parse(redeclared('3.1.0', values, map(true), { schemas })))).toEqual(dated);
+    }
+    // Two primitives keep the first, as they do declared for the property itself: a `format` the
+    // second map's values add is not conjoined onto the first's.
+    const plain = map({ type: 'string' });
+    expect(valuesOf(await parse(redeclared('3.1.0', member, plain, { schemas })))).toEqual(dated);
+    expect(valuesOf(await parse(redeclared('3.1.0', plain, member, { schemas })))).toEqual({
+      kind: 'primitive',
+      type: 'string',
+    });
+    const [first, second] = [{ type: 'string' }, all({ type: 'string' }, { format: 'date-time' })];
+    const property = document('3.1.0', get('/pets', 'listPets', ref('PetOutput')), {
+      Pet: { type: 'object', properties: { tags: first } },
+      PetOutput: all(ref('Pet'), { properties: { tags: second } }),
+    });
+    expect(fieldOf(await parse(property), 'PetOutput', 'tags')?.type).toEqual({ kind: 'primitive', type: 'string' });
+  });
 });
