@@ -1412,7 +1412,11 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
  */
 export function withSchemaKeywords(ref: TypeRef, schema: SchemaObject): TypeRef {
   const componentSchemas = documentComponentSchemas();
-  withLevelsFormat(ref, () => shapeLevels(schema, componentSchemas));
+  // A schema that names several types is typed as its list's union, or as
+  // the one variant the list collapses to: its own keywords reach that
+  // variant as its per-type copy keeps them (`formatless`).
+  const ownList = schema.$ref === undefined && namesSeveralTypes(schema);
+  withLevelsFormat(ref, () => shapeLevels(schema, componentSchemas), ownList);
   return withTypeConstraints(ref, schemaConstraints(schema, componentSchemas));
 }
 
@@ -1421,9 +1425,13 @@ export function withSchemaKeywords(ref: TypeRef, schema: SchemaObject): TypeRef 
  * them (`formatOfLevels`) wherever a node of it can take one and has none
  * (`withTypeFormat`). The levels are asked for, and read, only when some
  * node can (`formatless`): a type that carries no format, or has its own
- * already, reads nothing.
+ * already, reads nothing. `ownList` says `ref` was built for the very
+ * schema that writes the type list it is typed from, whose one variant —
+ * where the list collapsed to one — reads the list's keywords as its
+ * per-type copy keeps them (`collapsedVariantKeepsFormat`).
  */
-function withLevelsFormat(ref: TypeRef, levels: () => readonly SchemaObject[]): TypeRef {
+function withLevelsFormat(ref: TypeRef, levels: () => readonly SchemaObject[], ownList = false): TypeRef {
+  if (ownList && !collapsedVariantKeepsFormat(ref)) return ref;
   const awaiting = formatless(ref);
   if (awaiting.length === 0) return ref;
   const format = formatOfLevels(levels());
@@ -1477,29 +1485,39 @@ export function withTypeFormat(ref: TypeRef, format: string | undefined): TypeRe
  *     beside the `type` is. An `unknown` takes none: a schema that writes
  *     a `format` and no `type` is `unknown` with no format, as before;
  *   - the `inner` of a `nullable` wrapper, read the same way;
- *   - each variant of the union a type list is typed as
- *     (`listedVariantTypes`) that stands for a type whose per-type copy
- *     keeps the keyword (`variantKeepsFormat`), so `{ allOf: [{ type:
- *     ['string', 'boolean'] }, { format: 'date-time' }] }` is
- *     `string(date-time) | boolean`, as `format` beside the list is;
+ *   - the one variant of a union of one, which is the schema the document
+ *     wrote for that variant;
+ *   - each variant of the union a type list is typed as (`typeListUnions`)
+ *     that stands for a type whose per-type copy keeps the keyword
+ *     (`variantKeepsFormat`), so `{ allOf: [{ type: ['string', 'boolean']
+ *     }, { format: 'date-time' }] }` is `string(date-time) | boolean`, as
+ *     `format` beside the list is;
  *   - a reference `resolveSchemaPointers` has yet to settle, for a JSON
  *     Pointer `$ref` deeper into a component (#539), which records the
  *     format for that pass (`recordPendingSiteFormat`) as it records the
  *     site's limits, to give the type it settles the site into.
  *
  * Nothing else can carry one: a `model` or `enum` reference, a `literal`,
- * an `array`, a `map`, and the union of a `oneOf`/`anyOf`, whose variants
- * are schemas of their own.
+ * an `array`, a `map`, and the union of a `oneOf`/`anyOf` of several
+ * variants, whose variants are schemas of their own — whatever each
+ * variant is typed from. A variant that is itself what a type list
+ * collapsed or was narrowed to is the type it is, and no variant of this
+ * union's list: `{ oneOf: [{ type: ['string', 'boolean'], allOf: [{ type:
+ * 'string' }] }, { type: 'integer' }], format: 'uuid' }` is `string |
+ * integer`, as it is with `{ type: 'string' }` for its first variant
+ * (Greptile, #749: any variant recorded as some list's was taken for one
+ * of the union being read, so the `string` took the `uuid`).
  */
 function formatless(ref: TypeRef): Array<PrimitiveType | ModelRef> {
   switch (ref.kind) {
     case 'primitive':
-      return ref.format === undefined && ref.type !== 'unknown' && variantKeepsFormat(ref) ? [ref] : [];
+      return ref.format === undefined && ref.type !== 'unknown' ? [ref] : [];
     case 'nullable':
       return formatless(ref.inner);
     case 'union':
       if (ref.variants.length === 1) return formatless(ref.variants[0]!);
-      return ref.variants.flatMap((variant) => (listedVariantTypes.has(variant) ? formatless(variant) : []));
+      if (!typeListUnions.has(ref)) return [];
+      return ref.variants.flatMap((variant) => (variantKeepsFormat(variant) ? formatless(variant) : []));
     case 'model':
       return isPendingSchemaRef(ref) && pendingSiteFormatOf(ref) === undefined ? [ref] : [];
     case 'literal':
@@ -1512,15 +1530,41 @@ function formatless(ref: TypeRef): Array<PrimitiveType | ModelRef> {
 }
 
 /**
- * Whether `ref` may take a `format` as a variant of a type list: it is
- * none (`listedVariantTypes` holds no record of it), or stands for a type
- * whose per-type copy keeps the keyword (`TYPE_FAMILY_KEYWORDS`: `string`,
- * `integer`, `number`). The `boolean` copy of `{ type: ['string',
- * 'boolean'], format: 'date-time' }` sheds the format (`typeListCopy`), so
- * the `boolean` variant takes none written elsewhere either.
+ * Whether `ref`, the type built for the very schema that writes a type
+ * list, may take the format that schema writes: always when it is the
+ * list's union, whose variants are asked one by one (`formatless`), and,
+ * where the list collapsed to one variant, when that variant stands for a
+ * type whose per-type copy keeps the keyword (`variantKeepsFormat`). The
+ * variant is the list's copy of that type, which sheds the list's `format`
+ * for a type the keyword does not apply to, so `{ type: ['boolean',
+ * 'string'], format: 'date-time', allOf: [{ $ref: Flag }] }` over a boolean
+ * `Flag` stays a bare `boolean`, as before. The variant is `ref` itself, or
+ * what a nullable wrapper around it holds (`type: [..., 'null']`, OAS 3.0
+ * `nullable: true`). Asked at the list's own schema alone: read through
+ * anything else — a `$ref` to it, a member, a wrapper — the same variant is
+ * a type like any other, and `{ allOf: [<that schema>, { format: 'x' }] }`
+ * is `boolean(x)`, as `{ allOf: [{ type: 'boolean' }, { format: 'x' }] }`
+ * is.
  */
-function variantKeepsFormat(ref: TypeRef): boolean {
-  const types = listedVariantTypes.get(ref);
+function collapsedVariantKeepsFormat(ref: TypeRef): boolean {
+  let variant = ref;
+  while (!listedVariantTypes.has(variant) && variant.kind === 'nullable') variant = variant.inner;
+  return variantKeepsFormat(variant);
+}
+
+/**
+ * Whether `variant`, a variant of a type list — of its union, or the one
+ * it collapsed to — stands for a type whose per-type copy keeps `format`
+ * (`listedVariantTypes`; `TYPE_FAMILY_KEYWORDS`: `string`, `integer`,
+ * `number`). The `boolean` copy of `{ type: ['string', 'boolean'], format:
+ * 'date-time' }` sheds the format (`typeListCopy`), so the `boolean`
+ * variant takes none the list writes elsewhere either. Asked only of a
+ * type the caller knows to be a variant of the list it reads
+ * (`formatless`): the record alone says a type was some list's variant,
+ * never whose.
+ */
+function variantKeepsFormat(variant: TypeRef): boolean {
+  const types = listedVariantTypes.get(variant);
   return types === undefined || types.some((type) => (TYPE_FAMILY_KEYWORDS[type] ?? []).includes('format'));
 }
 
@@ -6520,7 +6564,7 @@ function multiTypeMembers(
     }),
     members.map(([, member]) => (member === undefined ? 'object' : String(member.type))),
   );
-  return variants.length > 1 ? { kind: 'union', variants } : modelRef;
+  return variants.length > 1 ? typeListUnion({ kind: 'union', variants }) : modelRef;
 }
 
 /** The `array` copy of the type list a model component admits other types by (`multiTypeMemberSchemas`), which its plan types and extracts (`MultiTypeModelOwner.items`); `undefined` when the list names no array. */
@@ -12173,15 +12217,36 @@ function dedupeListedTypeRefs(variants: readonly TypeRef[], stoodFor: ReadonlyAr
  * was read through on its way: a `$ref` to a component, an alias of it, a
  * nullable wrapper. Read too by the step that gives a type its site's
  * `format` (`formatless`; #745), which a list's variants take as its
- * per-type copies keep the keyword; a copy of a variant keeps the record
- * (`carryListedVariant`).
+ * per-type copies keep the keyword — asked of the variants of a union that
+ * is a list's (`typeListUnions`), and of the variant a list collapsed to
+ * where it is built, never of a type met anywhere else; a copy of a
+ * variant keeps the record (`carryTypeListMarks`).
  */
 const listedVariantTypes = new WeakMap<TypeRef, readonly string[]>();
 
-/** Record `to`, a copy of `from` (`cloneTypeRef`), as standing for the JSON types `from` stands for as a variant of a type list (`listedVariantTypes`), when `from` is one: a structural copy would leave it a variant no reader can tell from another. */
-export function carryListedVariant(from: TypeRef, to: TypeRef): void {
+/**
+ * The unions a type list is typed as: the one `buildTypeRef` assembles
+ * from a list's per-type copies, the one a model that admits other types
+ * is read as (`multiTypeMembers`), and what a narrowing leaves of either
+ * (`narrowedToOwnType`). `listedVariantTypes` says a type was some list's
+ * variant; this says whose union a union is, which is what a reader that
+ * treats a union's variants as one list's copies must ask (`formatless`):
+ * a variant a list collapsed to keeps its record wherever it is read, a
+ * `oneOf` that holds it among other variants included.
+ */
+const typeListUnions = new WeakSet<TypeRef>();
+
+/** `union`, recorded as the union of a type list (`typeListUnions`). */
+function typeListUnion(union: TypeRef): TypeRef {
+  typeListUnions.add(union);
+  return union;
+}
+
+/** Record `to`, a copy of `from` (`cloneTypeRef`), as what `from` is to a type list: a variant standing for the JSON types `from` stands for (`listedVariantTypes`), the list's union (`typeListUnions`), when `from` is one. A structural copy would leave it a type no reader can tell from another. */
+export function carryTypeListMarks(from: TypeRef, to: TypeRef): void {
   const types = listedVariantTypes.get(from);
   if (types !== undefined) listedVariantTypes.set(to, types);
+  if (typeListUnions.has(from)) typeListUnions.add(to);
 }
 
 /**
@@ -12297,7 +12362,10 @@ function narrowedToOwnType(schema: SchemaObject, ref: TypeRef): TypeRef {
     keptAt.map((index) => narrowed[index]!),
     keptAt.map((index) => left[index]!),
   );
-  return kept.length === 1 ? withTypeConstraints(kept[0]!, ref.constraints) : { ...ref, variants: kept };
+  if (kept.length === 1) return withTypeConstraints(kept[0]!, ref.constraints);
+  // What is left of a type list's union is that list's union still.
+  const narrowedUnion: TypeRef = { ...ref, variants: kept };
+  return typeListUnions.has(ref) ? typeListUnion(narrowedUnion) : narrowedUnion;
 }
 
 /**
@@ -12446,7 +12514,7 @@ function buildTypeRef(
         copies.map((copy) => String(copy.type)),
       );
       const ref: TypeRef =
-        variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : { kind: 'union', variants };
+        variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : typeListUnion({ kind: 'union', variants });
       return schema.type.includes('null') ? asNullable(ref) : ref;
     }
   }
