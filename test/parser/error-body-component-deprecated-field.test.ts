@@ -392,7 +392,7 @@ describe('#671 a component that deprecates a field takes no error body carrying 
     });
 
     describe('the flip that moves a body is the component’s', () => {
-      it('`ErrorBody` deprecating its `message`, or becoming deprecated, moves the body off it under each of the body’s four flag combinations, exit 2', async () => {
+      it('`ErrorBody` deprecating its `message`, or becoming deprecated, moves the body off it under each of the body’s four flag combinations (additive since #753: exit 1 forward, 2 back for the removed model)', async () => {
         const edits = [
           { component: flagged({ field: true }), flip: fieldFlip('ErrorBody').changes },
           { component: flagged({ own: true }), flip: ownFlip('ErrorBody').changes },
@@ -405,11 +405,11 @@ describe('#671 a component that deprecates a field takes no error body carrying 
               expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody']);
               expect(await diffBothWays(live, doc(op('note', body), { ErrorBody: component }))).toEqual({
                 forward: {
-                  exitCode: 2,
+                  exitCode: 1,
                   changes: [
                     'model-added GetNoteError404: additive',
                     ...flip,
-                    'operation-modified getNote errorsChanged: breaking',
+                    'operation-modified getNote errorsChanged: additive',
                   ],
                 },
                 reverse: {
@@ -417,7 +417,7 @@ describe('#671 a component that deprecates a field takes no error body carrying 
                   changes: [
                     'model-removed GetNoteError404: breaking',
                     ...flip,
-                    'operation-modified getNote errorsChanged: breaking',
+                    'operation-modified getNote errorsChanged: additive',
                   ],
                 },
               });
@@ -442,12 +442,13 @@ describe('#671 a component that deprecates a field takes no error body carrying 
           'ErrorBody { message (deprecated) }',
           'GetNoteError404 { message (deprecated) }',
         ]);
+        // Additive since #753: the error moved to a model with every field of `ErrorBody`.
         expect((await diffBothWays(at(false), at(true))).forward).toEqual({
-          exitCode: 2,
+          exitCode: 1,
           changes: [
             'model-added GetNoteError404: additive',
             ...fieldFlip('ErrorBody').changes,
-            'operation-modified getNote errorsChanged: breaking',
+            'operation-modified getNote errorsChanged: additive',
           ],
         });
       });
@@ -514,23 +515,36 @@ describe('#671 a component that deprecates a field takes no error body carrying 
       it('a body that gains `hint` moves alone, the same under either flag, as one that gains a field the component lacks does', async () => {
         const before = doc({ ...op('note', hinted('none')), ...op('pet', hinted('none')) }, schemas);
         expect(errorTypes((await parse(before)).ir)).toEqual(['getNote 404: ErrorBody', 'getPet 404: ErrorBody']);
-        const moved = {
+        // The body moves the same way in all three; what `oagen diff` calls the
+        // move differs since #753. With a `hint`, of either flag, the new model
+        // has every field of `ErrorBody { message, hint? }` and the other way
+        // round, so the operation's change is additive in both directions (the
+        // removed model is what breaks on the way back). With `more`, the body
+        // loses `hint` one way and `more` the other: breaking, as it was.
+        const moved = (operation: 'additive' | 'breaking') => ({
           forward: {
-            exitCode: 2,
-            changes: ['model-added GetPetError404: additive', 'operation-modified getPet errorsChanged: breaking'],
+            exitCode: operation === 'additive' ? 1 : 2,
+            changes: ['model-added GetPetError404: additive', `operation-modified getPet errorsChanged: ${operation}`],
           },
           reverse: {
             exitCode: 2,
-            changes: ['model-removed GetPetError404: breaking', 'operation-modified getPet errorsChanged: breaking'],
+            changes: [
+              'model-removed GetPetError404: breaking',
+              `operation-modified getPet errorsChanged: ${operation}`,
+            ],
           },
-        };
-        for (const gained of [{ hint: str }, { hint: deprecatedStr }, { more: str }]) {
+        });
+        for (const [gained, operation] of [
+          [{ hint: str }, 'additive'],
+          [{ hint: deprecatedStr }, 'additive'],
+          [{ more: str }, 'breaking'],
+        ] as const) {
           const after = doc(
             { ...op('note', hinted('none')), ...op('pet', obj({ message: str, ...gained }, ['message'])) },
             schemas,
           );
           expect(errorTypes((await parse(after)).ir)).toEqual(['getNote 404: ErrorBody', 'getPet 404: GetPetError404']);
-          expect(await diffBothWays(before, after)).toEqual(moved);
+          expect(await diffBothWays(before, after)).toEqual(moved(operation));
         }
       });
 

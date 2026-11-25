@@ -21,7 +21,7 @@ import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from
 import { constraintsShift, constraintsSides } from './constraints.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 import { diffRequestBodyContentTypes, ownRepresentationKept } from './media-types.js';
-import type { DocumentShapes } from './shapes.js';
+import { compatibleShape, type DocumentShapes } from './shapes.js';
 
 /**
  * Report webhooks added, removed and modified between two specs. A webhook is
@@ -215,13 +215,18 @@ export function diffReceivedRequest(
 /**
  * Compare what the handler is handed as a body, from the receiver's side:
  *
- * - type changed, gained or lost: breaking — it is the handler's parameter type.
+ * - type changed, gained or lost: breaking — it is the handler's parameter
+ *   type — unless it changed to one in which the handler still finds what it
+ *   read (`compatibleShape` for the reader, through `shapes`: a model with
+ *   every old field, each of the same type and required wherever it was;
+ *   #753), which is still reported (`payload type changed`), and additive.
  * - encoding changed: breaking when the representation the sender now uses
  *   — the media type the new payload is read from, with its shape — is not
- *   one the old spec declared with that shape (compared as a retype is,
- *   `sameShape` through `shapes`), so the handler decodes a wire format it
- *   never saw; additive when the old spec already declared it (a media type
- *   dropped beside a kept one). A payload without media-type lists reads as
+ *   one the old spec declared with a shape the handler's reading still
+ *   holds for (judged as a retype is, `compatibleShape` for the reader
+ *   through `shapes`), so the handler decodes a wire format it never saw;
+ *   additive when the old spec already declared it (a media type dropped
+ *   beside a kept one). A payload without media-type lists reads as
  *   breaking. Read through `requestBodyEncodingShift`, the function
  *   `diffOperations` reads an operation's body encoding with — so, as on an
  *   operation, compared only while both sides carry a `requestBody`: one
@@ -243,9 +248,10 @@ export function diffReceivedRequest(
  *   `requestBody` or carried in `requestBodyContents` alone, as the flag's
  *   rule reads it, so a payload under `application/xml` alone gaining
  *   `text/csv` is reported: one the sender can newly use, or whose body
- *   changed type, is breaking — the handler must decode it; one it can no
- *   longer use, or one that only changed a parameter other than `charset`,
- *   is additive. Compared by essence as an operation's are
+ *   changed type, is breaking — the handler must decode it — unless the
+ *   handler still finds what it read in the new type, as for the payload
+ *   itself; one it can no longer use, or one that only changed a parameter
+ *   other than `charset`, is additive. Compared by essence as an operation's are
  *   (`diffRequestBodyContentTypes`), and carried structured as `mediaTypes`
  *   beside the `details` strings.
  */
@@ -267,7 +273,7 @@ function diffWebhookBody(
   const sameType = oldBody && newBody ? typeRefsEqual(oldBody, newBody) : !oldBody && !newBody;
   if (!sameType) {
     changes.push(!oldBody ? 'payload added' : !newBody ? 'payload removed' : 'payload type changed');
-    breaking = true;
+    if (!oldBody || !newBody || !compatibleShape(oldBody, newBody, 'reader', shapes)) breaking = true;
   }
 
   const encoding = requestBodyEncodingShift(oldWebhook, newWebhook);

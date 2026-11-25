@@ -1049,8 +1049,9 @@ describe('#506', () => {
       expect(errorType(after, 'getNotes', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
       expectSound(after, ['Note', 'ErrorBody']);
       const { changes, exit } = diffOf(before, after);
-      expect(changes).toEqual(['additive model-added GetPetsError404', 'breaking operation-modified getPets']);
-      expect(exit).toBe(2);
+      // Additive since #753: `getPets`'s error moved to a model with every field of `ErrorBody`.
+      expect(changes).toEqual(['additive model-added GetPetsError404', 'additive operation-modified getPets']);
+      expect(exit).toBe(1);
     },
   );
 
@@ -1291,10 +1292,12 @@ describe('#515', () => {
       doc(getOp('pets', { '404': { description: 'nf', content: json(optional) } })),
       doc(getOp('pets', { '404': { description: 'nf', content: json(obj({ message: str, hint: str }, [])) } })),
     );
+    // The operation's own change is additive since #753: the error moved to a
+    // model with every field of `OptionalErrorBody`. The removed model stays breaking.
     expect(changes).toEqual([
       'additive model-added OptionalErrorBodyWithHint',
       'breaking model-removed OptionalErrorBody',
-      'breaking operation-modified getPets',
+      'additive operation-modified getPets',
     ]);
     expectSound(ir);
   });

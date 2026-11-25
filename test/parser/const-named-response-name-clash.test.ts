@@ -256,11 +256,13 @@ describe('#712', () => {
           'GET /dogs (listDogs): none → GetPetResponse',
           'GetPetResponse { object?: "get_pet_response", breed?: string }',
         ]);
+        // `listDogs`'s own change is additive since #753: its response moved to a
+        // model with every field of the old one. `GetPetResponse` changing hands stays breaking.
         expect(changes(await parseSpec(dogs), await parseSpec(repro))).toEqual([
           'model-added GetPetResponse2',
           'model-modified GetPetResponse (breaking)',
           'service-added Pets',
-          'operation-modified  (breaking)',
+          'operation-modified ',
         ]);
         expect(await exitCodeOf(dogs, repro)).toBe(2);
         expect(await exitCodeOf(repro, dogs)).toBe(2);

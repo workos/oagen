@@ -251,7 +251,7 @@ describe('#382', () => {
       });
     });
 
-    it('reports a header parameter removed as breaking and the payload type changed as breaking, from the receiver', () => {
+    it('reports a header parameter removed as breaking and the payload type changed, from the receiver (additive since #753: the new model has every field)', () => {
       const before = spec([operation({ callbacks: [callback({ headerParams: [header('X-Signature')] })] })]);
       const after = spec([operation({ callbacks: [callback()] })]);
       expect(diffSpecs(before, after).changes).toEqual([
@@ -270,7 +270,7 @@ describe('#382', () => {
       );
       expect(diffSpecs(spec([operation({ callbacks: [callback()] })]), retyped).changes).toEqual([
         { kind: 'model-added', name: 'Adoption', classification: 'additive' },
-        modified({ requestBodyChanged: true, details: 'payload type changed', classification: 'breaking' }),
+        modified({ requestBodyChanged: true, details: 'payload type changed', classification: 'additive' }),
       ]);
     });
 

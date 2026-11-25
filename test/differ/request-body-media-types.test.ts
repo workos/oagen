@@ -368,7 +368,7 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
     });
   });
 
-  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped, breaking', async () => {
+  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped (additive since #753: the new body only gained an optional field)', async () => {
     const { changes } = await diffDocuments(versioned(1, row), versioned(3, { ...row, cells: { type: 'integer' } }));
     expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
       requestBodyChanged: false,
@@ -376,13 +376,13 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
         added: [],
         removed: [],
         retyped: ['text/csv; version=3'],
-        classification: 'breaking',
+        classification: 'additive',
       },
-      classification: 'breaking',
+      classification: 'additive',
     });
   });
 
-  it('reports a form body moved to an identical component both documents declare as retyped, breaking (issue #390 review)', async () => {
+  it('reports a form body moved to an identical component both documents declare as retyped (issue #390 review; additive since #753)', async () => {
     const note = { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } };
     /** The JSON body on `Note` beside a form body on `form`, with `Note` and an identical `NoteCopy` declared. */
     const notes = (form: string) => ({
@@ -403,9 +403,9 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
         removed: [],
         retyped: ['application/x-www-form-urlencoded'],
         reparameterized: [],
-        classification: 'breaking',
+        classification: 'additive',
       },
-      classification: 'breaking',
+      classification: 'additive',
     });
   });
 });
@@ -489,7 +489,7 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
     });
   });
 
-  it('reports a payload moved to another model of its shape that both documents declare as retyped, breaking (issue #390)', () => {
+  it('reports a payload moved to another model of its shape that both documents declare as retyped (issue #390; additive since #753)', () => {
     const both = (noteModel: string): ApiSpec => ({
       ...spec(noteModel, note(noteModel)),
       models: [adoptionEvent, note('OldNote'), note('NewNote')],
@@ -499,9 +499,9 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
     expect(changes[0]).toMatchObject({
       kind: 'webhook-modified',
       requestBodyChanged: true,
-      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'additive' },
       details: 'payload media type text/plain retyped',
-      classification: 'breaking',
+      classification: 'additive',
     });
   });
 });
@@ -525,7 +525,7 @@ describe('#545 review — a limit edited on a body is no retype', () => {
     ).toBeUndefined();
   });
 
-  it('still reports a secondary representation whose renamed model changed its field’s items’ limits as retyped, breaking', () => {
+  it('still reports a secondary representation whose renamed model changed its field’s items’ limits as retyped (additive since #753 when they only loosened)', () => {
     const note = (name: string, items: TypeRef): Model => ({
       name,
       fields: [{ name: 'tags', type: array(items), required: false }],
@@ -550,8 +550,8 @@ describe('#545 review — a limit edited on a body is no retype', () => {
     expect(
       diffSpecs(spec('OldNote', tagged), spec('NewNote', string)).changes.find((c) => c.kind === 'operation-modified'),
     ).toMatchObject({
-      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
-      classification: 'breaking',
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'additive' },
+      classification: 'additive',
     });
     // Under one name the same edit is the field's limits change alone, as on
     // any field (#599): the body is not retyped, and the model reports it.

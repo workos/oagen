@@ -832,7 +832,8 @@ describe('#634 a contested inline enum moves under its callback stem', () => {
           'enum-added CreatePetPetAdoptedShapeSize (additive)',
           'enum-added CreatePetPetReturnedShapeSize (additive)',
           'enum-removed ShapeSize (breaking)',
-          'callback-modified petAdopted (breaking)',
+          // Additive since #753: the payload moved to a model with every field of `Shape`.
+          'callback-modified petAdopted (additive)',
           'callback-added petReturned (additive)',
         ],
       };
@@ -1220,7 +1221,8 @@ describe('#634 a contested inline enum moves under its callback stem', () => {
         expect(exit).toBe(2);
         expect([...changes].sort()).toEqual(
           [
-            'callback-modified petAdopted (breaking)',
+            // Additive since #753: the payload moved to a model with every field of the old one.
+            'callback-modified petAdopted (additive)',
             'enum-added ShapeSize (additive)',
             'enum-removed OnPetAdoptedShapeSize (breaking)',
             'model-added Shape (additive)',
