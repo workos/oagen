@@ -2163,13 +2163,17 @@ export function isSchemaObject(value: unknown): value is SchemaObject {
  * its schema, `true` and a `$ref` to it among them (`unknown`).
  *
  * Asked of a property alone — an entry of `properties`, wherever the
- * object is written, and `additionalProperties` beside `properties` on a
- * component, which `false` gives no catch-all field. A `$ref` to `false`
- * read for a type is `unknown`, as `false` written there is: a union
- * variant, an `allOf` member, array `items`, map values, a body, a
- * parameter (#728). So is a property that reaches `false` through
- * anything but a `$ref` — `{ allOf: [{ $ref: Never }] }`, a nullable
- * wrapper around the `$ref` — as `{ allOf: [false] }` in its place is.
+ * object is written — and of `additionalProperties` at the two places
+ * `false` there says something of the type: beside `properties` on a
+ * component, which it gives no catch-all field (`extractModel`), and
+ * beside `patternProperties` on a map, whose values it leaves to the
+ * first pattern (`mapValueSchema`). A `$ref` to `false` read for a type
+ * is `unknown`, as `false` written there is: a union variant, an `allOf`
+ * member, array `items`, the values of a map with no pattern, a
+ * `patternProperties` value, a body, a parameter (#728). So is a property
+ * that reaches `false` through anything but a `$ref` — `{ allOf: [{
+ * $ref: Never }] }`, a nullable wrapper around the `$ref` — as `{ allOf:
+ * [false] }` in its place is.
  *
  * A `$ref` that names nothing — a key the document lacks, another
  * section, a pointer through a token that is not there — declares the
@@ -2236,8 +2240,8 @@ const LIST_KEYWORDS = ['enum', 'required'] as const;
  * member is not readable to the reading it had (workos/oagen#732), and a
  * property's declaration that is a nullable `oneOf`/`anyOf` wrapper is
  * conjoined with another declaration of the property as the declaration
- * it wraps only where it is readable (`openedNullableUnion`;
- * workos/oagen#743: declared second, it was dropped unread).
+ * it wraps only where both are readable (`openedNullableUnion`;
+ * workos/oagen#743: the pair kept the first, the second unread).
  */
 export function isReadableSchema(schema: unknown): boolean {
   const seen = new Set<unknown>();
