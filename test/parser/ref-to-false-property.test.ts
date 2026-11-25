@@ -1095,6 +1095,22 @@ function positions(openapi: Version): Record<'property' | 'pointer' | 'typed', A
           }),
         }),
     ],
+    [
+      'the catch-all `additionalProperties` a pointer names from a response body',
+      (v) =>
+        document(
+          { Pet: pet(), Box: object({ id: string }, { additionalProperties: v }) },
+          json({ $ref: '#/components/schemas/Box/additionalProperties' }),
+        ),
+    ],
+    [
+      'the catch-all `additionalProperties` a pointer names from another property',
+      (v) =>
+        document({
+          Pet: pet({ again: { $ref: '#/components/schemas/Box/additionalProperties' } }),
+          Box: object({ id: string }, { additionalProperties: v }),
+        }),
+    ],
   ];
 
   const typed: Array<[string, Build]> = [
@@ -1572,6 +1588,7 @@ describe.each(VERSIONS)('#746 a JSON Pointer to a property that is `false`, Open
     // with the unresolved-reference warning for the inline `false` and with none for the `$ref`). A body or
     // array items written as the pointer are read for a type: `unknown`, with the warning a pointer to a
     // property written `false` always had (on main the `$ref` spelling was typed silently, from the field).
+    // The same for a pointer to `additionalProperties` beside named properties, which gives no catch-all field.
     expect(lines.join('\n')).toMatchInlineSnapshot(`
       "a property a pointer names from another property
         Pet { name?: string }
@@ -1584,11 +1601,17 @@ describe.each(VERSIONS)('#746 a JSON Pointer to a property that is `false`, Open
         [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/legacyId" in Pets.getPet.response: no schema at that pointer — typing the site as unknown
       a property a pointer names from array items
         Pet { name?: string, tags?: unknown[] }
-        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/legacyId" in Pet.tags: no schema at that pointer — typing the site as unknown"
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/legacyId" in Pet.tags: no schema at that pointer — typing the site as unknown
+      the catch-all \`additionalProperties\` a pointer names from a response body
+        Pet { name?: string }; Box { id?: string }; getPet(path petId: string) -> unknown
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pets.getPet.response: no schema at that pointer — typing the site as unknown
+      the catch-all \`additionalProperties\` a pointer names from another property
+        Pet { name?: string }; Box { id?: string }
+        (no warning)"
     `);
   });
 
-  it('keeps a pointer to a property written `true` the `unknown` it was, with the warning (#728)', async () => {
+  it('keeps a pointer to `true` the `unknown` it was at each of those sites, with the warning (#728)', async () => {
     const lines: string[] = [];
     for (const [position, build] of positions(openapi).pointer) {
       const reading = await read(build(true));
@@ -1606,7 +1629,13 @@ describe.each(VERSIONS)('#746 a JSON Pointer to a property that is `false`, Open
         [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/legacyId" in Pets.getPet.response: no schema at that pointer — typing the site as unknown
       a property a pointer names from array items
         Pet { name?: string, legacyId?: unknown, tags?: unknown[] }
-        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/legacyId" in Pet.tags: no schema at that pointer — typing the site as unknown"
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/legacyId" in Pet.tags: no schema at that pointer — typing the site as unknown
+      the catch-all \`additionalProperties\` a pointer names from a response body
+        Pet { name?: string }; Box { id?: string }; getPet(path petId: string) -> unknown
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pets.getPet.response: no schema at that pointer — typing the site as unknown
+      the catch-all \`additionalProperties\` a pointer names from another property
+        Pet { name?: string, again?: unknown }; Box { id?: string }
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pet.again: no schema at that pointer — typing the site as unknown"
     `);
   });
 });
@@ -1964,6 +1993,18 @@ describe('#746 the one question a reader of `properties` asks', () => {
         problem: 'no schema at that pointer',
       });
       expect(pointerSteps(byRef, ['properties', 'name'], holder)).toHaveLength(1);
+      // And one to `additionalProperties` beside named properties, which gives the model no catch-all field.
+      const box = (additionalProperties: unknown): SchemaObject =>
+        written({ type: 'object', properties: { id: string }, additionalProperties });
+      expect(pointerSteps(box(legacyId), ['additionalProperties'], map)).toEqual({
+        problem: 'no schema at that pointer',
+      });
+      expect(pointerSteps(box(false), ['additionalProperties'], map)).toEqual({ problem: 'no schema at that pointer' });
+      expect(pointerSteps(box(string), ['additionalProperties'], map)).toHaveLength(1);
+      // A map's values are read for a type: the step stands, as it did.
+      expect(
+        pointerSteps(written({ type: 'object', additionalProperties: legacyId }), ['additionalProperties'], map),
+      ).toHaveLength(1);
     }
     // A `$ref` to `true` declares the property for each of them.
     const toTrue = object(ref('Anything'));
