@@ -43,6 +43,7 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   isReadableSchema,
+  isDeclaredProperty,
   isSchemaObject,
   nullableAxisBranch,
   unionFlaggedNullable,
@@ -283,7 +284,7 @@ export function mintedChildNameEntries(
   contextFree = false,
 ): MintedInlineName[] {
   return Object.entries(properties ?? {}).flatMap(([property, schema]) =>
-    schema
+    isDeclaredProperty(schema)
       ? mintedInlineNameEntries(property, schema, modelName, undefined, true).map((child) =>
           contextFree ? { ...child, contextFree } : child,
         )
@@ -1684,7 +1685,7 @@ export function collectProperties(
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value) declareProperty(ledger, key, value, null, onBranch);
+      if (isDeclaredProperty(value, schemas)) declareProperty(ledger, key, value, null, onBranch);
     }
     for (const sub of s.allOf ?? []) visit(sub, onBranch);
     for (const axis of unionAxesOf(s)) {
@@ -2093,7 +2094,7 @@ export function extractInlineModelsFromProperties(
   }
 
   for (const [fieldName, rawFieldSchema] of Object.entries(properties)) {
-    if (!rawFieldSchema) continue;
+    if (!isDeclaredProperty(rawFieldSchema, componentSchemas)) continue;
     // Dispatch on the shape `schemaToTypeRef` named: it strips nullable
     // wrappers before deciding whether a field is an object, array, or map,
     // so a nullable field must be unwrapped here the same way or its inline
@@ -3546,9 +3547,9 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
   if (isInlineObjectSchema(first) && isInlineObjectSchema(second)) {
     const properties: Record<string, SchemaObject | undefined> = { ...first.properties };
     for (const [key, schema] of Object.entries(second.properties ?? {})) {
-      if (!schema) continue;
+      if (!isDeclaredProperty(schema)) continue;
       const held = properties[key];
-      properties[key] = held ? combineDeclarations(held, schema) : schema;
+      properties[key] = isDeclaredProperty(held) ? combineDeclarations(held, schema) : schema;
     }
     const required = [...new Set([...(first.required ?? []), ...(second.required ?? [])])];
     // `null` exactly when both admit it (`schemaAdmitsNull`), in the
@@ -5016,7 +5017,7 @@ function readVariant(
     return;
   }
   for (const [key, value] of Object.entries(schema.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, false);
+    if (isDeclaredProperty(value, componentSchemas)) declareProperty(ledger, key, value, null, false);
   }
   for (const sub of schema.allOf ?? []) readVariant(ledger, sub, componentSchemas, seen, walking);
   for (const variants of unionAxesOf(schema)) {
@@ -5243,7 +5244,7 @@ export function mergeAllOfMembers(
     // pointer's schema.
     wrapperDiscriminator = handedPastRef(wrapperDiscriminator, s, viaComponent);
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value) declareProperty(declared, key, value, origin, false);
+      if (isDeclaredProperty(value, componentSchemas)) declareProperty(declared, key, value, origin, false);
     }
     if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
     // A member that is itself an `allOf` is part of the `allOf` it sits in,
@@ -5948,13 +5949,28 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
  * `patternProperties` entry. `additionalProperties: {}` means "any value"
  * (typed `unknown`, nothing to extract) and does not fall through to
  * `patternProperties`, matching the type-ref branch.
+ *
+ * `additionalProperties: false` allows no member but the patterns', so the
+ * values are the first pattern's, and so they are under a `$ref` that
+ * leads to that `false` (`isDeclaredProperty`; #746: the `$ref` is an
+ * object, so it was the value schema, `unknown`, and `{ patternProperties:
+ * { '^x-': { type: 'string' } }, additionalProperties: { $ref: Never } }`
+ * was `map<unknown>` where `additionalProperties: false` leaves
+ * `map<string>`). With no pattern to type the values, such a `$ref` is
+ * the value schema it was, read for a type: `unknown`, as `false` there
+ * leaves the values. `componentSchemas` is the map the `$ref` is resolved
+ * in, the document's own when none is handed.
  */
-export function mapValueSchema(schema: SchemaObject): SchemaObject | null {
+export function mapValueSchema(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | null {
   const additional = schema.additionalProperties;
-  if (additional && typeof additional === 'object') {
+  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
+  const leftToPatterns = patterns.length > 0 && !isDeclaredProperty(additional, componentSchemas);
+  if (additional && typeof additional === 'object' && !leftToPatterns) {
     return Object.keys(additional).length > 0 ? additional : null;
   }
-  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
   return patterns[0] ?? null;
 }
 
@@ -5974,7 +5990,7 @@ export function buildInlineModel(
   const siblings = collectProperties(schema);
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
-    if (!fieldSchema) continue;
+    if (!isDeclaredProperty(fieldSchema, componentSchemas)) continue;
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 

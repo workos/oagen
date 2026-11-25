@@ -123,6 +123,7 @@ import {
   componentTypeRef,
   isArrayComponentRef,
   isArrayPointerRef,
+  isDeclaredProperty,
   isNullSchema,
   modelReferenceIdentity,
   OWN_MODEL,
@@ -531,6 +532,16 @@ export interface PointerStep {
  * A pointer that goes through several `allOf`s to the member it ends at
  * (`value/allOf/1/allOf/0`) ends at a type only when each of them is read
  * as the member it goes through (`memberNotReadAs`; #675 review).
+ *
+ * A `properties/<name>` step to an entry that declares no property
+ * (`isDeclaredProperty`: written `false`, or as a `$ref` that leads to
+ * `false`) leads to no schema, whichever way the entry is written, since
+ * the model has no such field; and so does an `additionalProperties` step
+ * to one beside named properties, which gives the model no catch-all
+ * field, or beside a pattern, which types the map's values in its place
+ * (#746: the `$ref` spelling was a schema here, and the site was typed
+ * from the field the model then had, or from the values the `$ref` then
+ * typed).
  */
 export function pointerSteps(
   component: SchemaObject,
@@ -546,6 +557,11 @@ export function pointerSteps(
     if (!next) return { problem: 'no schema at that pointer' };
     switch (keyword) {
       case 'properties':
+        // A property written as a `$ref` that names `false` is the `false`
+        // it names (`isDeclaredProperty`; #746): no schema, as the same
+        // `false` written in its place is none (`schemaAtPointer`).
+        if (!isDeclaredProperty(next, schemas)) return { problem: 'no schema at that pointer' };
+        break;
       case 'items':
         break;
       case 'additionalProperties':
@@ -553,10 +569,18 @@ export function pointerSteps(
         // The IR types a map's values from one schema; a model with named
         // properties carries a non-empty `additionalProperties` as its
         // catch-all field and no pattern at all.
-        const represented = mapValueSchema(node);
+        const represented = mapValueSchema(node, schemas);
         const named = Object.keys(node.properties ?? {}).length > 0;
         if (keyword === 'patternProperties' && named)
           return { problem: `a schema with named properties types no "${keyword}/${name}" values` };
+        // A `$ref` that names `false` is the `false` it names where
+        // `additionalProperties: false` means something (`isDeclaredProperty`;
+        // #746): beside named properties, where it gives the model no
+        // catch-all field, and beside a pattern, which then types the values
+        // (`mapValueSchema`). No schema to read the values from, as `false`
+        // written there is none.
+        if (keyword === 'additionalProperties' && !isDeclaredProperty(next, schemas) && (named || represented !== next))
+          return { problem: 'no schema at that pointer' };
         if (represented !== next && !(keyword === 'additionalProperties' && represented === null && !named))
           return {
             problem: `the values are typed from another schema than "${keyword}${name === undefined ? '' : `/${name}`}"`,

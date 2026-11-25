@@ -17,6 +17,7 @@ import {
   allOfReadAsMember,
   classifyInlineSchema,
   componentUnionDispatches,
+  isDeclaredProperty,
   declaresNull,
   isArraySchema,
   isNullSchema,
@@ -1171,7 +1172,7 @@ export function collectObjectProperties(
     const forMembers = wrapperDiscriminatorWithin(bare, handedIn, componentSchemas);
     for (const sub of bare.allOf ?? []) visit(sub, inline ? depth : depth + 1, origin, forMembers);
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
-      if (!prop) continue;
+      if (!isDeclaredProperty(prop, componentSchemas)) continue;
       note(key);
       const existing = properties[key];
       properties[key] = existing ? combineDeclarations(existing, prop) : prop;
