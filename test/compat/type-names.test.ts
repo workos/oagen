@@ -3,78 +3,297 @@ import { bareTypeName } from '../../src/compat/type-names.js';
 
 /**
  * `bareTypeName` reads the declared type a recorded type text names. #751:
- * an optional or nullable spelling is transparent to it, in every spelling
- * and order a language writes, and at every place the function looks (the
- * top, an array's element, a single generic argument).
+ * an optional or nullable spelling is transparent to it, so a text reads as
+ * the same text without its optional spellings did before #751, in every
+ * spelling and order a language writes and at every place the function looks
+ * (the top, an array's element, a single generic argument).
  */
+
+/**
+ * Texts without an optional spelling, each with what the function returned for
+ * it before #751. None of these may move, and they are what every optional
+ * spelling below is measured against.
+ */
+const PLAIN: [text: string, name: string][] = [
+  // a name, an array of it, a single-argument generic around it
+  ['ErrorBody', 'ErrorBody'],
+  ['  ErrorBody  ', 'ErrorBody'],
+  ['ErrorBody[]', 'ErrorBody'],
+  ['Array<ErrorBody>', 'ErrorBody'],
+  ['Promise<ErrorBody>', 'ErrorBody'],
+  ['List< ErrorBody >', 'ErrorBody'],
+  ['Iterator[ErrorBody]', 'ErrorBody'],
+  ['list[ErrorBody]', 'ErrorBody'],
+  ['List<ErrorBody>[]', 'ErrorBody'],
+  ['models.ErrorBody', 'models.ErrorBody'],
+  ['models.List<models.ErrorBody>', 'models.ErrorBody'],
+  ['\\Acme\\Models\\ErrorBody', 'ErrorBody'],
+  ['\\Acme\\Models\\ErrorBody[]', 'ErrorBody'],
+  // one array suffix and one generic are read through, not two
+  ['ErrorBody[][]', 'ErrorBody[]'],
+  ['Promise<ErrorBody[]>', 'Promise<ErrorBody[]>'],
+  ['Promise<Array<ErrorBody>>', 'Promise<Array<ErrorBody>>'],
+  // several arguments
+  ['Record<string, ErrorBody>', 'Record<string, ErrorBody>'],
+  ['Dict[str, ErrorBody]', 'Dict[str, ErrorBody]'],
+  // several types: at the top, grouped, as an array's element, as a generic's argument
+  ['ErrorBody | Unrelated', 'ErrorBody | Unrelated'],
+  ['Unrelated | ErrorBody', 'Unrelated | ErrorBody'],
+  ['ErrorBody|Unrelated', 'ErrorBody|Unrelated'],
+  ['(ErrorBody | Unrelated)', '(ErrorBody | Unrelated)'],
+  ['(Unrelated | ErrorBody)', '(Unrelated | ErrorBody)'],
+  ['(ErrorBody|Unrelated)', '(ErrorBody|Unrelated)'],
+  ['(ErrorBody | Unrelated)[]', '(ErrorBody | Unrelated)'],
+  ['Promise<ErrorBody | Unrelated>', 'Promise<ErrorBody | Unrelated>'],
+  ['Promise<(ErrorBody | Unrelated)>', 'Promise<(ErrorBody | Unrelated)>'],
+  ['Union[ErrorBody, Unrelated]', 'Union[ErrorBody, Unrelated]'],
+  // A PHP union of two fully-qualified types has always been read as its
+  // last member: the namespace prefix is cut at the last backslash of the text.
+  ['\\Acme\\Unrelated|\\Acme\\ErrorBody', 'ErrorBody'],
+  ['(\\Acme\\Unrelated|\\Acme\\ErrorBody)', '(\\Acme\\Unrelated|\\Acme\\ErrorBody)'],
+  // no name at all
+  ['{ body: ErrorBody; }', '{ body: ErrorBody; }'],
+  ['() => ErrorBody', '() => ErrorBody'],
+  ['(ErrorBody)', '(ErrorBody)'],
+  ['"ErrorBody"', '"ErrorBody"'],
+  // shapes of other languages the function has no rule for
+  ['[]ErrorBody', '[]ErrorBody'],
+  ['map[string]ErrorBody', 'map[string]ErrorBody'],
+  ['[ErrorBody]', '[ErrorBody]'],
+  ['ErrorBody.t()', 'ErrorBody.t()'],
+  ["&'a ErrorBody", "&'a ErrorBody"],
+  // a space before the suffix stays in the name, as it did
+  ['ErrorBody []', 'ErrorBody '],
+];
+
+/** The optional spellings the function read before #751, with what it returned. */
+const READ_BEFORE: [text: string, name: string][] = [
+  ['ErrorBody | null', 'ErrorBody'],
+  ['ErrorBody|null', 'ErrorBody'],
+  ['ErrorBody?', 'ErrorBody'],
+  ['*ErrorBody', 'ErrorBody'],
+  ['ErrorBody[] | null', 'ErrorBody'],
+  ['ErrorBody[]?', 'ErrorBody'],
+  ['List<ErrorBody>?', 'ErrorBody'],
+  ['Optional[ErrorBody]', 'ErrorBody'],
+  ['typing.Optional[ErrorBody]', 'ErrorBody'],
+  ['Optional<ErrorBody>', 'ErrorBody'],
+  ['Option<ErrorBody>', 'ErrorBody'],
+  ['Nullable<ErrorBody>', 'ErrorBody'],
+  ['NotRequired[ErrorBody]', 'ErrorBody'],
+  ['*Iterator[ErrorBody]', 'ErrorBody'],
+  ['Iterator[*ErrorBody]', 'ErrorBody'],
+  ['\\Acme\\ErrorBody|null', 'ErrorBody'],
+  ['ErrorBody | Unrelated | null', 'ErrorBody | Unrelated'],
+  ['\\Acme\\Unrelated|\\Acme\\ErrorBody|null', 'ErrorBody'],
+];
+
+/** What the function returned before #751 for a text of `PLAIN`. */
+function nameBefore751(plain: string): string {
+  const row = PLAIN.find(([text]) => text === plain);
+  if (!row) throw new Error(`not pinned in PLAIN: ${JSON.stringify(plain)}`);
+  return row[1];
+}
+
+type Spell = (text: string) => string;
+
+/** An optional spelling around a whole text. */
+const SPELLINGS: Record<string, Spell> = {
+  'X | undefined': (t) => `${t} | undefined`,
+  'undefined | X': (t) => `undefined | ${t}`,
+  'X|undefined': (t) => `${t}|undefined`,
+  'undefined|X': (t) => `undefined|${t}`,
+  'X | null': (t) => `${t} | null`,
+  'null | X': (t) => `null | ${t}`,
+  'X|null': (t) => `${t}|null`,
+  'null|X': (t) => `null|${t}`,
+  'X|NULL': (t) => `${t}|NULL`,
+  'X | null | undefined': (t) => `${t} | null | undefined`,
+  'X | undefined | null': (t) => `${t} | undefined | null`,
+  'undefined | null | X': (t) => `undefined | null | ${t}`,
+  'null | X | undefined': (t) => `null | ${t} | undefined`,
+  'X | None': (t) => `${t} | None`,
+  'None | X': (t) => `None | ${t}`,
+  'X|None': (t) => `${t}|None`,
+  'None|X': (t) => `None|${t}`,
+  'X | nil': (t) => `${t} | nil`,
+  'nil | X': (t) => `nil | ${t}`,
+  '?X': (t) => `?${t}`,
+  'X?': (t) => `${t}?`,
+  '*X': (t) => `*${t}`,
+  'Optional[X]': (t) => `Optional[${t}]`,
+  'typing.Optional[X]': (t) => `typing.Optional[${t}]`,
+  'Optional[X | None]': (t) => `Optional[${t} | None]`,
+  'Optional[Optional[X]]': (t) => `Optional[Optional[${t}]]`,
+  'NotRequired[X]': (t) => `NotRequired[${t}]`,
+  'Union[X, None]': (t) => `Union[${t}, None]`,
+  'Union[None, X]': (t) => `Union[None, ${t}]`,
+  'typing.Union[X, None]': (t) => `typing.Union[${t}, None]`,
+  'Optional<X>': (t) => `Optional<${t}>`,
+  'Option<X>': (t) => `Option<${t}>`,
+  'std::option::Option<X>': (t) => `std::option::Option<${t}>`,
+  'Nullable<X>': (t) => `Nullable<${t}>`,
+  'T.nilable(X)': (t) => `T.nilable(${t})`,
+};
+
+/**
+ * A union with a member for no value, in parentheses: how an optional element
+ * of an array is written, `(X | null)[]`. Around a text that is itself a
+ * union, the parentheses stay with what is left: `(A | B | null)` → `(A | B)`.
+ */
+const GROUPED_SPELLINGS: Record<string, Spell> = {
+  '(X | undefined)': (t) => `(${t} | undefined)`,
+  '(undefined | X)': (t) => `(undefined | ${t})`,
+  '(X | null)': (t) => `(${t} | null)`,
+  '(X|null)': (t) => `(${t}|null)`,
+  '(null | X)': (t) => `(null | ${t})`,
+  '(X | null | undefined)': (t) => `(${t} | null | undefined)`,
+  '(X | None)': (t) => `(${t} | None)`,
+  '(X | None), wrapped over lines': (t) => `(\n        ${t} | None\n    )`,
+  '(X | nil)': (t) => `(${t} | nil)`,
+};
+
+/** The texts of `PLAIN` that are a union of several types at their top level. */
+const UNIONS = new Set([
+  'ErrorBody | Unrelated',
+  'Unrelated | ErrorBody',
+  'ErrorBody|Unrelated',
+  '\\Acme\\Unrelated|\\Acme\\ErrorBody',
+]);
+
+/** The text an optional spelling was put around, as `PLAIN` has it: in a
+ *  grouped spelling a union keeps its parentheses. */
+const plainOf = (text: string, grouped: boolean) => (grouped && UNIONS.has(text) ? `(${text})` : text);
+
+const EVERY_SPELLING: [title: string, spell: Spell, grouped: boolean][] = [
+  ...Object.entries(SPELLINGS).map(([title, spell]): [string, Spell, boolean] => [title, spell, false]),
+  ...Object.entries(GROUPED_SPELLINGS).map(([title, spell]): [string, Spell, boolean] => [title, spell, true]),
+];
+
 describe('bareTypeName (#751)', () => {
-  // What the function returned before #751, text by text: none of these may move.
   describe('a text without an optional spelling reads as it always has', () => {
-    it.each([
-      // a name, an array of it, a single-argument generic around it
-      ['ErrorBody', 'ErrorBody'],
-      ['  ErrorBody  ', 'ErrorBody'],
-      ['ErrorBody[]', 'ErrorBody'],
-      ['Array<ErrorBody>', 'ErrorBody'],
-      ['Promise<ErrorBody>', 'ErrorBody'],
-      ['List< ErrorBody >', 'ErrorBody'],
-      ['Iterator[ErrorBody]', 'ErrorBody'],
-      ['list[ErrorBody]', 'ErrorBody'],
-      ['List<ErrorBody>[]', 'ErrorBody'],
-      ['models.ErrorBody', 'models.ErrorBody'],
-      ['\\Acme\\Models\\ErrorBody', 'ErrorBody'],
-      ['\\Acme\\Models\\ErrorBody[]', 'ErrorBody'],
-      // one array suffix and one generic are read through, not two
-      ['ErrorBody[][]', 'ErrorBody[]'],
-      ['Promise<ErrorBody[]>', 'Promise<ErrorBody[]>'],
-      ['Promise<Array<ErrorBody>>', 'Promise<Array<ErrorBody>>'],
-      // several arguments, several types, or no name at all
-      ['Record<string, ErrorBody>', 'Record<string, ErrorBody>'],
-      ['Dict[str, ErrorBody]', 'Dict[str, ErrorBody]'],
-      ['ErrorBody | Unrelated', 'ErrorBody | Unrelated'],
-      ['ErrorBody|Unrelated', 'ErrorBody|Unrelated'],
-      ['Union[ErrorBody, Unrelated]', 'Union[ErrorBody, Unrelated]'],
-      ['{ body: ErrorBody; }', '{ body: ErrorBody; }'],
-      ['() => ErrorBody', '() => ErrorBody'],
-      ['(ErrorBody)', '(ErrorBody)'],
-      ['"ErrorBody"', '"ErrorBody"'],
-      // shapes of other languages the function has no rule for
-      ['[]ErrorBody', '[]ErrorBody'],
-      ['map[string]ErrorBody', 'map[string]ErrorBody'],
-      ['[ErrorBody]', '[ErrorBody]'],
-      ['ErrorBody.t()', 'ErrorBody.t()'],
-      ["&'a ErrorBody", "&'a ErrorBody"],
-      // a space before the suffix stays in the name, as it did
-      ['ErrorBody []', 'ErrorBody '],
-    ])('%j → %j', (text, name) => {
+    it.each(PLAIN)('%j → %j', (text, name) => {
       expect(bareTypeName(text)).toBe(name);
     });
 
-    // The spellings the function read before #751.
-    it.each([
-      ['ErrorBody | null', 'ErrorBody'],
-      ['ErrorBody|null', 'ErrorBody'],
-      ['ErrorBody?', 'ErrorBody'],
-      ['*ErrorBody', 'ErrorBody'],
-      ['ErrorBody[] | null', 'ErrorBody'],
-      ['ErrorBody[]?', 'ErrorBody'],
-      ['List<ErrorBody>?', 'ErrorBody'],
-      ['Optional[ErrorBody]', 'ErrorBody'],
-      ['typing.Optional[ErrorBody]', 'ErrorBody'],
-      ['Optional<ErrorBody>', 'ErrorBody'],
-      ['Option<ErrorBody>', 'ErrorBody'],
-      ['Nullable<ErrorBody>', 'ErrorBody'],
-      ['NotRequired[ErrorBody]', 'ErrorBody'],
-      ['*Iterator[ErrorBody]', 'ErrorBody'],
-      ['Iterator[*ErrorBody]', 'ErrorBody'],
-      ['\\Acme\\ErrorBody|null', 'ErrorBody'],
-      ['ErrorBody | Unrelated | null', 'ErrorBody | Unrelated'],
-    ])('%j → %j, as before', (text, name) => {
+    it.each(READ_BEFORE)('%j → %j, as before', (text, name) => {
       expect(bareTypeName(text)).toBe(name);
     });
   });
 
-  describe('an optional spelling is transparent', () => {
+  /**
+   * The rule: `bareTypeName(spelled)` is what the function returned before
+   * #751 for the same text without the optional spelling. Every spelling,
+   * around every text of `PLAIN`, at each of the three places the function
+   * looks.
+   */
+  describe('an optional spelling is transparent: a text reads as the same text without it did', () => {
+    // An unpaired quote (a Rust lifetime) leaves a text whole; see the last block.
+    const texts = PLAIN.map(([text]) => text).filter((text) => !text.includes("'"));
+
+    it.each(EVERY_SPELLING)('around the whole text: %s', (_title, spell, grouped) => {
+      const moved: string[] = [];
+      for (const text of texts) {
+        const name = bareTypeName(spell(text));
+        const expected = nameBefore751(plainOf(text, grouped));
+        if (name !== expected) moved.push(`${JSON.stringify(spell(text))} → ${JSON.stringify(name)}, not ${expected}`);
+      }
+      expect(moved).toEqual([]);
+    });
+
+    // Every array of `PLAIN`, the spelling around its element: `(X | null)[]`,
+    // `X?[]`, `Optional[X][]`. (A sigil in front, `?X[]`, is around the whole
+    // text.) The padded `ErrorBody []` is left out.
+    const arrays = texts.filter((text) => text.endsWith('[]') && !text.endsWith(' []'));
+    const aroundAnElement = EVERY_SPELLING.filter(([title]) => !title.startsWith('?') && !title.startsWith('*'));
+
+    it.each(aroundAnElement)("around an array's element: %s", (_title, spell, grouped) => {
+      expect(arrays).toHaveLength(5);
+      const moved: string[] = [];
+      for (const array of arrays) {
+        const element = array.slice(0, -2);
+        // Only a text that is one member can join a union: `X[] | null`, not `A | B | null[]`.
+        const spelled = `${grouped || !UNIONS.has(element) ? spell(element) : `Optional[${element}]`}[]`;
+        const name = bareTypeName(spelled);
+        if (name !== nameBefore751(array)) moved.push(`${JSON.stringify(spelled)} → ${JSON.stringify(name)}`);
+      }
+      expect(moved).toEqual([]);
+    });
+
+    // Every single-argument generic of `PLAIN`, the spelling around its argument.
+    const generics: [opening: string, argument: string, closing: string][] = [
+      ['Array<', 'ErrorBody', '>'],
+      ['Promise<', 'ErrorBody', '>'],
+      ['Iterator[', 'ErrorBody', ']'],
+      ['list[', 'ErrorBody', ']'],
+      ['models.List<', 'models.ErrorBody', '>'],
+      ['Promise<', 'ErrorBody[]', '>'],
+      ['Promise<', 'Array<ErrorBody>', '>'],
+      ['Promise<', 'ErrorBody | Unrelated', '>'],
+    ];
+
+    it.each(EVERY_SPELLING)("around a generic's argument: %s", (_title, spell, grouped) => {
+      const moved: string[] = [];
+      for (const [opening, argument, closing] of generics) {
+        const spelled = `${opening}${spell(argument)}${closing}`;
+        const name = bareTypeName(spelled);
+        const expected = nameBefore751(`${opening}${plainOf(argument, grouped)}${closing}`);
+        if (name !== expected) moved.push(`${JSON.stringify(spelled)} → ${JSON.stringify(name)}, not ${expected}`);
+      }
+      expect(moved).toEqual([]);
+    });
+
+    // A spelling already there does not get in the way of another around it.
+    it.each(EVERY_SPELLING)('around a text that is optional already: %s', (_title, spell, grouped) => {
+      const moved: string[] = [];
+      for (const [text, expected] of READ_BEFORE) {
+        // The two unions of `READ_BEFORE` keep their parentheses in a grouped spelling.
+        if (grouped && text.includes('Unrelated')) continue;
+        const name = bareTypeName(spell(text));
+        if (name !== expected) moved.push(`${JSON.stringify(spell(text))} → ${JSON.stringify(name)}, not ${expected}`);
+      }
+      expect(moved).toEqual([]);
+    });
+
+    /**
+     * A union that still has two types once the spelling is gone is looked up
+     * as the union is: by no name at all, or, for the two fully-qualified PHP
+     * types, by the last member's, as before #751.
+     */
+    it.each([
+      ['ErrorBody | Unrelated | undefined', 'ErrorBody | Unrelated'],
+      ['undefined | ErrorBody | Unrelated', 'ErrorBody | Unrelated'],
+      ['ErrorBody | undefined | Unrelated', 'ErrorBody | Unrelated'],
+      ['ErrorBody | Unrelated | null | undefined', 'ErrorBody | Unrelated'],
+      ['ErrorBody | Unrelated | None', 'ErrorBody | Unrelated'],
+      ['None | ErrorBody | Unrelated', 'ErrorBody | Unrelated'],
+      ['Optional[ErrorBody | Unrelated]', 'ErrorBody | Unrelated'],
+      ['ErrorBody|Unrelated|null', 'ErrorBody|Unrelated'],
+      ['null|ErrorBody|Unrelated', 'ErrorBody|Unrelated'],
+      ['ErrorBody|null|Unrelated', 'ErrorBody|Unrelated'],
+      // PHP cannot write `?` in front of a union; if a snapshot does, the group is what is left
+      ['?(ErrorBody|Unrelated)', '(ErrorBody|Unrelated)'],
+      ['(ErrorBody | Unrelated | undefined)', '(ErrorBody | Unrelated)'],
+      ['(ErrorBody | Unrelated) | undefined', '(ErrorBody | Unrelated)'],
+      ['Union[ErrorBody, Unrelated, None]', 'Union[ErrorBody, Unrelated]'],
+      ['Union[None, ErrorBody, Unrelated]', 'Union[ErrorBody, Unrelated]'],
+      ['Union[ErrorBody, None, Unrelated]', 'Union[ErrorBody, Unrelated]'],
+      ['Optional[Union[ErrorBody, Unrelated]]', 'Union[ErrorBody, Unrelated]'],
+      ['Union[ErrorBody, Unrelated] | None', 'Union[ErrorBody, Unrelated]'],
+      ['(ErrorBody | Unrelated | null)[]', '(ErrorBody | Unrelated)[]'],
+      ['(ErrorBody | Unrelated)[] | undefined', '(ErrorBody | Unrelated)[]'],
+      ['(null | ErrorBody | Unrelated)[] | undefined', '(ErrorBody | Unrelated)[]'],
+      ['Promise<ErrorBody | Unrelated | undefined>', 'Promise<ErrorBody | Unrelated>'],
+      ['Promise<ErrorBody | Unrelated | null> | undefined', 'Promise<ErrorBody | Unrelated>'],
+      ['Promise<ErrorBody | Unrelated> | undefined', 'Promise<ErrorBody | Unrelated>'],
+      ['null|\\Acme\\Unrelated|\\Acme\\ErrorBody', '\\Acme\\Unrelated|\\Acme\\ErrorBody'],
+      ['\\Acme\\Unrelated|null|\\Acme\\ErrorBody', '\\Acme\\Unrelated|\\Acme\\ErrorBody'],
+    ])('a union of two types behind a spelling: %j reads as %j did', (spelled, plain) => {
+      expect(bareTypeName(spelled)).toBe(nameBefore751(plain));
+    });
+  });
+
+  describe('the spellings each language writes', () => {
     // TypeScript: the checker prints `null` and `undefined` last; the other
     // orders and spacings are what another extractor or a hand-written
     // snapshot may carry.
@@ -175,89 +394,6 @@ describe('bareTypeName (#751)', () => {
     ])('Rust, Kotlin, Swift, C#, Go, Elixir, Ruby: %j → "ErrorBody"', (text) => {
       expect(bareTypeName(text)).toBe('ErrorBody');
     });
-
-    // The rule behind the tables: whatever a text reads as, it reads the same
-    // with an optional spelling around it.
-    it('every spelling around every text reads as the text does', () => {
-      const texts = [
-        'ErrorBody',
-        ' ErrorBody ',
-        'ErrorBody[]',
-        'ErrorBody[][]',
-        'ErrorBody []',
-        'Array<ErrorBody>',
-        'Iterator[ErrorBody]',
-        'Promise<ErrorBody[]>',
-        'Record<string, ErrorBody>',
-        'Dict[str, ErrorBody]',
-        'ErrorBody | Unrelated',
-        'ErrorBody|Unrelated',
-        'Union[ErrorBody, Unrelated]',
-        '\\Acme\\ErrorBody',
-        '\\Acme\\ErrorBody[]',
-        'models.ErrorBody',
-        '{ body: ErrorBody; }',
-        '() => ErrorBody',
-        '(a: ErrorBody) => void',
-        '(ErrorBody)',
-        '"ErrorBody"',
-        '[]ErrorBody',
-        'map[string]ErrorBody',
-        '[ErrorBody]',
-        'ErrorBody.t()',
-        'string',
-        'NoneBody',
-        'Nullable',
-        'Option[]',
-        // already optional, in a spelling read before #751 and in a new one
-        'ErrorBody | null',
-        'ErrorBody?',
-        '*ErrorBody',
-        'ErrorBody | Unrelated | null',
-        'ErrorBody | undefined',
-        '?ErrorBody',
-      ];
-      const spellings: ((text: string) => string)[] = [
-        (t) => `${t} | undefined`,
-        (t) => `undefined | ${t}`,
-        (t) => `${t}|undefined`,
-        (t) => `undefined|${t}`,
-        (t) => `${t} | null`,
-        (t) => `null | ${t}`,
-        (t) => `${t}|null`,
-        (t) => `null|${t}`,
-        (t) => `${t}|NULL`,
-        (t) => `${t} | null | undefined`,
-        (t) => `undefined | null | ${t}`,
-        (t) => `${t} | None`,
-        (t) => `None | ${t}`,
-        (t) => `${t}|None`,
-        (t) => `${t} | nil`,
-        (t) => `nil | ${t}`,
-        (t) => `?${t}`,
-        (t) => `${t}?`,
-        (t) => `*${t}`,
-        (t) => `Optional[${t}]`,
-        (t) => `typing.Optional[${t}]`,
-        (t) => `Optional[${t} | None]`,
-        (t) => `NotRequired[${t}]`,
-        (t) => `Union[${t}, None]`,
-        (t) => `Union[None, ${t}]`,
-        (t) => `Optional<${t}>`,
-        (t) => `Option<${t}>`,
-        (t) => `Nullable<${t}>`,
-        (t) => `T.nilable(${t})`,
-      ];
-      const moved: string[] = [];
-      for (const text of texts) {
-        for (const spelled of spellings.map((spell) => spell(text))) {
-          if (bareTypeName(spelled) !== bareTypeName(text)) {
-            moved.push(`${JSON.stringify(spelled)} → ${JSON.stringify(bareTypeName(spelled))}`);
-          }
-        }
-      }
-      expect(moved).toEqual([]);
-    });
   });
 
   describe('only a whole member and a whole name count as a spelling', () => {
@@ -312,7 +448,7 @@ describe('bareTypeName (#751)', () => {
       ['Union[None, ErrorBody, Unrelated]', 'Union[ErrorBody, Unrelated]'],
       ['Optional[ErrorBody | Unrelated]', 'ErrorBody | Unrelated'],
       ['(ErrorBody | Unrelated | null)[]', '(ErrorBody | Unrelated)'],
-      ['Promise<ErrorBody | Unrelated | undefined>', 'Promise<ErrorBody | Unrelated | undefined>'],
+      ['Promise<ErrorBody | Unrelated | undefined>', 'Promise<ErrorBody | Unrelated>'],
       // several arguments
       ['Record<string, ErrorBody> | undefined', 'Record<string, ErrorBody>'],
       ['Record<string, ErrorBody | undefined>', 'Record<string, ErrorBody | undefined>'],
@@ -320,8 +456,8 @@ describe('bareTypeName (#751)', () => {
       ['Option<HashMap<String, ErrorBody>>', 'HashMap<String, ErrorBody>'],
       // an array or a generic two deep
       ['ErrorBody[][] | undefined', 'ErrorBody[]'],
-      ['Promise<ErrorBody[] | undefined>', 'Promise<ErrorBody[] | undefined>'],
-      ['Promise<Array<ErrorBody> | undefined>', 'Promise<Array<ErrorBody> | undefined>'],
+      ['Promise<ErrorBody[] | undefined>', 'Promise<ErrorBody[]>'],
+      ['Promise<Array<ErrorBody> | undefined>', 'Promise<Array<ErrorBody>>'],
       ['Optional[list[list[ErrorBody]]]', 'list[list[ErrorBody]]'],
       // object and function types, a quoted name
       ['{ body?: ErrorBody | undefined; } | undefined', '{ body?: ErrorBody | undefined; }'],

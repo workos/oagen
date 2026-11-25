@@ -61,11 +61,12 @@ const SQUARE_GENERIC = /^[A-Za-z_][A-Za-z0-9_.]*\[([\s\S]*)\]$/;
  * looked up exactly as the same text without its optional spellings is.
  *
  * A PHP namespace prefix is dropped (`\Vendor\Pkg\Foo` → `Foo`). Anything else
- * is returned as it stands and matches no declared type: a union of several
- * types (`A | B`, also behind an optional spelling: `A | B | null` → `A | B`),
- * a generic with several arguments (`Record<string, Foo>`), a nested array or
- * generic (`Foo[][]`, `Promise<Foo[]>`), an object or function type. This is a
- * reader for the common shapes, not a parser of any one language.
+ * is returned as it stands, less its optional spellings, and matches no
+ * declared type: a union of several types (`A | B`, and `A | B | null` →
+ * `A | B`), a generic with several arguments (`Record<string, Foo>`), a nested
+ * array or generic (`Foo[][]`, `Promise<Foo[]>`, and `Promise<Foo[] | null>` →
+ * `Promise<Foo[]>`), an object or function type. This is a reader for the
+ * common shapes, not a parser of any one language.
  */
 export function bareTypeName(typeText: string): string {
   let text = presentType(typeText.trim());
@@ -74,9 +75,14 @@ export function bareTypeName(typeText: string): string {
   // segments with one; the declared type is the last segment.
   if (text.startsWith('\\')) text = text.slice(text.lastIndexOf('\\') + 1);
   const argument = (ANGLE_GENERIC.exec(text) ?? SQUARE_GENERIC.exec(text))?.[1];
-  if (argument !== undefined) {
-    const name = presentType(argument).trim();
-    if (GENERIC_ARGUMENT_NAME.test(name)) return bareTypeName(name);
+  if (argument !== undefined && splitTopLevel(argument, ',')?.length === 1) {
+    const present = presentType(argument);
+    if (GENERIC_ARGUMENT_NAME.test(present.trim())) return bareTypeName(present.trim());
+    // An argument that is no plain name stays where it is, without its
+    // optional spelling: `Promise<Foo[] | undefined>` reads as `Promise<Foo[]>`.
+    if (present !== argument) {
+      text = `${text.slice(0, text.length - argument.length - 1)}${present}${text.slice(-1)}`;
+    }
   }
   return text;
 }

@@ -645,10 +645,25 @@ describe('#751 what the lookup must not read through', () => {
   // Each is breaking with and without the optional spelling, as before #751:
   // the text names several types, or the type sits where no rule looks.
   it.each([
+    // A union that still has two types once the spelling is gone is looked
+    // up as the union is: by no name.
     ['a union of two types', 'X | Other', 'X | Other | undefined'],
+    ['a union of two types, the spelling first', 'X | Other', 'undefined | X | Other'],
+    ['a union of two types, the spelling between them', 'X | Other', 'X | undefined | Other'],
+    ['a union of two types, the type second', 'Other | X', 'Other | X | undefined'],
+    ['a union of two types, both spellings', 'X | Other', 'X | Other | null | undefined'],
+    ['a union of two types, Python', 'X | Other', 'X | Other | None'],
+    ['a union of two types, Python, the spelling first', 'X | Other', 'None | X | Other'],
+    ['a union of two types, Python, wrapped', 'X | Other', 'Optional[X | Other]'],
+    ['a union of two types, Python, as Union', 'Union[X, Other]', 'Union[X, Other, None]'],
+    ['a union of two types, Python, as Union, wrapped', 'Union[X, Other]', 'Optional[Union[X, Other]]'],
     ['a union of two types, PHP', 'X|Other', 'X|Other|null'],
-    ['a union of two types, Python', 'Union[X, Other]', 'Union[X, Other, None]'],
-    ['a union of two types, grouped', 'X | Other', '(X | Other | None)'],
+    ['a union of two types, PHP, the spelling first', 'X|Other', 'null|X|Other'],
+    ['a union of two types, PHP, a `?` in front of the group', '(X|Other)', '?(X|Other)'],
+    ['a union of two types, grouped', '(X | Other)', '(X | Other | None)'],
+    ['an array of a union of two types', '(X | Other)[]', '(X | Other | null)[]'],
+    ['an optional array of a union of two types', '(X | Other)[]', '(X | Other)[] | undefined'],
+    ['a generic around a union of two types', 'Promise<X | Other>', 'Promise<X | Other | undefined>'],
     ['an array inside a generic', 'Promise<X[]>', 'Promise<X[] | undefined>'],
     ['a generic inside a generic', 'Promise<Array<X>>', 'Promise<Array<X> | undefined>'],
     ['an array of arrays', 'X[][]', 'X[][] | undefined'],
