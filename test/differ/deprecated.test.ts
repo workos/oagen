@@ -1393,7 +1393,7 @@ describe('#441: deprecating an inline copy of a deprecated component is a flag f
         return { ...base, components: { schemas: { Widget: component ? { ...widget, deprecated: true } : widget } } };
       };
 
-      it('deprecating `Widget` with its copy, or alone while the copy stays deprecated, is a retype: exit 2 in either direction', async () => {
+      it('deprecating `Widget` with its copy, or alone while the copy stays deprecated, is a retype (additive since #753: exit 1 forward, 2 backward for the removed model)', async () => {
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         vi.spyOn(console, 'log').mockImplementation(() => {});
         try {
@@ -1422,14 +1422,14 @@ describe('#441: deprecating an inline copy of a deprecated component is a flag f
             expect(
               forward.changes.map((c) => `${c.kind}: ${c.classification}`),
               `${before} → depDep`,
-            ).toEqual(['model-added: additive', 'model-modified: additive', 'operation-modified: breaking']);
-            expect(forward.summary.breaking, `${before} → depDep`).toBe(1);
-            expect(await exitCodeOf(files[before], files.depDep), `${before} → depDep`).toBe(2);
+            ).toEqual(['model-added: additive', 'model-modified: additive', 'operation-modified: additive']);
+            expect(forward.summary.breaking, `${before} → depDep`).toBe(0);
+            expect(await exitCodeOf(files[before], files.depDep), `${before} → depDep`).toBe(1);
             const back = diffSpecs(specs.depDep, specs[before]);
             expect(
               back.changes.map((c) => `${c.kind}: ${c.classification}`),
               `depDep → ${before}`,
-            ).toEqual(['model-removed: breaking', 'model-modified: additive', 'operation-modified: breaking']);
+            ).toEqual(['model-removed: breaking', 'model-modified: additive', 'operation-modified: additive']);
             expect(await exitCodeOf(files.depDep, files[before]), `depDep → ${before}`).toBe(2);
           }
           // Deprecating only the copy under a live `Widget` is no change at

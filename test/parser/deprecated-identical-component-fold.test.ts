@@ -2088,7 +2088,7 @@ describe('#441: a deprecated component admits no inline copy, so deprecating the
     describe.each(['3.0.3', '3.1.0'])('on OpenAPI %s', (openapi) => {
       const extra = { openapi };
 
-      it('`Pet` and `getLegacyPet`’s identical copy deprecated together, or `Pet` alone while the copy stays deprecated: the copy moves to `GetLegacyPetPet`, exit 2 either way', async () => {
+      it('`Pet` and `getLegacyPet`’s identical copy deprecated together, or `Pet` alone while the copy stays deprecated: the copy moves to `GetLegacyPetPet` (additive since #753; the removed model is breaking on the way back)', async () => {
         const doc = (component: boolean, copy: boolean) =>
           specDoc(
             { Pet: deprecate(pet, component) },
@@ -2123,19 +2123,19 @@ describe('#441: a deprecated component admits no inline copy, so deprecating the
         ] as const) {
           const before = label.includes('already') ? liveDep : liveLive;
           expect(describeDiff(before.spec, after.spec), label).toEqual({
-            breaking: 1,
+            breaking: 0,
             changes: [
               'model-added GetLegacyPetPet: additive',
               'model-modified Pet deprecatedChanged: additive',
-              'operation-modified getLegacyPet responseChanged: breaking',
+              'operation-modified getLegacyPet responseChanged: additive',
             ],
           });
           expect(describeDiff(after.spec, before.spec), `${label}, back`).toEqual({
-            breaking: 2,
+            breaking: 1,
             changes: [
               'model-removed GetLegacyPetPet: breaking',
               'model-modified Pet deprecatedChanged: additive',
-              'operation-modified getLegacyPet responseChanged: breaking',
+              'operation-modified getLegacyPet responseChanged: additive',
             ],
           });
         }
@@ -2166,22 +2166,24 @@ describe('#441: a deprecated component admits no inline copy, so deprecating the
           ['Pet'],
           ['getPet.response → Pet', 'getLegacyPet.response → GetLegacyPetPet', 'getOldPet.response → GetLegacyPetPet'],
         );
+        // Each operation's own change is additive since #753: its response moved
+        // to a model with every field of `Pet`.
         expect(describeDiff(live.spec, dep.spec)).toEqual({
-          breaking: 2,
+          breaking: 0,
           changes: [
             'model-added GetLegacyPetPet: additive',
             'model-modified Pet deprecatedChanged: additive',
-            'operation-modified getLegacyPet responseChanged: breaking',
-            'operation-modified getOldPet responseChanged: breaking',
+            'operation-modified getLegacyPet responseChanged: additive',
+            'operation-modified getOldPet responseChanged: additive',
           ],
         });
         expect(describeDiff(dep.spec, live.spec)).toEqual({
-          breaking: 3,
+          breaking: 1,
           changes: [
             'model-removed GetLegacyPetPet: breaking',
             'model-modified Pet deprecatedChanged: additive',
-            'operation-modified getLegacyPet responseChanged: breaking',
-            'operation-modified getOldPet responseChanged: breaking',
+            'operation-modified getLegacyPet responseChanged: additive',
+            'operation-modified getOldPet responseChanged: additive',
           ],
         });
       });

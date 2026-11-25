@@ -735,13 +735,14 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
           listA: '(CircleListAItem | Square)[]',
           listB: '(Circle | Square)[]',
         });
-        // `oagen diff` still reports that edit, as it did.
+        // `oagen diff` still reports that edit, additive since #753: `listB`'s
+        // items moved to a copy that has every field of `Circle` (exit 1, where it was 2).
         expect(
           await exitCodeOf(
             document(openapi, { ...a(false), ...b(false) }),
             document(openapi, { ...a(false), ...b(true) }),
           ),
-        ).toBe(2);
+        ).toBe(1);
         expect(warnings()).toEqual([]);
       });
 

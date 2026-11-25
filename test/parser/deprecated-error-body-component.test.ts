@@ -230,27 +230,27 @@ describe('#629', () => {
       }
     });
 
-    it('`oagen diff` from `old.json` reports the models the live bodies now get, the `ErrorBody` flip and each operation’s retyped error, exit 2', async () => {
+    it('`oagen diff` from `old.json` reports the models the live bodies now get, the `ErrorBody` flip and each operation’s retyped error (additive since #753, exit 1: each model has every field of `ErrorBody`)', async () => {
       const before = (await parse(old(openapi))).spec;
       expect(describeDiff(before, (await parse(repro(openapi))).spec)).toEqual({
-        exitCode: 2,
+        exitCode: 1,
         changes: [
           'model-added GetPetError404: additive',
           'model-added GetNoteError404: additive',
           'model-modified ErrorBody deprecatedChanged: additive',
-          'operation-modified getPet errorsChanged: breaking',
-          'operation-modified getNote errorsChanged: breaking',
+          'operation-modified getPet errorsChanged: additive',
+          'operation-modified getNote errorsChanged: additive',
         ],
       });
       expect(describeDiff(before, (await parse(field(openapi))).spec)).toEqual({
-        exitCode: 2,
+        exitCode: 1,
         changes: [
           'model-added GetPetError404: additive',
           'model-added GetNoteError404: additive',
           'model-modified ErrorBody: additive',
           '  field-deprecated-changed message: additive',
-          'operation-modified getPet errorsChanged: breaking',
-          'operation-modified getNote errorsChanged: breaking',
+          'operation-modified getPet errorsChanged: additive',
+          'operation-modified getNote errorsChanged: additive',
         ],
       });
     });

@@ -696,7 +696,7 @@ describe('#631 a callback and a webhook reaching one operation object share one 
             "model-added OnPetAdopted49Cb63Payload (additive)",
             "model-removed OnPetAdoptedPayload (breaking)",
             "webhook-added petAdopted (additive)",
-            "webhook-modified on_pet_adopted (breaking)",
+            "webhook-modified on_pet_adopted (additive)",
           ],
           "exit": 2,
         }
@@ -787,7 +787,7 @@ describe('#631 a callback and a webhook reaching one operation object share one 
           "changes": [
             "model-added OnPetAdoptedPayload (additive)",
             "model-removed OnPetAdoptedF9960APayload (breaking)",
-            "callback-modified petAdopted (breaking)",
+            "callback-modified petAdopted (additive)",
             "webhook-added petAdopted (additive)",
           ],
           "exit": 2,
@@ -1682,7 +1682,7 @@ paths:
             "changes": [
               "model-added Shape (additive)",
               "model-removed OnPetAdoptedShape (breaking)",
-              "callback-modified petAdopted (breaking)",
+              "callback-modified petAdopted (additive)",
               "webhook-added petAdopted (additive)",
             ],
             "exit": 2,
@@ -1707,7 +1707,7 @@ paths:
             "changes": [
               "model-added CreateDogDogAdoptedShape (additive)",
               "model-modified Shape (breaking)",
-              "callback-modified dogAdopted (breaking)",
+              "callback-modified dogAdopted (additive)",
               "webhook-added petAdopted (additive)",
             ],
             "exit": 2,
