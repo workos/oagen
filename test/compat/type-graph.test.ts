@@ -15,6 +15,7 @@ import {
   handsBackItsArgument,
   supertypeName,
   typeNamesIn,
+  withoutRepeatedIntersectionMembers,
 } from '../../src/compat/type-names.js';
 
 /**
@@ -278,6 +279,46 @@ describe('#750 handsBackItsArgument', () => {
     '',
   ])('%s is not known to', (generic) => {
     expect(handsBackItsArgument(generic)).toBe(false);
+  });
+});
+
+describe('#750 withoutRepeatedIntersectionMembers', () => {
+  it.each([
+    ['(() => void) & (() => void)', '() => void'],
+    ['{ x: number; } & { x: number; }', '{ x: number; }'],
+    ['((() => void) & (() => void)) | undefined', '(() => void) | undefined'],
+    ['({ x: number; } & { x: number; }) | undefined', '{ x: number; } | undefined'],
+    ['({ x: number; } & { x: number; }) | null | undefined', '{ x: number; } | null | undefined'],
+    ['A & A & B', 'A & B'],
+    ['(A & A & B) | undefined', '(A & B) | undefined'],
+    ['(A | B) & (A | B)', 'A | B'],
+    ['Promise<A> & Promise<A>', 'Promise<A>'],
+    ['{ a: "x & y"; } & { a: "x & y"; }', '{ a: "x & y"; }'],
+  ])('%s is %s', (text, expected) => {
+    expect(withoutRepeatedIntersectionMembers(text)).toBe(expected);
+  });
+
+  it.each([
+    'string',
+    'string | undefined',
+    '() => void',
+    '(() => void) | undefined',
+    '(() => void)',
+    '{ x: number; } & { y: string; }',
+    '({ x: number; } & { y: string; }) | undefined',
+    'A & B',
+    // an intersection that is not a member of the text's own union is not read
+    'Promise<A & A>',
+    '{ a: A & A; }',
+    '(a: A & A) => void',
+    'Array<(() => void) & (() => void)>',
+    // a text whose brackets or quotes do not pair up is not taken apart
+    '(A & A',
+    'A & A)',
+    "'A & A",
+    '',
+  ])('%s is returned as it stands', (text) => {
+    expect(withoutRepeatedIntersectionMembers(text)).toBe(text);
   });
 });
 
