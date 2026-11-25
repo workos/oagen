@@ -37,6 +37,10 @@ import {
   nullVote,
   schemaAdmitsNull,
   arraySchemaOf,
+  mapSchemaOf,
+  fieldSettings,
+  combineConstraints,
+  schemaConstraints,
   declaresNull,
   mergeDeclaresNull,
   derivedCopy,
@@ -3357,7 +3361,32 @@ export function resetCombinedDeclarations(): void {
  * whenever they had any keyword, so a member documenting the items made
  * `data` an `unknown[]`); the later's other keywords over the earlier's;
  * and `type: ['array', 'null']` when either admits `null`
- * (`declaresNull`), else `type: 'array'`; any two declarations that each
+ * (`declaresNull`), else `type: 'array'`; two maps, each a `type:
+ * 'object'` that declares no `properties`, which the type builder types
+ * `map<…>` when it is declared alone, under a nullable wrapper of any
+ * spelling or none (`mapSchemaOf`), conjoin their values as two arrays
+ * conjoin their `items` (`conjoinMapDeclarations`): the values of each
+ * are the ones it is typed by (`mapValueSchema`: its
+ * `additionalProperties`, else its first `patternProperties` entry),
+ * combined by this same rule when both declare them, else the one
+ * declared — a map that writes none, `true`,
+ * `{}`, `false` or a `$ref` that leads to `false` declares none — so
+ * `tags: { type: 'object', additionalProperties: { $ref: Tag } }` beside
+ * `tags: { type: 'object', additionalProperties: { $ref: TagOutput } }`,
+ * over `TagOutput: { allOf: [{ $ref: Tag }, { required: ['label'] }] }`,
+ * is `{ type: 'object', additionalProperties: { allOf: [{ $ref: Tag }, {
+ * $ref: TagOutput }], type: 'object' } }`, a `Record<string, TagOutput>`
+ * in either member order, as the pair written with `patternProperties` is
+ * (workos/oagen#744: no step read two maps, so the pair kept the first
+ * and the property stayed a `Record<string, Tag>`, where the same pair of
+ * arrays was a `TagOutput[]`); the conjunction is one map, `type:
+ * ['object', 'null']` exactly when both declarations admit `null`
+ * (`schemaAdmitsNull`), else `type: 'object'`, with what a field reads
+ * from each declaration (`fieldSettings`) — its text, `default`, examples
+ * and keys, the later's over the earlier's, a flag either sets — and the
+ * limits of both, the stricter bound standing (`combineConstraints`) —
+ * and the first declaration itself where the second adds none of it; any
+ * two declarations that each
  * describe an object — an inline object, a `$ref` to an object component,
  * or an `allOf` that reaches one (`describesObject`, `composesObject`,
  * the component the document's: `componentSchemaOf`), written as it is or
@@ -3623,6 +3652,13 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       type: declaresNull(first) || declaresNull(second) ? ['array', 'null'] : 'array',
     };
   }
+  // Two maps conjoin their values as two arrays conjoin their `items`
+  // (`conjoinMapDeclarations`; workos/oagen#744: neither an inline object
+  // with `properties` nor a `$ref` that composes one, a map fell through
+  // every step, so the pair kept the first and a property redeclared with
+  // narrower values kept the wider ones).
+  const maps = conjoinMapDeclarations(first, second);
+  if (maps !== undefined) return maps;
   // A nullable `oneOf`/`anyOf` wrapper describes what the declaration under
   // it describes (`openedNullableUnion`), so each side is asked through
   // its wrapper, and brings the parts of what it wraps. What a wrapper says
@@ -3727,6 +3763,113 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     };
   }
   return keptAsWritten(first, second);
+}
+
+/**
+ * Two typing declarations of one property that are each typed as a map,
+ * conjoined (`conjoinTypedDeclarations`) as two arrays conjoin their
+ * `items`; `undefined` when either is no map, and the pair is read by the
+ * steps after this one, as it was.
+ *
+ * A declaration is a map here exactly when the type builder types it by
+ * its map branch when it is declared alone, under `nullable` or not
+ * (`mapSchemaOf`): `type: 'object'` with no `properties`, written as it
+ * is, under a nullable wrapper of any spelling — a type list naming
+ * `null`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` that leaves it once
+ * its `null` variants are set aside — or as an `allOf` read as its one
+ * member, the three however they nest. An `additionalProperties` or
+ * `patternProperties` written with no `type: 'object'` (typed `unknown`),
+ * an object that declares `properties`, with `additionalProperties` beside
+ * them or not (a model), a type list naming another type beside `object`
+ * (a union), a `$ref` to a map component (a reference to the model the
+ * component is) and a `const` or one-value `enum` that pins an object
+ * (typed by the value it pins, a map of `unknown` whatever is declared
+ * beside it) are none, and their pairs keep the first as written, as
+ * before.
+ *
+ * The values of each map are the ones it is typed by (`mapValueSchema`:
+ * its `additionalProperties`, else its first `patternProperties` entry),
+ * and the conjunction's are the two combined by the one rule for two
+ * declarations (`combineDeclarations`) when both declare them, else the
+ * one declared, written under `additionalProperties` whichever keyword
+ * each side wrote them under (as `typedDeclaration` writes a map's): `{
+ * type: 'object', additionalProperties: { $ref: Tag } }` beside `{ type:
+ * 'object', additionalProperties: { $ref: TagOutput } }`, over `TagOutput:
+ * { allOf: [{ $ref: Tag }, { required: ['label'] }] }`, is `{ type:
+ * 'object', additionalProperties: { allOf: [{ $ref: Tag }, { $ref:
+ * TagOutput }], type: 'object' } }`, a `Record<string, TagOutput>` in
+ * either member order, and so is the pair that writes its values under
+ * `patternProperties: { '^x-': … }`, under two patterns that differ, or
+ * under one keyword each: either way each side says what every value is,
+ * as it does alone. A map that declares no values — none written,
+ * `additionalProperties: true` or `{}` (`mapValueSchema`), or values that
+ * are `false` or a `$ref` that leads to it, which declare nothing
+ * (`isDeclaredProperty`; #746) — takes the other's, as an array with no
+ * `items` takes the other's `items`; two that declare none are a map of
+ * `unknown`, as each is.
+ *
+ * The conjunction is one map: `type: ['object', 'null']` exactly when both
+ * declarations admit `null`, each asked as written (`schemaAdmitsNull`),
+ * else `type: 'object'`, as for two objects; carrying what a field reads
+ * from each declaration, through whatever wrapper it wears
+ * (`fieldSettings`: the wrapper's own and its annotating members', never a
+ * variant's or a typing member's) — its text, link, `default`, examples
+ * and `x-*` keys, the later declaration's over the earlier's; a flag
+ * (`deprecated`, `readOnly`, `writeOnly`) either declaration sets, as the
+ * levels of one declaration set it and as JSON Schema reads several
+ * occurrences of each, so a later `deprecated: false` lifts none; and the
+ * limits a field reads from both (`schemaConstraints`), the stricter bound
+ * of each standing (`combineConstraints`), as JSON Schema applies both.
+ * Where the second declaration adds none of this — the same values, no
+ * `null` rejected, nothing a field would read that the first does not say
+ * — the first is returned itself, so a map redeclared as it is stays the
+ * declaration it was (and the field its base's: `inheritedFrom`).
+ *
+ * Both declarations are read only where a reader can read them at every
+ * depth (`isReadableSchema`): a map declared second was dropped unread
+ * before (workos/oagen#744), so a document may hold anything there and
+ * parse; such a pair keeps the first as written.
+ */
+function conjoinMapDeclarations(first: SchemaObject, second: SchemaObject): SchemaObject | undefined {
+  const firstMap = mapSchemaOf(first);
+  if (firstMap === undefined || !isReadableSchema(first) || !isReadableSchema(second)) return undefined;
+  const secondMap = mapSchemaOf(second);
+  if (secondMap === undefined) return undefined;
+  const heldValues = declaredMapValues(firstMap);
+  const addedValues = declaredMapValues(secondMap);
+  const values = heldValues && addedValues ? combineDeclarations(heldValues, addedValues) : (heldValues ?? addedValues);
+  const componentSchemas = documentComponentSchemas();
+  const held = fieldSettings(first, componentSchemas);
+  const settings: SchemaObject = {
+    ...held,
+    ...fieldSettings(second, componentSchemas),
+    ...combineConstraints(schemaConstraints(first, componentSchemas), schemaConstraints(second, componentSchemas)),
+  };
+  const nullable = schemaAdmitsNull(first) && schemaAdmitsNull(second);
+  const addsNothing =
+    values === heldValues &&
+    (nullable || !schemaAdmitsNull(first)) &&
+    stableStringify(settings) === stableStringify(held);
+  if (addsNothing) return first;
+  return {
+    ...settings,
+    type: nullable ? ['object', 'null'] : 'object',
+    ...(values !== undefined && { additionalProperties: values }),
+  };
+}
+
+/**
+ * The schema a map declares its values by, for the reader that conjoins
+ * two maps (`conjoinMapDeclarations`): the one the type builder types them
+ * from (`mapValueSchema`), when it declares any (`isDeclaredProperty`).
+ * `undefined` for a map that writes none, for `additionalProperties: true`
+ * or `{}`, which admit any value, and for values written `false` or as a
+ * `$ref` that leads to it (#746), which say what no value is and leave
+ * nothing to conjoin: alone, each of these is a map of `unknown`.
+ */
+function declaredMapValues(map: SchemaObject): SchemaObject | undefined {
+  const values = mapValueSchema(map);
+  return values !== null && isDeclaredProperty(values) ? values : undefined;
 }
 
 /**
@@ -4011,10 +4154,12 @@ function conjunctionMembers(
  * hold anything there and parse; such a declaration stays unopened, and
  * its pair keeps the first as written.
  *
- * Named for what it returns, for the step that conjoins two maps to ask
- * as the step for two objects does: `openedNullableUnion(declaration)
- * ?.wrapped ?? declaration` is the declaration under its wrapper, or
- * itself.
+ * Named for what it returns: `openedNullableUnion(declaration)?.wrapped
+ * ?? declaration` is the declaration under its wrapper, or itself. The
+ * step that conjoins two maps sees through the same wrapper by the same
+ * unwrap (`mapSchemaOf`, as the step for two arrays does by
+ * `arraySchemaOf`), and carries what a field reads through it by the
+ * field's own reading (`conjoinMapDeclarations`; workos/oagen#744).
  */
 function openedNullableUnion(declaration: SchemaObject): { wrapped: SchemaObject; beside: SchemaObject[] } | undefined {
   if (!isSchemaObject(declaration) || (declaration.oneOf === undefined && declaration.anyOf === undefined)) {

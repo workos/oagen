@@ -1590,6 +1590,37 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
 }
 
 /**
+ * The map schema `schema` is typed as, once a nullable wrapper of any
+ * spelling is removed — an OAS 3.1 type list naming `null` (`type:
+ * ['object', 'null']`), OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with
+ * one non-null variant — and an `allOf` read as one member
+ * (`allOfReadAsMember`: `allOf: [{ type: 'object', additionalProperties
+ * }]`), the two however they alternate, and `undefined` when it is no map:
+ * `unwrapNullableSchema`, the one definition the model side unwraps by,
+ * then the one classification the type builder types a map by
+ * (`classifyInlineSchema`: `'map'`, a `type: 'object'` that declares no
+ * `properties` and that no composition, `const`, `enum` or `items` types
+ * first). The schema returned is the one `mapValueSchema` reads the values
+ * of. So this answers for exactly the schemas `schemaToTypeRef` types by
+ * its map branch, under `nullable` or not, as `arraySchemaOf` answers for
+ * arrays: an `additionalProperties` or `patternProperties` written with no
+ * `type: 'object'` beside it is no map (it is typed `unknown`), nor is an
+ * object that declares `properties`, with `additionalProperties` beside
+ * them or not (a model), nor a type list naming another type beside
+ * `object` (a union), nor a `const` or one-value `enum` that pins an
+ * object, which is typed by the value it pins (`constTypeRef`: a map of
+ * `unknown`) whatever the schema declares beside it. A `$ref` is a
+ * reference and is not looked through: a `$ref` to a map component is the
+ * model the component is.
+ */
+export function mapSchemaOf(schema: SchemaObject): SchemaObject | undefined {
+  const bare = unwrapNullableSchema(schema);
+  if (bare.type === 'object' && classifyInlineSchema(bare) === 'map') return bare;
+  const member = allOfReadAsMember(bare);
+  return member && mapSchemaOf(member);
+}
+
+/**
  * The member `schemaToTypeRef` types an `allOf` as (`readInlineAllOf`): a
  * lone member with nothing added to it, or the one typing member beside
  * members that only annotate or limit it (`'unwrapped'`; #555), read as
@@ -1890,14 +1921,20 @@ export function isSchemaObject(value: unknown): value is SchemaObject {
  * field added). Every other entry declares the property and is read as
  * its schema, `true` and a `$ref` to it among them (`unknown`).
  *
- * Asked of a property alone — an entry of `properties`, wherever the
- * object is written, and `additionalProperties` beside `properties` on a
- * component, which `false` gives no catch-all field. A `$ref` to `false`
+ * Asked of a property — an entry of `properties`, wherever the object is
+ * written, and `additionalProperties` beside `properties` on a component,
+ * which `false` gives no catch-all field. A `$ref` to `false`
  * read for a type is `unknown`, as `false` written there is: a union
  * variant, an `allOf` member, array `items`, map values, a body, a
  * parameter (#728). So is a property that reaches `false` through
  * anything but a `$ref` — `{ allOf: [{ $ref: Never }] }`, a nullable
  * wrapper around the `$ref` — as `{ allOf: [false] }` in its place is.
+ *
+ * One reader of a map's values asks too. Where two maps are declared for
+ * one property, values written `false`, or as a `$ref` that leads to it,
+ * are none to conjoin with the other map's, which stand alone, in either
+ * member order (`conjoinMapDeclarations`; #744). The map declared alone
+ * is the map of `unknown` it was, with either spelling.
  *
  * A `$ref` that names nothing — a key the document lacks, another
  * section, a pointer through a token that is not there — declares the
@@ -1965,7 +2002,10 @@ const LIST_KEYWORDS = ['enum', 'required'] as const;
  * property's declaration that is a nullable `oneOf`/`anyOf` wrapper is
  * conjoined with another declaration of the property as the declaration
  * it wraps only where it is readable (`openedNullableUnion`;
- * workos/oagen#743: declared second, it was dropped unread).
+ * workos/oagen#743: declared second, it was dropped unread), as two maps
+ * declared for one property are conjoined only where both are
+ * (`conjoinMapDeclarations`; workos/oagen#744: a map declared second was
+ * dropped unread too).
  */
 export function isReadableSchema(schema: unknown): boolean {
   const seen = new Set<unknown>();
@@ -5388,7 +5428,10 @@ function fieldReading(
  * `agreedExtensions`): the request-body fold reads each variant's
  * discriminator declaration this way and carries onto the discriminator it
  * rebuilds the settings every variant agrees on
- * (`flattenDiscriminatedUnionBody`; #607 review).
+ * (`flattenDiscriminatedUnionBody`; #607 review), and two maps declared
+ * for one property are conjoined into one map that carries what each
+ * reads this way, whatever wrapper each wears (`conjoinMapDeclarations`;
+ * #744).
  */
 export function fieldSettings(
   schema: SchemaObject,
