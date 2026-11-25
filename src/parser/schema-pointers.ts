@@ -123,6 +123,7 @@ import {
   componentTypeRef,
   isArrayComponentRef,
   isArrayPointerRef,
+  isDeclaredProperty,
   isNullSchema,
   modelReferenceIdentity,
   OWN_MODEL,
@@ -546,6 +547,11 @@ export function pointerSteps(
     if (!next) return { problem: 'no schema at that pointer' };
     switch (keyword) {
       case 'properties':
+        // A property written as a `$ref` that names `false` is the `false`
+        // it names (`isDeclaredProperty`; #746): no schema, as the same
+        // `false` written in its place is none (`schemaAtPointer`).
+        if (!isDeclaredProperty(next, schemas)) return { problem: 'no schema at that pointer' };
+        break;
       case 'items':
         break;
       case 'additionalProperties':

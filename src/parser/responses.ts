@@ -26,6 +26,7 @@ import {
   isArrayPointerRef,
   isNullSchema,
   collapsedNullableBranch,
+  isDeclaredProperty,
   nullableAxisBranch,
   referenceTypesAsUnknown,
   typesAsUnknown,
@@ -506,7 +507,7 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
   const mergedProps: Record<string, SchemaObject> = {};
   for (const source of propSources) {
     for (const [key, prop] of Object.entries(source)) {
-      if (!prop) continue;
+      if (!isDeclaredProperty(prop, componentSchemas)) continue;
       const existing = mergedProps[key];
       mergedProps[key] = existing ? combineDeclarations(existing, prop) : prop;
     }
@@ -1419,7 +1420,7 @@ function extractInlineModel(
 
   const siblings = collectProperties(schema);
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
-    if (!fieldSchema) continue;
+    if (!isDeclaredProperty(fieldSchema, componentSchemas)) continue;
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
