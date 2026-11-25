@@ -217,8 +217,8 @@ export function diffReceivedRequest(
  *
  * - type changed, gained or lost: breaking — it is the handler's parameter
  *   type — unless it changed to one in which the handler still finds what it
- *   read (`compatibleShape` for the reader, through `shapes`: a model with
- *   every old field, each of the same type and required wherever it was;
+ *   read (`compatibleShape` for the reader, through `shapes`: a new model
+ *   with every old field, each of the same type and required wherever it was;
  *   #753), which is still reported (`payload type changed`), and additive.
  * - encoding changed: breaking when the representation the sender now uses
  *   — the media type the new payload is read from, with its shape — is not

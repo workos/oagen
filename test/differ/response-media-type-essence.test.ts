@@ -856,7 +856,7 @@ describe('parser to differ — a secondary body switched to another component of
     }
   };
 
-  it('reports the YAML body as retyped: both documents declare both models, so neither was renamed (additive since #753)', async () => {
+  it('reports the YAML body as retyped, breaking: both documents declare both models, so neither was renamed', async () => {
     const { changes, summary } = await diffDocuments(notes('Note', 'Note'), notes('Note', 'NoteCopy'));
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({
@@ -870,11 +870,11 @@ describe('parser to differ — a secondary body switched to another component of
           removed: [],
           retyped: ['application/yaml'],
           reparameterized: [],
-          classification: 'additive',
+          classification: 'breaking',
         },
       ],
-      classification: 'additive',
+      classification: 'breaking',
     });
-    expect(summary.breaking).toBe(0);
+    expect(summary.breaking).toBe(1);
   });
 });

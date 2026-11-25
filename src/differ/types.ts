@@ -486,11 +486,12 @@ export interface OperationModified {
    * change: a response written as an inline union that only gained
    * variants, which is additive as a named union's `variant-added` is; and
    * a response moved to a type in which a reader still finds everything it
-   * read (`compatibleShape`, #753) — a model that has every field of the
-   * old one, each of the same type and required wherever it was, bare or
-   * under the same array, map, `nullable` or union wrapper on both sides —
-   * which is additive too. A model that drops or retypes a field, or makes
-   * a required one optional, stays breaking.
+   * read (`compatibleShape`, #753) — a model new to the spec that has every
+   * field of the old one, each of the same type and required wherever it
+   * was, bare or under the same array, map, `nullable` or union wrapper on
+   * both sides — which is additive too. A model that drops or retypes a
+   * field, or makes a required one optional, stays breaking, and so does a
+   * move between two models both specs declare, however alike (#390).
    */
   responseChanged: boolean;
   /**
@@ -500,10 +501,12 @@ export interface OperationModified {
    * is a body written as an inline union that only gained variants, as a
    * named union's `variant-added` is; and so is a body moved to a type that
    * accepts every body built for the old one (`compatibleShape`, #753) — a
-   * model that has every field of the old one, each of the same type, and
-   * requires no field the old one did not, bare or under the same wrapper
-   * on both sides. A model that drops or retypes a field, requires a new
-   * one or one that was optional, or tightens a limit stays breaking.
+   * model new to the spec that has every field of the old one, each of the
+   * same type, and requires no field the old one did not, bare or under
+   * the same wrapper on both sides. A model that drops or retypes a field,
+   * requires a new one or one that was optional, or tightens a limit stays
+   * breaking, and so does a move between two models both specs declare
+   * (#390).
    */
   requestBodyChanged: boolean;
   /**
@@ -939,8 +942,9 @@ export interface ResponseContentTypesChange {
    * `breaking` when anything was removed, or retyped to a type in which a
    * reader no longer finds everything it read (`compatibleShape`, as for
    * `OperationModified.responseChanged`; #753), else `additive`: a body
-   * moved from `Note` to a `NoteCopy` with every field of `Note` is
-   * `retyped` and additive.
+   * whose renamed model gained an optional field is `retyped` and
+   * additive, one moved from `Note` to a `NoteCopy` both specs declare is
+   * `retyped` and breaking.
    */
   classification: 'additive' | 'breaking';
 }
@@ -1134,8 +1138,8 @@ export interface ReceivedRequestModified {
    * reports the media types the sender gained or lost. A payload whose type
    * changed is breaking — it is the handler's parameter type — unless the
    * handler still finds everything it read in the new one
-   * (`compatibleShape`, #753): a model that has every field of the old one,
-   * each of the same type and required wherever it was.
+   * (`compatibleShape`, #753): a model new to the spec that has every field
+   * of the old one, each of the same type and required wherever it was.
    */
   requestBodyChanged: boolean;
   /**

@@ -222,7 +222,7 @@ export function retypedBodies(
 /**
  * Whether any of `retyped` — pairs `retypedBodies` returned — breaks `side`:
  * a body whose new type does not serve the code written against the old one
- * (`compatibleShape`, #753). A body moved to a model with every old field,
+ * (`compatibleShape`, #753). A body moved to a new model with every old field,
  * each of the same type — required wherever it was for a reader, requiring
  * nothing more for a writer — is still listed as retyped, since the
  * generated SDK types it by another model, without being breaking.
@@ -314,7 +314,7 @@ function requestBodyBodies(body: RequestBodyMediaTypes): MediaTypeBody[] {
 /**
  * Whether the representation one side's `requestBody` is read from — the
  * media type, with its shape — is one the other side declares with a shape
- * that still serves it (`compatibleShape`: the same shape, or a model with
+ * that still serves it (`compatibleShape`: the same shape, or a new model with
  * every old field that the caller's bodies still satisfy, or in which the
  * receiver still finds what it read; #753). Which side's is judged from `side`, as
  * `diffRequestBodyContentTypes` is: for the caller (an operation), the old
