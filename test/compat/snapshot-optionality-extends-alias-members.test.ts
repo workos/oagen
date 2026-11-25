@@ -114,16 +114,17 @@ async function nodeCases(cases: NodeCase[]): Promise<Record<string, { expected: 
   );
 }
 
-/** A snapshot as one written before #750: no `optional`, `extends` or
- *  `aliasOf`, and no members under a type alias. The gate that compared the
- *  two writers on real SDKs found exactly these differences. */
+/** A snapshot as one written before #750: no `optional`, `extends`,
+ *  `aliasOf` or `resolvedType`, and no members under a type alias. The gate
+ *  that compared the two writers on real SDKs found exactly these
+ *  differences. */
 function writtenBefore750(snapshot: CompatSnapshot): CompatSnapshot {
   const aliases = new Set(snapshot.symbols.filter((sym) => sym.aliasOf !== undefined).map((sym) => sym.fqName));
   return {
     ...snapshot,
     symbols: snapshot.symbols
       .filter((sym) => !(sym.kind === 'field' && sym.ownerFqName !== undefined && aliases.has(sym.ownerFqName)))
-      .map(({ optional: _optional, extends: _extends, aliasOf: _aliasOf, ...rest }) => rest),
+      .map(({ optional: _optional, extends: _extends, aliasOf: _aliasOf, resolvedType: _resolved, ...rest }) => rest),
   };
 }
 
@@ -724,35 +725,63 @@ export type TwoInlineTypes = { a: { x: number } } & { a: { y: string } };
     expect(member('TwoInlineTypes')).toEqual({ name: 'a', type: '{ x: number; } & { y: string; }', optional: false });
   });
 
-  it("keeps an interface's field as every baseline holds it", async () => {
+  it("keeps an interface's field as every baseline holds it, with the resolved type beside it", async () => {
     // An interface's type text has always been decided by the `?` of the
     // member's property signature, so a member that is optional without one
-    // keeps its `| undefined`. Its optionality is the checker's all the same.
-    const twins = await nodeExtractor.extract(
-      writeSdk(
-        nodeSdk(`export interface Base { name: string; count: number }
-export interface AsInterface extends Partial<Base> { tag?: string; list: string[]; retry?(attempt: number): void; ping(): void }
-export type AsAlias = Partial<Base> & { tag?: string; list: string[]; retry?(attempt: number): void; ping(): void };
-`),
-      ),
-    );
+    // keeps its `| undefined`. What the member resolves to stands beside it
+    // where it reads otherwise, and is what an alias's member is written as.
+    const source = `export interface Base { name: string; count: number }
+export interface AsInterface extends Partial<Base> { tag?: string; explicit?: string | undefined; list: string[]; retry?(attempt: number): void; ping(): void }
+export type AsAlias = Partial<Base> & { tag?: string; explicit?: string | undefined; list: string[]; retry?(attempt: number): void; ping(): void };
+`;
+    const twins = await nodeExtractor.extract(writeSdk(nodeSdk(source)));
     expect(twins.interfaces.AsInterface.fields).toEqual({
-      count: { name: 'count', type: 'number | undefined', optional: true },
+      count: { name: 'count', type: 'number | undefined', optional: true, resolvedType: 'number' },
+      explicit: { name: 'explicit', type: 'string', optional: true },
       list: { name: 'list', type: 'string[]', optional: false },
-      name: { name: 'name', type: 'string | undefined', optional: true },
+      name: { name: 'name', type: 'string | undefined', optional: true, resolvedType: 'string' },
       ping: { name: 'ping', type: '() => void', optional: false },
-      retry: { name: 'retry', type: '((attempt: number) => void) | undefined', optional: true },
+      retry: {
+        name: 'retry',
+        type: '((attempt: number) => void) | undefined',
+        optional: true,
+        resolvedType: '((attempt: number) => void)',
+      },
       tag: { name: 'tag', type: 'string', optional: true },
     });
-    // The alias agrees on every member's optionality, and on the text of each
-    // one whose `?` stands on a property signature or that is required.
     expect(twins.typeAliases.AsAlias.fields).toEqual({
       count: { name: 'count', type: 'number', optional: true },
+      explicit: { name: 'explicit', type: 'string', optional: true },
       list: { name: 'list', type: 'string[]', optional: false },
       name: { name: 'name', type: 'string', optional: true },
       ping: { name: 'ping', type: '() => void', optional: false },
       retry: { name: 'retry', type: '((attempt: number) => void)', optional: true },
       tag: { name: 'tag', type: 'string', optional: true },
+    });
+
+    // With exactOptionalPropertyTypes the checker adds no `undefined`, and
+    // one in the text is one the SDK wrote: the interface's text loses it,
+    // as it always has, and the resolved type keeps it.
+    const exact = await nodeExtractor.extract(
+      writeSdk({
+        'tsconfig.json': JSON.stringify({
+          compilerOptions: { strict: true, exactOptionalPropertyTypes: true },
+          include: ['src'],
+        }),
+        'src/index.ts': source,
+      }),
+    );
+    expect(exact.interfaces.AsInterface.fields).toMatchObject({
+      count: { type: 'number', optional: true },
+      explicit: { type: 'string', optional: true, resolvedType: 'string | undefined' },
+      name: { type: 'string', optional: true },
+      retry: { type: '(attempt: number) => void', optional: true },
+      tag: { type: 'string', optional: true },
+    });
+    expect(exact.interfaces.AsInterface.fields.tag).not.toHaveProperty('resolvedType');
+    expect(exact.typeAliases.AsAlias.fields).toMatchObject({
+      explicit: { type: 'string | undefined', optional: true },
+      tag: { type: 'string', optional: true },
     });
   });
 });
@@ -1010,6 +1039,38 @@ describe('#750 two types that accept the same values diff as the same type', () 
     },
   );
 
+  it.each(MODES)(
+    '%s: and rewriting one as a type that does not is a change, one way or the other',
+    async (_mode, compilerOptions) => {
+      // A pair `tsc` does not assign both ways differs in what callers may
+      // pass or what they read. One direction at least is reported: a retype
+      // both ways, or the optional member that became required. (The other
+      // direction of that one, required → optional, is not reported.)
+      const table = await memberTable(compilerOptions);
+      const unseen = table.pairs
+        .filter((pair) => !pair.mutual)
+        .filter(
+          (pair) =>
+            diffSnapshots(table.snapshot(pair.type, pair.one), table.snapshot(pair.type, pair.other)).changes.length ===
+              0 &&
+            diffSnapshots(table.snapshot(pair.type, pair.other), table.snapshot(pair.type, pair.one)).changes.length ===
+              0,
+        );
+      if (compilerOptions.exactOptionalPropertyTypes !== true) {
+        expect(unseen.map(table.named)).toEqual([]);
+        return;
+      }
+      // The one shape recorded as what it reads as (see the next test).
+      for (const pair of unseen) {
+        expect(
+          OPTIONAL_PART_BESIDE_REQUIRED_OR_UNDEFINED.has(pair.one) ||
+            OPTIONAL_PART_BESIDE_REQUIRED_OR_UNDEFINED.has(pair.other),
+          table.named(pair),
+        ).toBe(true);
+      }
+    },
+  );
+
   it.each(MODES)('%s: and two aliases that do not, record different members', async (_mode, compilerOptions) => {
     const table = await memberTable(compilerOptions);
     const recordedAlike = table.pairs.filter((pair) => pair.aliases && !pair.mutual && pair.sameRecord);
@@ -1099,84 +1160,175 @@ describe('#750 two types that accept the same values diff as the same type', () 
   });
 });
 
-describe("#750 an optional field's type, where an interface is involved", () => {
-  type Owner = 'interface' | 'alias';
-  const withMember = (owner: Owner, type: string, optional: boolean | undefined): CompatSnapshot => {
-    const member = { name: 'a', type, optional: optional ?? false };
+describe('#750 a field is compared by its resolved type once both snapshots carry it', () => {
+  type Member = { type: string; resolvedType?: string; optional?: boolean };
+  /** An `Options` interface with one member `a`; no `optional` is a snapshot
+   *  that records none, as one written before the key. */
+  const withMember = ({ type, resolvedType, optional }: Member): CompatSnapshot => {
     const snapshot = apiSurfaceToSnapshot(
-      surface(
-        owner === 'interface'
-          ? { interfaces: { Options: { name: 'Options', fields: { a: member }, extends: [] } } }
-          : { typeAliases: { Options: { name: 'Options', value: '{ … }', fields: { a: member }, extends: [] } } },
-      ),
+      surface({
+        interfaces: {
+          Options: {
+            name: 'Options',
+            fields: { a: { name: 'a', type, optional: optional ?? false, ...(resolvedType ? { resolvedType } : {}) } },
+            extends: [],
+          },
+        },
+      }),
     );
-    // `undefined`: a snapshot that records no optionality, as one written before the key.
     return optional === undefined ? writtenBefore750(snapshot) : snapshot;
   };
-  const RETYPED = ['breaking field_type_changed Options.a'];
+  const retyped = (from: string, to: string) => [`breaking field_type_changed Options.a: ${from} → ${to}`];
+  const changes = (before: Member, after: Member) =>
+    diffSnapshots(withMember(before), withMember(after)).changes.map(
+      (change) => `${change.severity} ${change.category} ${change.symbol}: ${change.old.type} → ${change.new.type}`,
+    );
 
-  it.each<[string, [Owner, string, boolean | undefined], [Owner, string, boolean | undefined], string[]]>([
-    // Optional on both sides, an interface on either: the `undefined` is the one optionality adds.
-    ['interface → interface', ['interface', 'string | undefined', true], ['interface', 'string', true], []],
+  it.each<[string, Member, Member, string[]]>([
+    // Two spellings of one member: the texts differ, the resolved types do not.
     [
-      'interface → interface, the other way',
-      ['interface', 'string', true],
-      ['interface', 'string | undefined', true],
+      'inherited through Partial, then written with a ?',
+      { type: 'string | undefined', resolvedType: 'string', optional: true },
+      { type: 'string', optional: true },
       [],
     ],
-    ['interface → alias', ['interface', 'string | undefined', true], ['alias', 'string', true], []],
-    ['alias → interface', ['alias', 'string', true], ['interface', 'string | undefined', true], []],
-    ['undefined written first', ['interface', 'undefined | string', true], ['alias', 'string', true], []],
-    ['beside null', ['interface', 'string | null | undefined', true], ['alias', 'string | null', true], []],
     [
-      'a function',
-      ['interface', '((attempt: number) => void) | undefined', true],
-      ['alias', '((attempt: number) => void)', true],
+      'the other way',
+      { type: 'string', optional: true },
+      { type: 'string | undefined', resolvedType: 'string', optional: true },
       [],
     ],
-    // Anything else than that `undefined` is a retype.
-    ['another type', ['interface', 'string | undefined', true], ['alias', 'number', true], RETYPED],
-    ['null is a value', ['interface', 'string | null', true], ['alias', 'string', true], RETYPED],
-    ['undefined inside', ['interface', 'Array<string | undefined>', true], ['alias', 'Array<string>', true], RETYPED],
-    // A required member that admits undefined is not one that does not.
-    ['required on both sides', ['interface', 'string | undefined', false], ['interface', 'string', false], RETYPED],
-    ['required, then optional', ['interface', 'string | undefined', false], ['alias', 'string', true], RETYPED],
-    // Two aliases' members are written by one rule: an `undefined` there is one the SDK wrote.
-    ['alias → alias', ['alias', 'string | undefined', true], ['alias', 'string', true], RETYPED],
-    // A snapshot that records no optionality is compared as before.
-    ['an older baseline', ['interface', 'string | undefined', undefined], ['interface', 'string', true], RETYPED],
-    ['an older candidate', ['interface', 'string | undefined', true], ['interface', 'string', undefined], RETYPED],
-    ['an older pair', ['interface', 'string | undefined', undefined], ['interface', 'string', undefined], RETYPED],
+    // A change one spelling hid: the texts agree, the resolved types do not.
+    [
+      'an explicit undefined withdrawn (exactOptionalPropertyTypes)',
+      { type: 'string', resolvedType: 'string | undefined', optional: true },
+      { type: 'string', optional: true },
+      retyped('string | undefined', 'string'),
+    ],
+    [
+      'an explicit undefined admitted',
+      { type: 'string', optional: true },
+      { type: 'string', resolvedType: 'string | undefined', optional: true },
+      retyped('string', 'string | undefined'),
+    ],
+    // A retype is one by either text, and is reported by the resolved ones.
+    [
+      'a retype',
+      { type: 'string | undefined', resolvedType: 'string', optional: true },
+      { type: 'number | undefined', resolvedType: 'number', optional: true },
+      retyped('string', 'number'),
+    ],
+    [
+      'no resolved type on either side',
+      { type: 'string', optional: false },
+      { type: 'number', optional: false },
+      retyped('string', 'number'),
+    ],
+    // A snapshot that records no optionality is one written before the
+    // resolved type existed: the pair is compared by the text baselines hold.
+    [
+      'an older baseline, the same source',
+      { type: 'string | undefined' },
+      { type: 'string | undefined', resolvedType: 'string', optional: true },
+      [],
+    ],
+    [
+      'an older baseline, the spelling changed',
+      { type: 'string | undefined' },
+      { type: 'string', optional: true },
+      retyped('string | undefined', 'string'),
+    ],
+    [
+      'an older candidate',
+      { type: 'string | undefined', resolvedType: 'string', optional: true },
+      { type: 'string' },
+      retyped('string | undefined', 'string'),
+    ],
+    [
+      'an older baseline cannot show what its text hid',
+      { type: 'string' },
+      { type: 'string', resolvedType: 'string | undefined', optional: true },
+      [],
+    ],
   ])('%s', (_name, before, after, expected) => {
-    expect(lines(diffSnapshots(withMember(...before), withMember(...after)))).toEqual(expected);
+    expect(changes(before, after)).toEqual(expected);
   });
 
-  it('is no change when an interface is rewritten as an alias with the same members', async () => {
+  it('reads a resolved type only where it is a text', () => {
+    for (const value of [null, true, 0, [], ['string'], {}, { name: 'string' }]) {
+      const odd = withMember({ type: 'string', optional: true });
+      const field = odd.symbols.find((sym) => sym.kind === 'field')!;
+      const withOdd = {
+        ...odd,
+        symbols: odd.symbols.map((sym) => (sym === field ? { ...sym, resolvedType: value as never } : sym)),
+      };
+      expect(lines(diffSnapshots(odd, withOdd)), JSON.stringify(value)).toEqual([]);
+      expect(lines(diffSnapshots(withOdd, odd)), JSON.stringify(value)).toEqual([]);
+    }
+    // The bridge writes one only for a text.
+    const bridged = apiSurfaceToSnapshot(
+      surface({
+        interfaces: {
+          Options: {
+            name: 'Options',
+            fields: { a: { name: 'a', type: 'string', optional: true, resolvedType: 7 as never } },
+            extends: [],
+          },
+        },
+      }),
+    );
+    expect(bridged.symbols.find((sym) => sym.kind === 'field')).not.toHaveProperty('resolvedType');
+  });
+
+  it('is no change when an interface is rewritten as an alias with the same members, or respelled', async () => {
     const members = '{ tag?: string; list: string[]; retry?(attempt: number): void; ping(): void }';
-    const result = await nodeDiff(
-      (side) => `export interface Base { name: string; count: number }
-${inNew(side, `export type Options = Partial<Base> & ${members};`, `export interface Options extends Partial<Base> ${members}`)}
+    const asInterface = `export interface Options extends Partial<Base> ${members}`;
+    const asAlias = `export type Options = Partial<Base> & ${members};`;
+    const respelled =
+      'export interface Options { name?: string; count?: number; tag?: string; list: string[]; retry?: (attempt: number) => void; ping: () => void }';
+    const sdk = (options: string) => `export interface Base { name: string; count: number }
+${options}
 export declare class Client { send(options: Options): void; }
-`,
-    );
-    expect(result.lines).toEqual([]);
-    const back = await nodeDiff(
-      (side) => `export interface Base { name: string; count: number }
-${inNew(side, `export interface Options extends Partial<Base> ${members}`, `export type Options = Partial<Base> & ${members};`)}
-export declare class Client { send(options: Options): void; }
-`,
-    );
-    expect(back.lines).toEqual([]);
+`;
+    for (const [before, after] of [
+      [asInterface, asAlias],
+      [asAlias, asInterface],
+      [asInterface, respelled],
+      [respelled, asInterface],
+      [respelled, asAlias],
+    ]) {
+      const result = await nodeDiff((side) => sdk(side === 'new' ? after : before));
+      expect(result.lines, `${before} → ${after}`).toEqual([]);
+    }
   });
 
-  it('is no change between two spellings of one interface', async () => {
-    const result = await nodeDiff(
-      (side) => `export interface Base { name: string }
-export interface Options ${inNew(side, '{ name?: string; retry?: () => void }', 'extends Partial<Base> { retry?(): void }')}
-export declare class Client { send(options: Options): void; }
-`,
-    );
-    expect(result.lines).toEqual([]);
+  it('reports an explicit undefined withdrawn from an optional member, whichever the two types are', async () => {
+    // With exactOptionalPropertyTypes, `{ a: undefined }` is accepted by the
+    // first of each pair and by the second of none.
+    const exact = (source: string): Record<string, string> => ({
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { strict: true, exactOptionalPropertyTypes: true },
+        include: ['src'],
+      }),
+      'src/index.ts': `${source}\nexport declare class Client { send(options: Options): void; }\n`,
+    });
+    const forms = {
+      'alias, explicit': 'export type Options = { a?: string | undefined };',
+      'interface, explicit': 'export interface Options { a?: string | undefined }',
+      alias: 'export type Options = { a?: string };',
+      interface: 'export interface Options { a?: string }',
+    };
+    const report = async (before: keyof typeof forms, after: keyof typeof forms) =>
+      (await compatDiff(nodeExtractor, exact(forms[before]), exact(forms[after]))).lines;
+    const RETYPED = ['breaking field_type_changed Options.a'];
+    expect(await report('alias, explicit', 'interface')).toEqual(RETYPED);
+    expect(await report('alias, explicit', 'alias')).toEqual(RETYPED);
+    expect(await report('interface, explicit', 'interface')).toEqual(RETYPED);
+    expect(await report('interface, explicit', 'alias')).toEqual(RETYPED);
+    // The same type in another form is no change.
+    expect(await report('alias, explicit', 'interface, explicit')).toEqual([]);
+    expect(await report('interface, explicit', 'alias, explicit')).toEqual([]);
+    expect(await report('alias', 'interface')).toEqual([]);
   });
 });
 

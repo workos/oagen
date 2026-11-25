@@ -72,6 +72,15 @@ export interface ApiField {
   type: string;
   /** Whether a caller that builds the value may leave the field out. */
   optional: boolean;
+  /** The member's type as the language's checker resolves it, where that is
+   *  another text than `type`. A TypeScript interface's `type` is decided by
+   *  the `?` of the member's property signature, as every baseline holds it:
+   *  a member made optional by what the interface extends keeps a
+   *  `| undefined` there, and `a?: string | undefined` loses its own under
+   *  `exactOptionalPropertyTypes`. This is the text two such members are
+   *  compared by once both snapshots carry it. Absent when the two are one
+   *  text, and from an extractor with no checker to ask. */
+  resolvedType?: string;
 }
 
 export interface ApiTypeAlias {

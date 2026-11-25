@@ -82,6 +82,13 @@ export interface CompatSymbol {
    *  and in snapshots written before the key existed; the differ reads it
    *  only where it is defined, so older snapshots never diff on it. */
   optional?: boolean;
+  /** On a `field`: the member's type as the extractor's checker resolves it,
+   *  where that is another text than `typeRef.name`, which stays as every
+   *  baseline holds it (`ApiField.resolvedType`). The classifier compares two
+   *  fields by it when both snapshots record the field's optionality, that
+   *  is, when both were written since it existed; an older snapshot is
+   *  compared by `typeRef.name`, as before. */
+  resolvedType?: string;
   /** On a type symbol whose members the snapshot records (an interface, a
    *  model class, a type alias of an object type): the supertypes its
    *  declaration names, as written. `[]` when it names none. Absent on a type
@@ -343,6 +350,7 @@ function fieldSymbol(
     sourceKind: 'generated_resource_constructor',
     typeRef: { name: field.type },
     ...(optionalityKnown && typeof field.optional === 'boolean' ? { optional: field.optional } : {}),
+    ...(typeof field.resolvedType === 'string' ? { resolvedType: field.resolvedType } : {}),
     ...(sourceFile ? { sourceFile } : {}),
   };
 }
