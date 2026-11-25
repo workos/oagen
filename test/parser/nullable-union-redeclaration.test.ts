@@ -1168,6 +1168,87 @@ describe('#743 a document that parsed still parses', () => {
     ],
   ];
 
+  /** Declarations that are no wrapper, describe an object, and hold a value the readers of a conjunction cannot read. */
+  const unreadable: ReadonlyArray<readonly [string, unknown]> = [
+    ['a `required` that is a number', { ...all(ref('Other')), required: 5 }],
+    ['a member’s `required` that is `true`', all(ref('Other'), { required: true })],
+    ['an `enum` that is a string', { ...all(ref('Other')), enum: 'x' }],
+    ['a member’s `enum` that is a string', all(ref('Other'), { enum: 'x' })],
+    ['a `not` that is `null`', { ...all(ref('Other')), not: null }],
+    ['a `discriminator` that is a number', { ...all(ref('Other')), discriminator: 5 }],
+  ];
+  const tagOf = async (first: unknown, second: unknown, ...more: unknown[]): Promise<string> => {
+    const spec = await parse(redeclared('3.1.0', first, second, { schemas, more })).catch((error: Error) => error);
+    return spec instanceof Error ? `fails: ${spec.message}` : typeOf(fieldOf(spec, 'PetOutput', 'tag')?.type);
+  };
+
+  it('with a declaration that is no wrapper and no reader could read, beside a wrapper', async () => {
+    // Greptile, #743 review: only the wrapper was asked whether a reader could read it, so `{ allOf:
+    // [{ $ref: Other }], required: 5 }` beside a wrapper reached the readers of a conjunction, which
+    // iterate its `required`, and failed a parse that had kept the first. The pair keeps the first.
+    for (const [label, declaration] of unreadable) {
+      expect(await tagOf(anyOfNull('Tag'), declaration), `${label}, declared second`).toBe('Tag | null');
+      expect(await tagOf(declaration, anyOfNull('Tag')), `${label}, declared first`).toBe('Other');
+      expect(await tagOf({ oneOf: [all(ref('Tag')), nul] }, declaration), `${label}, after an \`allOf\``).toBe(
+        'Tag | null',
+      );
+    }
+  });
+
+  it('with such a declaration after two that a wrapper makes conjoin', async () => {
+    // Where the first of three stood as written, nothing after it was read to conjoin it. A
+    // conjunction stands there now, and meets a later declaration only where a reader can read it.
+    const items = (schema: unknown) => ({ type: 'array', items: schema });
+    const nested = (schema: unknown) => ({ type: 'object', properties: { t: schema } });
+    for (const [label, declaration] of unreadable) {
+      expect(await tagOf(anyOfNull('Tag'), anyOfNull('TagOutput'), declaration), label).toBe('TagOutput | null');
+      expect(await tagOf(anyOfNull('Tag'), ref('TagOutput'), declaration), label).toBe('TagOutput');
+      expect(await tagOf(ref('Tag'), anyOfNull('TagOutput'), declaration), label).toBe('TagOutput');
+      // Through the copy a typeless declaration annotates, and a fourth declaration.
+      expect(
+        await tagOf(anyOfNull('Tag'), anyOfNull('TagOutput'), { description: 'Annotated.' }, declaration),
+        label,
+      ).toBe('TagOutput | null');
+      expect(await tagOf(anyOfNull('Tag'), anyOfNull('TagOutput'), anyOfNull('TagFinal'), declaration), label).toBe(
+        'TagFinal | null',
+      );
+      // In array items, and in a property two inline objects nest.
+      expect(await tagOf(items(anyOfNull('Tag')), items(anyOfNull('TagOutput')), items(declaration)), label).toBe(
+        '(TagOutput | null)[]',
+      );
+      const spec = await parse(
+        redeclared('3.1.0', nested(anyOfNull('Tag')), nested(anyOfNull('TagOutput')), {
+          schemas,
+          more: [nested(declaration)],
+        }),
+      );
+      expect(fieldsOf(modelOf(spec, 'PetOutputTag')), label).toBe('t?: TagOutput | null');
+    }
+    // So is a typeless declaration no reader could read, which the conjunction would carry: beside the
+    // `allOf` of two inline objects, the merge iterates the `required` no reader read beside a wrapper.
+    const wrap = (properties: Doc) => ({ anyOf: [{ type: 'object', properties }, nul] });
+    for (const required of [5, true, {}, 'label']) {
+      const spec = await parse(
+        redeclared('3.1.0', wrap({ a: string }), wrap({ label: string }), { schemas, more: [{ required }] }),
+      );
+      expect(tagLine(spec), JSON.stringify(required)).toBe('PetOutputTag | null { a?: string, label?: string }');
+    }
+    // A later declaration a reader can read is combined as ever: a `required` that is a list, and a
+    // typed one, here one that rejects `null`.
+    expect(
+      tagLine(
+        await parse(
+          redeclared('3.1.0', wrap({ a: string }), wrap({ label: string }), {
+            schemas,
+            more: [{ required: ['label'] }],
+          }),
+        ),
+      ),
+    ).toBe('PetOutputTag | null { a?: string, label: string }');
+    expect(await tagOf(anyOfNull('Tag'), anyOfNull('TagOutput'), all(ref('Other')))).toBe('PetOutputTag');
+    expect(await tagOf(anyOfNull('Tag'), anyOfNull('TagOutput'), ref('TagFinal'))).toBe('TagFinal');
+  });
+
   it('with any value at any position of a wrapper declared second, which the conjunction never read before', async () => {
     const lines: string[] = [];
     for (const [position, at_] of positions) {

@@ -6,7 +6,12 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffCommand } from '../../src/cli/diff.js';
 import { componentPropertyLedger, isDeclaredProperty, type SchemaObject } from '../../src/parser/schemas.js';
-import { buildInlineModel, collectProperties, mergeAllOfMembers } from '../../src/parser/inline-models.js';
+import {
+  buildInlineModel,
+  collectProperties,
+  mapValueSchema,
+  mergeAllOfMembers,
+} from '../../src/parser/inline-models.js';
 import { collectObjectProperties } from '../../src/parser/pagination.js';
 import { pointerSteps } from '../../src/parser/schema-pointers.js';
 import { schemaAtPointer, schemaRefTarget, schemaRefValue } from '../../src/parser/schema-refs.js';
@@ -1063,6 +1068,41 @@ function positions(openapi: Version): Record<'property' | 'pointer' | 'typed', A
       '`additionalProperties` beside `properties` (component)',
       (v) => document({ Pet: pet({}, { additionalProperties: v }) }),
     ],
+    [
+      '`additionalProperties` beside a typed `patternProperties` value (field)',
+      (v) =>
+        document({
+          Pet: pet({ extra: { type: 'object', patternProperties: { '^x-': string }, additionalProperties: v } }),
+        }),
+    ],
+    [
+      '`additionalProperties` beside a typed `patternProperties` value (response body)',
+      (v) =>
+        document(
+          { Pet: pet() },
+          json({ type: 'object', patternProperties: { '^x-': string }, additionalProperties: v }),
+        ),
+    ],
+    [
+      '`additionalProperties` beside a typed `patternProperties` value (map component)',
+      (v) =>
+        document({
+          Pet: pet({ extra: ref('Extra') }),
+          Extra: { type: 'object', patternProperties: { '^x-': string }, additionalProperties: v },
+        }),
+    ],
+    [
+      '`additionalProperties` beside `properties` and a typed `patternProperties` value (component)',
+      (v) => document({ Pet: pet({}, { patternProperties: { '^x-': string }, additionalProperties: v }) }),
+    ],
+    [
+      "`additionalProperties` beside `properties` (a `$ref` member's component)",
+      (v) =>
+        document({
+          Base: object({ id: string }, { additionalProperties: v }),
+          Pet: { allOf: [ref('Base'), object({ x: string })] },
+        }),
+    ],
   ];
 
   const pointer: Array<[string, Build]> = [
@@ -1111,6 +1151,14 @@ function positions(openapi: Version): Record<'property' | 'pointer' | 'typed', A
           Box: object({ id: string }, { additionalProperties: v }),
         }),
     ],
+    [
+      '`additionalProperties` beside a typed `patternProperties` value a pointer names from a response body',
+      (v) =>
+        document(
+          { Pet: pet({ extra: { type: 'object', patternProperties: { '^x-': string }, additionalProperties: v } }) },
+          json({ $ref: '#/components/schemas/Pet/properties/extra/additionalProperties' }),
+        ),
+    ],
   ];
 
   const typed: Array<[string, Build]> = [
@@ -1155,6 +1203,75 @@ function positions(openapi: Version): Record<'property' | 'pointer' | 'typed', A
     [
       '`unevaluatedItems`',
       (v) => document({ Pet: pet({ tags: { type: 'array', items: string, unevaluatedItems: v } }) }),
+    ],
+    [
+      'a `patternProperties` value beside `properties` (field)',
+      (v) => document({ Pet: pet({ owner: object({ id: string }, { patternProperties: { '^x-': v } }) }) }),
+    ],
+    [
+      'a `patternProperties` value (response body)',
+      (v) => document({ Pet: pet() }, json({ type: 'object', patternProperties: { '^x-': v } })),
+    ],
+    [
+      'a `patternProperties` value (map component)',
+      (v) =>
+        document({ Pet: pet({ extra: ref('Extra') }), Extra: { type: 'object', patternProperties: { '^x-': v } } }),
+    ],
+    [
+      'the first of two `patternProperties` values',
+      (v) => document({ Pet: pet({ extra: { type: 'object', patternProperties: { '^x-': v, '^y-': string } } }) }),
+    ],
+    [
+      'the second of two `patternProperties` values',
+      (v) => document({ Pet: pet({ extra: { type: 'object', patternProperties: { '^x-': string, '^y-': v } } }) }),
+    ],
+    [
+      'a `patternProperties` value beside `additionalProperties: false`',
+      (v) =>
+        document({
+          Pet: pet({ extra: { type: 'object', additionalProperties: false, patternProperties: { '^x-': v } } }),
+        }),
+    ],
+    [
+      '`unevaluatedProperties` beside `properties` (field)',
+      (v) => document({ Pet: pet({ owner: object({ id: string }, { unevaluatedProperties: v }) }) }),
+    ],
+    [
+      '`unevaluatedProperties` beside a typed `patternProperties` value',
+      (v) =>
+        document({
+          Pet: pet({ extra: { type: 'object', patternProperties: { '^x-': string }, unevaluatedProperties: v } }),
+        }),
+    ],
+    [
+      '`unevaluatedProperties` beside a typed `additionalProperties`',
+      (v) =>
+        document({ Pet: pet({ extra: { type: 'object', additionalProperties: string, unevaluatedProperties: v } }) }),
+    ],
+    [
+      '`unevaluatedProperties` (response body)',
+      (v) => document({ Pet: pet() }, json({ type: 'object', unevaluatedProperties: v })),
+    ],
+    [
+      '`additionalProperties` beside `properties` (inline response body)',
+      (v) => document({ Pet: pet() }, json(object({ id: string }, { additionalProperties: v }))),
+    ],
+    [
+      '`additionalProperties` beside `properties` (inline request body)',
+      (v) => document({ Pet: pet() }, undefined, {}, post(json(object({ id: string }, { additionalProperties: v })))),
+    ],
+    [
+      '`additionalProperties` beside `properties` (an `allOf` member of a component)',
+      (v) =>
+        document({ Owner: owner, Pet: { allOf: [ref('Owner'), object({ id: string }, { additionalProperties: v })] } }),
+    ],
+    [
+      'the `additionalProperties` of a map a pointer names from a response body',
+      (v) =>
+        document(
+          { Pet: pet({ extra: { type: 'object', additionalProperties: v } }) },
+          json({ $ref: '#/components/schemas/Pet/properties/extra/additionalProperties' }),
+        ),
     ],
     ['`propertyNames`', (v) => document({ Pet: pet({ extra: { type: 'object', propertyNames: v } }) })],
     ['`contains`', (v) => document({ Pet: pet({ tags: { type: 'array', items: string, contains: v } }) })],
@@ -1484,7 +1601,12 @@ describe.each(VERSIONS)('#746 a property that is a `$ref` to `false`, OpenAPI %s
       a sibling whose name array items would take (\`allOf\` member): Owner { ownerName?: string }; Pet { ownerName?: string, tags?: PetTags[] }; PetTags { label?: string }
       \`additionalProperties\` beside \`properties\` and an \`allOf\` (component): Owner { ownerName?: string }; Pet { name?: string, ownerName?: string }
       \`additionalProperties\` beside \`properties\` (request body component): Pet { name?: string }; NewPet { id?: string }; createPet() body NewPet -> Pet
-      \`additionalProperties\` beside \`properties\` (component): Pet { name?: string }"
+      \`additionalProperties\` beside \`properties\` (component): Pet { name?: string }
+      \`additionalProperties\` beside a typed \`patternProperties\` value (field): Pet { name?: string, extra?: map<string> }
+      \`additionalProperties\` beside a typed \`patternProperties\` value (response body): Pet { name?: string }; getPet(path petId: string) -> map<string>
+      \`additionalProperties\` beside a typed \`patternProperties\` value (map component): Pet { name?: string, extra?: Extra }; Extra {  }
+      \`additionalProperties\` beside \`properties\` and a typed \`patternProperties\` value (component): Pet { name?: string }
+      \`additionalProperties\` beside \`properties\` (a \`$ref\` member's component): Base { id?: string }; Pet { id?: string, x?: string }"
     `);
   });
 
@@ -1607,7 +1729,10 @@ describe.each(VERSIONS)('#746 a JSON Pointer to a property that is `false`, Open
         [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pets.getPet.response: no schema at that pointer — typing the site as unknown
       the catch-all \`additionalProperties\` a pointer names from another property
         Pet { name?: string }; Box { id?: string }
-        (no warning)"
+        (no warning)
+      \`additionalProperties\` beside a typed \`patternProperties\` value a pointer names from a response body
+        Pet { name?: string, extra?: map<string> }; getPet(path petId: string) -> unknown
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/extra/additionalProperties" in Pets.getPet.response: no schema at that pointer — typing the site as unknown"
     `);
   });
 
@@ -1635,7 +1760,10 @@ describe.each(VERSIONS)('#746 a JSON Pointer to a property that is `false`, Open
         [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pets.getPet.response: no schema at that pointer — typing the site as unknown
       the catch-all \`additionalProperties\` a pointer names from another property
         Pet { name?: string, again?: unknown }; Box { id?: string }
-        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pet.again: no schema at that pointer — typing the site as unknown"
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Box/additionalProperties" in Pet.again: no schema at that pointer — typing the site as unknown
+      \`additionalProperties\` beside a typed \`patternProperties\` value a pointer names from a response body
+        Pet { name?: string, extra?: map<string> }; getPet(path petId: string) -> unknown
+        [oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/extra/additionalProperties" in Pets.getPet.response: no schema at that pointer — typing the site as unknown"
     `);
   });
 });
@@ -1703,6 +1831,48 @@ describe.each(VERSIONS)('#746 a `$ref` to `false` read for a type, OpenAPI %s', 
       \`unevaluatedItems\`
         false: Pet { name?: string, tags?: string[] }
         $ref:  Pet { name?: string, tags?: string[] }
+      a \`patternProperties\` value beside \`properties\` (field)
+        false: Pet { name?: string, owner?: PetOwner }; PetOwner { id?: string }
+        $ref:  Pet { name?: string, owner?: PetOwner }; PetOwner { id?: string }
+      a \`patternProperties\` value (response body)
+        false: Pet { name?: string }; getPet(path petId: string) -> map<unknown>
+        $ref:  Pet { name?: string }; getPet(path petId: string) -> map<unknown>
+      a \`patternProperties\` value (map component)
+        false: Pet { name?: string, extra?: Extra }; Extra {  }
+        $ref:  Pet { name?: string, extra?: Extra }; Extra {  }
+      the first of two \`patternProperties\` values
+        false: Pet { name?: string, extra?: map<unknown> }
+        $ref:  Pet { name?: string, extra?: map<unknown> }
+      the second of two \`patternProperties\` values
+        false: Pet { name?: string, extra?: map<string> }
+        $ref:  Pet { name?: string, extra?: map<string> }
+      a \`patternProperties\` value beside \`additionalProperties: false\`
+        false: Pet { name?: string, extra?: map<unknown> }
+        $ref:  Pet { name?: string, extra?: map<unknown> }
+      \`unevaluatedProperties\` beside \`properties\` (field)
+        false: Pet { name?: string, owner?: PetOwner }; PetOwner { id?: string }
+        $ref:  Pet { name?: string, owner?: PetOwner }; PetOwner { id?: string }
+      \`unevaluatedProperties\` beside a typed \`patternProperties\` value
+        false: Pet { name?: string, extra?: map<string> }
+        $ref:  Pet { name?: string, extra?: map<string> }
+      \`unevaluatedProperties\` beside a typed \`additionalProperties\`
+        false: Pet { name?: string, extra?: map<string> }
+        $ref:  Pet { name?: string, extra?: map<string> }
+      \`unevaluatedProperties\` (response body)
+        false: Pet { name?: string }; getPet(path petId: string) -> map<unknown>
+        $ref:  Pet { name?: string }; getPet(path petId: string) -> map<unknown>
+      \`additionalProperties\` beside \`properties\` (inline response body)
+        false: Pet { name?: string }; GetPetResponse { id?: string }; getPet(path petId: string) -> GetPetResponse
+        $ref:  Pet { name?: string }; GetPetResponse { id?: string }; getPet(path petId: string) -> GetPetResponse
+      \`additionalProperties\` beside \`properties\` (inline request body)
+        false: Pet { name?: string }; CreatePetRequest { id?: string }; createPet() body CreatePetRequest -> Pet
+        $ref:  Pet { name?: string }; CreatePetRequest { id?: string }; createPet() body CreatePetRequest -> Pet
+      \`additionalProperties\` beside \`properties\` (an \`allOf\` member of a component)
+        false: Owner { ownerName?: string }; Pet { ownerName?: string, id?: string }
+        $ref:  Owner { ownerName?: string }; Pet { ownerName?: string, id?: string }
+      the \`additionalProperties\` of a map a pointer names from a response body
+        false: Pet { name?: string, extra?: map<unknown> }; getPet(path petId: string) -> unknown
+        $ref:  Pet { name?: string, extra?: map<unknown> }; getPet(path petId: string) -> unknown
       \`propertyNames\`
         false: Pet { name?: string, extra?: map<unknown> }
         $ref:  Pet { name?: string, extra?: map<unknown> }
@@ -1776,8 +1946,8 @@ describe.each(VERSIONS)('#746 a `$ref` to `false` read for a type, OpenAPI %s', 
   }, 60_000);
 });
 
-describe('#746 `additionalProperties` beside `properties` on a component', () => {
-  const document = (additionalProperties: unknown, schemas: Doc = {}) => ({
+describe('#746 `additionalProperties` where `false` means something', () => {
+  const document = (additionalProperties: unknown, schemas: Doc = {}, pet?: (value: unknown) => Doc) => ({
     openapi: '3.1.0',
     info: { title: 'Repro', version: '1.0.0' },
     paths: {
@@ -1790,7 +1960,10 @@ describe('#746 `additionalProperties` beside `properties` on a component', () =>
       },
     },
     components: {
-      schemas: { Pet: { type: 'object', properties: { name: string }, additionalProperties }, ...schemas },
+      schemas: {
+        Pet: pet?.(additionalProperties) ?? { type: 'object', properties: { name: string }, additionalProperties },
+        ...schemas,
+      },
     },
   });
 
@@ -1817,6 +1990,46 @@ describe('#746 `additionalProperties` beside `properties` on a component', () =>
     );
     expect(render(await parse(document(true)))).toBe('Pet { name?: string }');
     expect(render(await parse(document({})))).toBe('Pet { name?: string }');
+  });
+
+  /** `Pet.extra`, a map whose `patternProperties` type its values `string`, with `additionalProperties` beside them. */
+  const beside = (patternProperties: Doc | undefined) => (additionalProperties: unknown) => ({
+    type: 'object',
+    properties: {
+      name: string,
+      extra: { type: 'object', ...(patternProperties && { patternProperties }), additionalProperties },
+    },
+  });
+  const patterned = beside({ '^x-': string });
+
+  it('leaves the values of a map to its pattern for a `$ref` to `false`, as `false` leaves them', async () => {
+    const map = (value: unknown, schemas: Doc = {}) => document(value, schemas, patterned);
+    expect(render(await parse(map(false)))).toBe('Pet { name?: string, extra?: map<string> }');
+    // On main: `Pet { name?: string, extra?: map<unknown> }`, the pattern's `string` lost to the `$ref`.
+    expect(render(await parse(map(never, { Never: false })))).toBe('Pet { name?: string, extra?: map<string> }');
+    expect(render(await parse(map(ref('NeverAlias'), { NeverAlias: never, Never: false })))).toBe(
+      'Pet { name?: string, extra?: map<string> }',
+    );
+    await expectNoDiff(map(false), map(never, { Never: false }));
+  });
+
+  it('keeps the values a schema beside the pattern types, a `$ref` to `true` among them, and a map with no pattern', async () => {
+    const map = (value: unknown, schemas: Doc = {}) => document(value, schemas, patterned);
+    expect(render(await parse(map({ type: 'integer' })))).toBe('Pet { name?: string, extra?: map<integer> }');
+    expect(render(await parse(map(ref('Count'), { Count: { type: 'integer' } })))).toBe(
+      'Pet { name?: string, extra?: map<integer> }',
+    );
+    // As on main: `{}` and a `$ref` to `true` are the value schema, `unknown`.
+    expect(render(await parse(map({})))).toBe('Pet { name?: string, extra?: map<unknown> }');
+    expect(render(await parse(map(ref('Anything'), { Anything: true })))).toBe(
+      'Pet { name?: string, extra?: map<unknown> }',
+    );
+    // With no pattern to type the values they are `unknown` under either spelling, as on main.
+    const bare = (value: unknown, schemas: Doc = {}) => document(value, schemas, beside(undefined));
+    const [inline, byRef] = [await read(bare(false)), await read(bare(never, { Never: false }))];
+    expect(render(inline.spec)).toBe('Pet { name?: string, extra?: map<unknown> }');
+    expect(byRef.spec).toEqual(inline.spec);
+    expect(byRef.warnings).toEqual(inline.warnings);
   });
 });
 
@@ -2002,10 +2215,26 @@ describe('#746 the one question a reader of `properties` asks', () => {
       expect(pointerSteps(box(false), ['additionalProperties'], map)).toEqual({ problem: 'no schema at that pointer' });
       expect(pointerSteps(box(string), ['additionalProperties'], map)).toHaveLength(1);
       // A map's values are read for a type: the step stands, as it did.
-      expect(
-        pointerSteps(written({ type: 'object', additionalProperties: legacyId }), ['additionalProperties'], map),
-      ).toHaveLength(1);
+      const values = (more: Doc = {}): SchemaObject =>
+        written({ type: 'object', additionalProperties: legacyId, ...more });
+      expect(pointerSteps(values(), ['additionalProperties'], map)).toHaveLength(1);
+      expect(mapValueSchema(values(), map)).toBe(legacyId);
+      // Beside a pattern the values are the pattern's, as beside `additionalProperties: false`.
+      const patterned = values({ patternProperties: { '^x-': string } });
+      expect(mapValueSchema(patterned, map)).toBe(string);
+      expect(mapValueSchema({ ...patterned, additionalProperties: false }, map)).toBe(string);
+      expect(pointerSteps(patterned, ['additionalProperties'], map)).toEqual({ problem: 'no schema at that pointer' });
+      expect(pointerSteps(patterned, ['patternProperties', '^x-'], map)).toHaveLength(1);
     }
+    // A schema, `{}` and a `$ref` to `true` beside a pattern are the value schema they were.
+    const beside = (additionalProperties: unknown): SchemaObject =>
+      written({ type: 'object', patternProperties: { '^x-': string }, additionalProperties });
+    const count = { type: 'integer' };
+    expect(mapValueSchema(beside(count), map)).toBe(count);
+    expect(mapValueSchema(beside({}), map)).toBeNull();
+    expect(mapValueSchema(beside(true), map)).toBe(string);
+    const toAnything = ref('Anything');
+    expect(mapValueSchema(beside(toAnything), { ...map, Anything: written(true) })).toBe(toAnything);
     // A `$ref` to `true` declares the property for each of them.
     const toTrue = object(ref('Anything'));
     const anything = { ...map, Anything: written(true) };

@@ -77,6 +77,17 @@
  * and the site keeps what it wrote beside the `$ref`, as beside a `$ref` to
  * a model component.
  *
+ * So is the `format` (#745). A `$ref` to a primitive component typed
+ * without a format takes the one written beside the reference, and a
+ * pointer site does once its type is known: the type builder records the
+ * format the site writes around the pointer (`recordPendingSiteFormat`,
+ * read from the levels the site's limits are), and the type the site
+ * settles into takes it where it has none of its own (`withTypeFormat`),
+ * so `{ $ref: '#/components/schemas/Owner/properties/since', format:
+ * 'date-time' }` to `{ type: 'string' }` is a `string` with `date-time`,
+ * and to `{ type: 'string', format: 'date' }` a `date`: the format of the
+ * schema the pointer lands on stands, as a component's does.
+ *
  * What a site decided from the pending reference before the settle is
  * decided again from the settled type: an operation whose primary response
  * was pending chooses its iterator's item type from the settled response
@@ -132,6 +143,7 @@ import {
   schemaToTypeRef,
   unionFlaggedNullable,
   withTypeConstraints,
+  withTypeFormat,
   type SchemaObject,
 } from './schemas.js';
 import { cloneTypeRef, mapValueSchema, readInlineAllOf, replaceTypeRef, writtenTypingMember } from './inline-models.js';
@@ -146,8 +158,10 @@ import {
   isPendingSchemaRef,
   isPendingVariant,
   pendingNullVetoed,
+  pendingSiteFormatOf,
   pendingSiteLimitsOf,
   recordPendingNullVeto,
+  recordPendingSiteFormat,
   withoutNull,
   schemaAtPointer,
   schemaRefOf,
@@ -536,10 +550,12 @@ export interface PointerStep {
  * A `properties/<name>` step to an entry that declares no property
  * (`isDeclaredProperty`: written `false`, or as a `$ref` that leads to
  * `false`) leads to no schema, whichever way the entry is written, since
- * the model has no such field; and so does an `additionalProperties` step,
- * beside named properties, to one, which gives the model no catch-all
- * field (#746: the `$ref` spelling was a schema here, and the site was
- * typed from the field the model then had).
+ * the model has no such field; and so does an `additionalProperties` step
+ * to one beside named properties, which gives the model no catch-all
+ * field, or beside a pattern, which types the map's values in its place
+ * (#746: the `$ref` spelling was a schema here, and the site was typed
+ * from the field the model then had, or from the values the `$ref` then
+ * typed).
  */
 export function pointerSteps(
   component: SchemaObject,
@@ -567,14 +583,17 @@ export function pointerSteps(
         // The IR types a map's values from one schema; a model with named
         // properties carries a non-empty `additionalProperties` as its
         // catch-all field and no pattern at all.
-        const represented = mapValueSchema(node);
+        const represented = mapValueSchema(node, schemas);
         const named = Object.keys(node.properties ?? {}).length > 0;
         if (keyword === 'patternProperties' && named)
           return { problem: `a schema with named properties types no "${keyword}/${name}" values` };
-        // Beside named properties a `$ref` that names `false` gives the
-        // model no catch-all field, as `additionalProperties: false` gives
-        // it none (`isDeclaredProperty`; #746): no schema to read values from.
-        if (keyword === 'additionalProperties' && named && !isDeclaredProperty(next, schemas))
+        // A `$ref` that names `false` is the `false` it names where
+        // `additionalProperties: false` means something (`isDeclaredProperty`;
+        // #746): beside named properties, where it gives the model no
+        // catch-all field, and beside a pattern, which then types the values
+        // (`mapValueSchema`). No schema to read the values from, as `false`
+        // written there is none.
+        if (keyword === 'additionalProperties' && !isDeclaredProperty(next, schemas) && (named || represented !== next))
           return { problem: 'no schema at that pointer' };
         if (represented !== next && !(keyword === 'additionalProperties' && represented === null && !named))
           return {
@@ -991,6 +1010,8 @@ class PointerResolver {
     }
     settlePendingSchemaRef(pending);
     const site = pendingSiteLimitsOf(pending);
+    const siteFormat = pendingSiteFormatOf(pending);
+    recordPendingSiteFormat(pending, undefined);
     const vetoed = pendingNullVetoed(pending);
     recordPendingNullVeto(pending, false);
     replaceTypeRef(pending, type ?? UNKNOWN);
@@ -1012,6 +1033,10 @@ class PointerResolver {
     // now: `replaceTypeRef` rewrote it in place.
     const settled = pending as TypeRef;
     const bare = underNullableWrappers(settled);
+    // And the `format` the site writes around the pointer, where the type
+    // reached has none of its own (`withTypeFormat`; #745), as a `$ref` to a
+    // primitive component typed without one takes the site's.
+    withTypeFormat(settled, siteFormat);
     withTypeConstraints(settled, combineConstraints(typeRefConstraints(bare), site));
     this.settled.push(pending);
     this.settledRefs.add(pending);

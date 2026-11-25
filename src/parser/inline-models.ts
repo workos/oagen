@@ -22,6 +22,7 @@ import {
   componentUnionDispatches,
   composesOwnChain,
   axisDiscriminatorOf,
+  carryListedVariant,
   handedPastRef,
   documentComponentSchemas,
   declaredComponentProperty,
@@ -55,6 +56,8 @@ import {
   unwrapNullableSchema,
   withWrapperDeprecation,
   withWrapperDocs,
+  formatKeyword,
+  wrapperFormatEntry,
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
@@ -77,8 +80,10 @@ import {
   isPendingSchemaRef,
   markPendingSchemaRef,
   pendingNullVetoed,
+  pendingSiteFormatOf,
   pendingSiteLimitsOf,
   recordPendingNullVeto,
+  recordPendingSiteFormat,
   recordPendingSiteLimits,
   schemaRefTarget,
   schemaRefTokens,
@@ -1962,12 +1967,23 @@ function recordInheritedRef(ref: ModelRef, key: string): void {
  * inline enum a bare name to the lift. A copy made here carries every mark
  * its original has: the component mark, the inherited record under the same
  * field, the enum's members and link; a union's mapping is copied with its
- * variants. For a type copied to a second owner — a webhook sharing a path
- * item's minting (`extractWebhooks`). A copy made only to be serialized for
- * comparison, after its flags are spelled out (`foldedVariantKey`), needs
- * none of this.
+ * variants; and a variant of a type list's union the JSON types it stands
+ * for (`carryListedVariant`), at any depth, so the copy of such a union
+ * takes a `format` on the variants the original would (#745: a JSON
+ * Pointer `$ref` settles into a copy of the type it lands on). For a type
+ * copied to a second owner — a webhook sharing a path item's minting
+ * (`extractWebhooks`). A copy made only to be serialized for comparison,
+ * after its flags are spelled out (`foldedVariantKey`), needs none of
+ * this.
  */
 export function cloneTypeRef(ref: TypeRef): TypeRef {
+  const copy = copiedTypeRef(ref);
+  carryListedVariant(ref, copy);
+  return copy;
+}
+
+/** `cloneTypeRef`, less the mark every kind of node may carry (`carryListedVariant`). */
+function copiedTypeRef(ref: TypeRef): TypeRef {
   switch (ref.kind) {
     case 'model': {
       const copy: ModelRef = { ...ref };
@@ -1975,6 +1991,7 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
       if (isPendingSchemaRef(ref)) {
         markPendingSchemaRef(copy);
         recordPendingSiteLimits(copy, pendingSiteLimitsOf(ref));
+        recordPendingSiteFormat(copy, pendingSiteFormatOf(ref));
         recordPendingNullVeto(copy, pendingNullVetoed(ref));
       }
       const key = inheritedModelRefs.get(ref);
@@ -2032,13 +2049,15 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
  * written into it. The copy is made as `cloneTypeRef` makes one, so every
  * mark rides along: the nested nodes are the copy's own, and a mark on the
  * copy's root — the component mark, an inherited record, an inline enum's
- * members and link — is set on `target`, which takes the root's place.
+ * members and link, the JSON types a type list's variant stands for — is
+ * set on `target`, which takes the root's place.
  */
 export function replaceTypeRef(target: TypeRef, source: TypeRef): void {
   const copy = cloneTypeRef(source);
   const slot = target as unknown as Record<string, unknown>;
   for (const key of Object.keys(slot)) delete slot[key];
   Object.assign(slot, copy);
+  carryListedVariant(copy, target);
   if (copy.kind === 'model') {
     if (isComponentModelRef(copy)) markComponentModelRef(target as ModelRef);
     const key = inheritedModelRefs.get(copy);
@@ -3235,7 +3254,10 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
  * by theirs (`annotatedTypingMember`; #555). The wrapper's own keywords,
  * conjoined with every member's, are the
  * schema's limits (see `extractConstraints`), so they ride along with the
- * member and the model built from it carries the same constraints; its
+ * member and the model built from it carries the same constraints, and so
+ * does the `format` they write where the member writes none
+ * (`wrapperFormatEntry`; #745), so a reader that types the member in the
+ * wrapper's place types what the type builder types the wrapper as; its
  * `deprecated` is the wrapper layer's alone — the wrapper's own, or an
  * annotating member's — as `Field.deprecated` reads it, and its
  * documentation — text, link, examples, extensions — is that layer's
@@ -3256,7 +3278,10 @@ export function unwrappedAllOfMember(wrapper: SchemaObject): SchemaObject {
   const layer = allOfWrapperLayer(wrapper);
   // The copy stands for the member it was spread from (`derivedCopy`), so a
   // reader that guards by identity meets a merge under the wrapper once.
-  const limited = derivedCopy({ ...member, ...extractConstraints(wrapper) }, member);
+  const limited = derivedCopy(
+    { ...member, ...extractConstraints(wrapper), ...wrapperFormatEntry(member, wrapper) },
+    member,
+  );
   return withWrapperDocs(withWrapperDeprecation(limited, layer), layer);
 }
 
@@ -3508,6 +3533,10 @@ export function resetCombinedDeclarations(): void {
  * nullable array of each, conjoined). A union of two or more variants that
  * are not `null` is no wrapper: such a declaration describes no object
  * here, and its pair keeps the first as written, as before. So does a
+ * pair that holds a declaration no reader could read at every depth, the
+ * wrapper or the other (`isReadableSchema`), which parsed with the first
+ * kept and the second unread, and so does a later declaration that meets
+ * a conjunction a wrapper opened (`novelConjunctions`). So does a
  * `$ref` to a component that is a nullable union itself, which names that
  * union, and a wrapper that writes `properties` beside its union, an
  * inline object as written (`isInlineObjectSchema`), is conjoined as that
@@ -3544,10 +3573,49 @@ function keysMemo(declaration: unknown): boolean {
 
 /** What `combineDeclarations` returns, built anew on every call. */
 function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
+  // A conjunction no reader made before met no later declaration either,
+  // so it is combined with one a reader can read, typed or not, and with
+  // no other (`novelConjunctions`).
+  if (novelConjunctions.has(held) && !isReadableSchema(next)) return held;
+  const combined = combineUnrecorded(held, next);
+  // Whatever is made of such a conjunction is one too: its conjunction
+  // with a third declaration, and the copy a typeless one annotates.
+  if (combined !== held && combined !== next && novelConjunctions.has(held)) novelConjunctions.add(combined);
+  return combined;
+}
+
+/** The combination itself, by what each declaration declares (`combineDeclarations`). */
+function combineUnrecorded(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return annotateDeclaration(next, held);
   if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
   return declaresType(held) ? annotateDeclaration(held, next) : mergeAnnotations(held, next);
 }
+
+/**
+ * The conjunctions no reader made before the step that makes them did,
+ * and every declaration combined from one since (`combineAfresh`): those
+ * that exist because a nullable `oneOf`/`anyOf` wrapper was opened
+ * (`openedNullableUnion`; workos/oagen#743). Where one of these stands,
+ * the first declaration stood as written before, a wrapper that described
+ * no object, and whatever a later member declared for the property was
+ * read by no conjunction: `tag: { anyOf: [{ $ref: Tag }, { type: 'null' }]
+ * }`, redeclared as the nullable union of `TagOutput` and then as `{
+ * allOf: [{ $ref: Other }], required: 5 }`, kept the first and parsed. So
+ * a later declaration is combined with one of these only where a reader
+ * can read it at every depth (`isReadableSchema`), as the two a wrapper
+ * is opened for are, and is otherwise left unread, the conjunction
+ * standing as the first did (`combineAfresh`) — a typed declaration,
+ * which the conjunction would hold as a part, and a typeless one alike,
+ * whose keywords it would carry: `{ required: 5 }` beside a wrapper is
+ * read by no reader, and beside an `allOf` that merges inline objects by
+ * the one that iterates it. A conjunction of two declarations that
+ * always conjoined — two `$ref`s, a `$ref` beside an inline object — is
+ * none of these, and meets a third as it always did. A step that comes
+ * to conjoin a pair none conjoined before records what it writes here
+ * the same way. Keyed by the conjunctions themselves, which the memo of
+ * the document being read holds (`combinedDeclarations`).
+ */
+const novelConjunctions = new WeakSet<SchemaObject>();
 
 /**
  * Two declarations neither of which declares a type (`declaresType`), as
@@ -3668,8 +3736,8 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
   // 'null' }] }` described no object, so the pair kept the first, and a
   // property redeclared `{ anyOf: [{ $ref: TagOutput }, { type: 'null' }] }`
   // stayed a `Tag`).
-  const firstOpened = openedNullableUnion(first);
-  const secondOpened = openedNullableUnion(second);
+  const firstOpened = openedNullableUnion(first, second);
+  const secondOpened = openedNullableUnion(second, first);
   const firstObject = firstOpened?.wrapped ?? first;
   const secondObject = secondOpened?.wrapped ?? second;
   if (describesObject(firstObject) && describesObject(secondObject)) {
@@ -3754,13 +3822,15 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       return names !== undefined && beyond.some((name) => admits(new Set(names), name));
     };
     if (beyond.length > 0 && members.some(typedByMember)) return keptAsWritten(first, second);
-    return {
+    const conjunction: SchemaObject = {
       ...declarationKeywords(first),
       ...declarationKeywords(second),
       allOf: members,
       type,
       ...(required.length > 0 && { required }),
     };
+    if (firstOpened !== undefined || secondOpened !== undefined) novelConjunctions.add(conjunction);
+    return conjunction;
   }
   return keptAsWritten(first, second);
 }
@@ -4147,25 +4217,36 @@ function conjunctionMembers(
  * for a union that is no nullable wrapper — two or more variants that are
  * not `null`, one variant and no `null`, a union beside an `allOf` that
  * types the schema, a union of consts read as an enum — which describes
- * no object to conjoin; and for a declaration a reader could not read at
- * every depth (`isReadableSchema`: a `null` where a schema goes, a keyword
- * that holds another kind of value). No reader looked inside a wrapper
- * that was declared second before (workos/oagen#743), so a document may
- * hold anything there and parse; such a declaration stays unopened, and
- * its pair keeps the first as written.
+ * no object to conjoin; and for a pair a reader could not read at every
+ * depth (`isReadableSchema`: a `null` where a schema goes, a keyword that
+ * holds another kind of value), the wrapper or `other`, the declaration
+ * it would be conjoined with. Before a wrapper was opened such a pair
+ * kept the first, and nothing in the second was read to conjoin it: not
+ * inside a wrapper declared second (workos/oagen#743), and not in a
+ * declaration that is no wrapper beside one (Greptile, #743 review: only
+ * the wrapper was asked, so `{ allOf: [{ $ref: Other }], required: 5 }`
+ * beside a wrapper reached the readers of a conjunction, which iterate
+ * the `required` it writes, and failed a parse that had kept the first).
+ * So a document may hold anything in either and parse; the wrapper stays
+ * unopened, and the pair keeps the first as written.
  *
- * Named for what it returns: `openedNullableUnion(declaration)?.wrapped
- * ?? declaration` is the declaration under its wrapper, or itself. The
- * step that conjoins two maps sees through the same wrapper by the same
- * unwrap (`mapSchemaOf`, as the step for two arrays does by
- * `arraySchemaOf`), and carries what a field reads through it by the
- * field's own reading (`conjoinMapDeclarations`; workos/oagen#744).
+ * Named for what it returns: `openedNullableUnion(declaration,
+ * other)?.wrapped ?? declaration` is the declaration under its wrapper,
+ * or itself. The step that conjoins two maps sees through the same
+ * wrapper by the same unwrap (`mapSchemaOf`, as the step for two arrays
+ * does by `arraySchemaOf`), and carries what a field reads through it by
+ * the field's own reading (`conjoinMapDeclarations`; workos/oagen#744).
  */
-function openedNullableUnion(declaration: SchemaObject): { wrapped: SchemaObject; beside: SchemaObject[] } | undefined {
+function openedNullableUnion(
+  declaration: SchemaObject,
+  other: SchemaObject,
+): { wrapped: SchemaObject; beside: SchemaObject[] } | undefined {
   if (!isSchemaObject(declaration) || (declaration.oneOf === undefined && declaration.anyOf === undefined)) {
     return undefined;
   }
-  if (isInlineObjectSchema(declaration) || !isReadableSchema(declaration)) return undefined;
+  if (isInlineObjectSchema(declaration) || !isReadableSchema(declaration) || !isReadableSchema(other)) {
+    return undefined;
+  }
   // Each wrapper the unwrap collapses, outermost first, with the variant
   // it collapses to; none when the union is no nullable wrapper.
   const collapsed: { wrapper: SchemaObject; variant: SchemaObject }[] = [];
@@ -4318,7 +4399,8 @@ function namesTypedSchema(
  *
  * The parts, in place of the member: what the member writes beside its
  * `$ref` that the schema reads (`declarationKeywords`: limits,
- * documentation, flags, `x-*` keys — nothing else is read beside a `$ref`,
+ * documentation, flags, `x-*` keys, and the `format` the value's type
+ * takes, `formatKeyword`, #745 — nothing else is read beside a `$ref`,
  * #618), as one member that declares no type, when it writes any; then the
  * schema the `$ref` names, the document's own object — or, when that is
  * itself a `$ref`, an alias, what it is read as in turn, so `{ $ref: Alias
@@ -4370,7 +4452,9 @@ function partsInPlace(
   if (target === undefined || target === null) return undefined;
   const named = isSchemaObject(target) && target.$ref !== undefined ? partsInPlace(target, componentSchemas) : [target];
   if (named === undefined) return undefined;
-  const keywords = declarationKeywords(reference);
+  // What the member writes beside its `$ref` for the value: the keywords a
+  // field reads, and the `format` its type takes (`formatKeyword`; #745).
+  const keywords = { ...declarationKeywords(reference), ...formatKeyword(reference) };
   return Object.keys(keywords).length > 0 ? [keywords, ...named] : named;
 }
 
@@ -6246,13 +6330,28 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
  * `patternProperties` entry. `additionalProperties: {}` means "any value"
  * (typed `unknown`, nothing to extract) and does not fall through to
  * `patternProperties`, matching the type-ref branch.
+ *
+ * `additionalProperties: false` allows no member but the patterns', so the
+ * values are the first pattern's, and so they are under a `$ref` that
+ * leads to that `false` (`isDeclaredProperty`; #746: the `$ref` is an
+ * object, so it was the value schema, `unknown`, and `{ patternProperties:
+ * { '^x-': { type: 'string' } }, additionalProperties: { $ref: Never } }`
+ * was `map<unknown>` where `additionalProperties: false` leaves
+ * `map<string>`). With no pattern to type the values, such a `$ref` is
+ * the value schema it was, read for a type: `unknown`, as `false` there
+ * leaves the values. `componentSchemas` is the map the `$ref` is resolved
+ * in, the document's own when none is handed.
  */
-export function mapValueSchema(schema: SchemaObject): SchemaObject | null {
+export function mapValueSchema(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | null {
   const additional = schema.additionalProperties;
-  if (additional && typeof additional === 'object') {
+  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
+  const leftToPatterns = patterns.length > 0 && !isDeclaredProperty(additional, componentSchemas);
+  if (additional && typeof additional === 'object' && !leftToPatterns) {
     return Object.keys(additional).length > 0 ? additional : null;
   }
-  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
   return patterns[0] ?? null;
 }
 
