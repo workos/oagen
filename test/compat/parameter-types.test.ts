@@ -383,15 +383,12 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     ['a required field dropped', { name: 'string', timeout: '?number' }, { timeout: '?number' }, REFUSED],
     ['a field renamed', { timeout: '?number' }, { timeoutMs: '?number' }, REFUSED],
     ['a field renamed in case only', { timeout: '?number' }, { Timeout: '?number' }, REFUSED],
-    // An optional field's type is recorded with or without the `undefined` its `?` adds.
-    [
-      'an optional field recorded with `| undefined`',
-      { timeout: '?number' },
-      { timeout: '?number | undefined' },
-      ACCEPTED,
-    ],
-    ['an optional field recorded without it', { timeout: '?number | undefined' }, { timeout: '?number' }, ACCEPTED],
+    // An interface's optional field is recorded with or without the
+    // `undefined` its `?` adds, so between two optional fields it is left out.
+    ['an optional field gains `| undefined`', { timeout: '?number' }, { timeout: '?number | undefined' }, ACCEPTED],
+    ['an optional field loses `| undefined`', { timeout: '?number | undefined' }, { timeout: '?number' }, ACCEPTED],
     ['a field that is only ever undefined', { never: '?undefined' }, { never: '?undefined' }, ACCEPTED],
+    ['a field that is only ever undefined, retyped', { never: '?undefined' }, { never: '?string' }, REFUSED],
     // A required field that may be `undefined` still has to be written.
     ['required `T | undefined` made optional `T`', { name: 'string | undefined' }, { name: '?string' }, REFUSED],
     ['optional `T` made required `T | undefined`', { name: '?string' }, { name: 'string | undefined' }, REFUSED],
@@ -404,6 +401,46 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     ['a field name with a dot in it', { 'a.b': '?number' }, { 'a.b': '?number', c: '?number' }, ACCEPTED],
   ])('%s: %s', (_, oldFields, newFields, accepted) => {
     expect(pair(oldFields, newFields) !== undefined).toBe(accepted);
+  });
+
+  it('weighs the `undefined` of an optional field as written between two type aliases, and leaves it out beside an interface', () => {
+    // Under `exactOptionalPropertyTypes` a type alias's member is recorded
+    // with the `undefined` the SDK wrote: `name?: string | undefined` takes a
+    // value `name?: string` does not. An interface's field is recorded by
+    // where its `?` stands, so its `undefined` says nothing (#750).
+    const WITH = { name: '?string | undefined' };
+    const WITHOUT = { name: '?string' };
+    const declare = (kind: 'interface' | 'alias', name: string, fields: Record<string, string>) =>
+      objectType(name, fields, kind === 'alias' ? { aliasOf: '{ … }' } : {});
+    const accepted = (
+      oldKind: 'interface' | 'alias',
+      newKind: 'interface' | 'alias',
+      oldFields = WITH,
+      newFields = WITHOUT,
+    ) =>
+      byShape(
+        'OldOptions',
+        'NewOptions',
+        types(declare(oldKind, 'OldOptions', oldFields), declare(newKind, 'NewOptions', newFields)),
+      ) !== undefined;
+
+    expect(accepted('alias', 'alias')).toBe(false);
+    expect(accepted('alias', 'alias', WITHOUT, WITH)).toBe(true);
+    expect(accepted('alias', 'alias', WITH, WITH)).toBe(true);
+    for (const [oldKind, newKind] of [
+      ['interface', 'interface'],
+      ['interface', 'alias'],
+      ['alias', 'interface'],
+    ] as const) {
+      expect([oldKind, newKind, accepted(oldKind, newKind)]).toEqual([oldKind, newKind, true]);
+      expect(accepted(oldKind, newKind, WITHOUT, WITH)).toBe(true);
+      // Only the `undefined` of two optional fields: a required one's is a value.
+      expect(accepted(oldKind, newKind, { name: 'string | undefined' }, { name: 'string' })).toBe(false);
+      expect(accepted(oldKind, newKind, { name: 'string | undefined' }, WITHOUT)).toBe(false);
+      // ... and nothing else of the type.
+      expect(accepted(oldKind, newKind, { name: '?string | null' }, WITHOUT)).toBe(false);
+      expect(accepted(oldKind, newKind, { name: '?string | number | undefined' }, WITHOUT)).toBe(false);
+    }
   });
 
   it('asks the same question of each field, through unions, arrays, aliases and nested types', () => {
@@ -533,6 +570,8 @@ describe('#752 by shape: an object type written in place', () => {
   const declared = types(
     objectType('RequestOptions', { timeout: '?number' }),
     objectType('RetryRequestOptions', { timeout: '?number', maxRetries: '?number' }),
+    objectType('ThreeFields', { a: '?string', b: '?number', c: 'boolean' }),
+    objectType('ThreeFieldsAlias', { a: '?string', b: '?number', c: 'boolean' }, { aliasOf: '{ … }' }),
   );
 
   it.each<[string, string, boolean]>([
@@ -558,10 +597,26 @@ describe('#752 by shape: an object type written in place', () => {
     ['{ timeout?: number; } | string', '{ timeout?: number; maxRetries?: number; } | string | number', ACCEPTED],
     // one side declared, the other written in place
     ['RequestOptions', '{ timeout?: number | undefined; maxRetries?: number | undefined; }', ACCEPTED],
+    ['{ timeout?: number; }', 'RetryRequestOptions', ACCEPTED],
     ['{ timeout?: number | undefined; }', 'RetryRequestOptions', ACCEPTED],
     ['RetryRequestOptions', '{ timeout?: number | undefined; }', REFUSED],
     ['{ timeout?: number | undefined; maxRetries?: number | undefined; }', 'RequestOptions', REFUSED],
     ['{ retry?: RequestOptions; }', '{ retry?: RetryRequestOptions; }', ACCEPTED],
+    // An optional member's `undefined`: printed by TypeScript for every
+    // optional member, or written by an SDK compiled with
+    // `exactOptionalPropertyTypes`. Beside an interface it is left out, as
+    // the interface's own is; beside a type alias or another type written in
+    // place it is weighed as written.
+    ['{ a?: string | undefined; b?: number | undefined; c: boolean; }', 'ThreeFields', ACCEPTED],
+    ['{ a?: string | undefined; b?: number | undefined; c: boolean; }', 'ThreeFieldsAlias', REFUSED],
+    ['{ a?: string; b?: number; c: boolean; }', 'ThreeFieldsAlias', ACCEPTED],
+    ['ThreeFieldsAlias', '{ a?: string | undefined; b?: number | undefined; c: boolean; }', ACCEPTED],
+    ['{ a?: string; b?: number; c: boolean; }', 'ThreeFields', ACCEPTED],
+    ['ThreeFields', '{ a?: string | undefined; b?: number | undefined; c: boolean; }', ACCEPTED],
+    ['{ a?: string | undefined; b?: number; }', '{ a?: string; b?: number; }', REFUSED],
+    ['{ a?: string; b?: number; }', '{ a?: string | undefined; b?: number; }', ACCEPTED],
+    ['{ a?: (() => void) | undefined; }', '{ a?: (() => void) | undefined; b?: string | undefined; }', ACCEPTED],
+    ['{ a: string | undefined; }', '{ a: string; }', REFUSED],
     // a type whose members do not say all a value may carry
     ['{ timeout?: number; [key: string]: unknown; }', '{ timeout?: number; }', REFUSED],
     ['{ timeout?: number; }', '{ timeout?: number; [key: string]: unknown; }', REFUSED],

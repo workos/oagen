@@ -13,8 +13,10 @@ import {
   bareTypeName,
   genericWrapperOf,
   handsBackItsArgument,
+  sameButForUndefined,
   supertypeName,
   typeNamesIn,
+  withoutRepeatedIntersectionMembers,
 } from '../../src/compat/type-names.js';
 
 /**
@@ -278,6 +280,80 @@ describe('#750 handsBackItsArgument', () => {
     '',
   ])('%s is not known to', (generic) => {
     expect(handsBackItsArgument(generic)).toBe(false);
+  });
+});
+
+describe('#750 withoutRepeatedIntersectionMembers', () => {
+  it.each([
+    ['(() => void) & (() => void)', '() => void'],
+    ['{ x: number; } & { x: number; }', '{ x: number; }'],
+    ['((() => void) & (() => void)) | undefined', '(() => void) | undefined'],
+    ['({ x: number; } & { x: number; }) | undefined', '{ x: number; } | undefined'],
+    ['({ x: number; } & { x: number; }) | null | undefined', '{ x: number; } | null | undefined'],
+    ['A & A & B', 'A & B'],
+    ['(A & A & B) | undefined', '(A & B) | undefined'],
+    ['(A | B) & (A | B)', 'A | B'],
+    ['Promise<A> & Promise<A>', 'Promise<A>'],
+    ['{ a: "x & y"; } & { a: "x & y"; }', '{ a: "x & y"; }'],
+  ])('%s is %s', (text, expected) => {
+    expect(withoutRepeatedIntersectionMembers(text)).toBe(expected);
+  });
+
+  it.each([
+    'string',
+    'string | undefined',
+    '() => void',
+    '(() => void) | undefined',
+    '(() => void)',
+    '{ x: number; } & { y: string; }',
+    '({ x: number; } & { y: string; }) | undefined',
+    'A & B',
+    // an intersection that is not a member of the text's own union is not read
+    'Promise<A & A>',
+    '{ a: A & A; }',
+    '(a: A & A) => void',
+    'Array<(() => void) & (() => void)>',
+    // a text whose brackets or quotes do not pair up is not taken apart
+    '(A & A',
+    'A & A)',
+    "'A & A",
+    '',
+  ])('%s is returned as it stands', (text) => {
+    expect(withoutRepeatedIntersectionMembers(text)).toBe(text);
+  });
+});
+
+describe('#750 sameButForUndefined', () => {
+  it.each([
+    ['string | undefined', 'string'],
+    ['undefined | string', 'string'],
+    ['string|undefined', 'string'],
+    ['string | null | undefined', 'string | null'],
+    ['(() => void) | undefined', '(() => void)'],
+    ['{ a: string | undefined; } | undefined', '{ a: string | undefined; }'],
+    ['string | undefined', 'string | undefined'],
+    ['string', 'string'],
+    ['undefined', 'undefined'],
+  ])('%s and %s are one type', (one, other) => {
+    expect(sameButForUndefined(one, other)).toBe(true);
+    expect(sameButForUndefined(other, one)).toBe(true);
+  });
+
+  it.each([
+    ['string | undefined', 'number'],
+    ['string | null', 'string'],
+    ['string | undefined', 'undefined'],
+    ['Array<string | undefined>', 'Array<string>'],
+    ['{ a: string | undefined; }', '{ a: string; }'],
+    ['(a: string | undefined) => void', '(a: string) => void'],
+    ['string | number | undefined', 'number | string'],
+    ['"undefined" | string', 'string'],
+    ['Undefined | string', 'string'],
+    // brackets that do not pair up: compared as they stand
+    ['(string | undefined', '(string'],
+  ])('%s and %s are not', (one, other) => {
+    expect(sameButForUndefined(one, other)).toBe(false);
+    expect(sameButForUndefined(other, one)).toBe(false);
   });
 });
 

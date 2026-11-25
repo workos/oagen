@@ -1,4 +1,5 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import ts from 'typescript';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -688,7 +689,45 @@ export type ObjectKeyword = object;
     expect(extracted.typeAliases.Intersection.value).toBe('Owner & { name: string; }');
   });
 
-  it("writes a member's type as an interface's field is written", async () => {
+  it("reads a member off the alias's resolved type, not off one of its declarations", async () => {
+    const extracted = await nodeExtractor.extract(
+      writeSdk(
+        nodeSdk(`export type Plain = { a: string | undefined };
+export type OptionalPartFirst = { a?: string } & { a: string | undefined };
+export type OptionalPartLast = { a: string | undefined } & { a?: string };
+export type Narrowed = { a?: string } & { a: string };
+export type BothOptional = { a?: string | undefined } & { a?: string };
+export type ThroughPartial = Partial<{ a: string }>;
+export type ThroughRequired = Required<{ a?: string }>;
+export type PartialAndRequired = Partial<{ a: string }> & Required<{ a?: string }>;
+export type InlineTwice = { a: () => void } & { a: () => void };
+export type InlineTwiceOptional = { a?: { x: number } } & { a?: { x: number } };
+export type TwoInlineTypes = { a: { x: number } } & { a: { y: string } };
+`),
+      ),
+    );
+    const member = (name: string) => extracted.typeAliases[name].fields?.a;
+    // A required member that admits undefined: the `?` of the first part does not take the `undefined` out.
+    const requiredOrUndefined = { name: 'a', type: 'string | undefined', optional: false };
+    expect(member('Plain')).toEqual(requiredOrUndefined);
+    expect(member('OptionalPartFirst')).toEqual(requiredOrUndefined);
+    expect(member('OptionalPartLast')).toEqual(requiredOrUndefined);
+    expect(member('Narrowed')).toEqual({ name: 'a', type: 'string', optional: false });
+    expect(member('ThroughRequired')).toEqual({ name: 'a', type: 'string', optional: false });
+    expect(member('PartialAndRequired')).toEqual({ name: 'a', type: 'string', optional: false });
+    // An optional member: the `undefined` its optionality adds is left out, whoever made it optional.
+    expect(member('BothOptional')).toEqual({ name: 'a', type: 'string', optional: true });
+    expect(member('ThroughPartial')).toEqual({ name: 'a', type: 'string', optional: true });
+    // One inline type declared by two parts is that type, not an intersection with itself.
+    expect(member('InlineTwice')).toEqual({ name: 'a', type: '() => void', optional: false });
+    expect(member('InlineTwiceOptional')).toEqual({ name: 'a', type: '{ x: number; }', optional: true });
+    expect(member('TwoInlineTypes')).toEqual({ name: 'a', type: '{ x: number; } & { y: string; }', optional: false });
+  });
+
+  it("keeps an interface's field as every baseline holds it", async () => {
+    // An interface's type text has always been decided by the `?` of the
+    // member's property signature, so a member that is optional without one
+    // keeps its `| undefined`. Its optionality is the checker's all the same.
     const twins = await nodeExtractor.extract(
       writeSdk(
         nodeSdk(`export interface Base { name: string; count: number }
@@ -697,7 +736,6 @@ export type AsAlias = Partial<Base> & { tag?: string; list: string[]; retry?(att
 `),
       ),
     );
-    expect(twins.typeAliases.AsAlias.fields).toEqual(twins.interfaces.AsInterface.fields);
     expect(twins.interfaces.AsInterface.fields).toEqual({
       count: { name: 'count', type: 'number | undefined', optional: true },
       list: { name: 'list', type: 'string[]', optional: false },
@@ -706,6 +744,439 @@ export type AsAlias = Partial<Base> & { tag?: string; list: string[]; retry?(att
       retry: { name: 'retry', type: '((attempt: number) => void) | undefined', optional: true },
       tag: { name: 'tag', type: 'string', optional: true },
     });
+    // The alias agrees on every member's optionality, and on the text of each
+    // one whose `?` stands on a property signature or that is required.
+    expect(twins.typeAliases.AsAlias.fields).toEqual({
+      count: { name: 'count', type: 'number', optional: true },
+      list: { name: 'list', type: 'string[]', optional: false },
+      name: { name: 'name', type: 'string', optional: true },
+      ping: { name: 'ping', type: '() => void', optional: false },
+      retry: { name: 'retry', type: '((attempt: number) => void)', optional: true },
+      tag: { name: 'tag', type: 'string', optional: true },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One member, written every way an alias or an interface can write it
+// ---------------------------------------------------------------------------
+
+/** The type of the member `a`, as the forms below take it. */
+const MEMBER_TYPES = ['string', 'string | null', 'string[]', "'a' | 'b'", '() => void', '{ x: number }'];
+
+/**
+ * Ways to write a type with one member `a` of type `T`: required or optional,
+ * admitting `undefined` or not. As a type alias: an object type, the parts of
+ * an intersection, a mapped type, a utility type, a generic alias, declared
+ * interfaces (one of them declared twice). As an interface: its own members,
+ * and what it extends. `%` is the index of `T` in the names declared beside
+ * the forms.
+ */
+const ALIAS_FORMS: Array<(t: string) => string> = [
+  (t) => `{ a: ${t} }`,
+  (t) => `{ a?: ${t} }`,
+  (t) => `{ a: (${t}) | undefined }`,
+  (t) => `{ a?: (${t}) | undefined }`,
+  (t) => `{ readonly a: ${t} }`,
+  (t) => `{ a?: ${t} } & { a: ${t} }`,
+  (t) => `{ a: ${t} } & { a?: ${t} }`,
+  (t) => `{ a?: ${t} } & { a: (${t}) | undefined }`,
+  (t) => `{ a: (${t}) | undefined } & { a?: ${t} }`,
+  (t) => `{ a?: ${t} } & { a?: ${t} }`,
+  (t) => `{ a?: (${t}) | undefined } & { a?: ${t} }`,
+  (t) => `{ a: ${t} } & { a: (${t}) | undefined }`,
+  (t) => `Partial<{ a: ${t} }>`,
+  (t) => `Partial<{ a: (${t}) | undefined }>`,
+  (t) => `Required<{ a?: ${t} }>`,
+  (t) => `Required<{ a?: (${t}) | undefined }>`,
+  (t) => `Partial<{ a: ${t} }> & Required<{ a?: ${t} }>`,
+  (t) => `Readonly<{ a?: ${t} }>`,
+  (t) => `{ [K in 'a']: ${t} }`,
+  (t) => `{ [K in 'a']?: ${t} }`,
+  (t) => `{ [K in 'a']-?: (${t}) | undefined }`,
+  (t) => `Pick<{ a?: ${t}; b: number }, 'a'>`,
+  (t) => `Pick<{ [K in 'a' | 'b']?: ${t} }, 'a'>`,
+  (t) => `Omit<{ a: ${t}; b: number }, 'b'>`,
+  (t) => `Record<'a', ${t}>`,
+  (t) => `Box<${t}>`,
+  (t) => `OptionalBox<${t}>`,
+  () => 'Declared% & DeclaredAgain%',
+  (t) => `RequiredDeclared% & { a?: ${t} }`,
+  () => `Pick<DeclaredTwice%, 'a'>`,
+  () => `Omit<DeclaredTwice%, 'b'>`,
+];
+/** The two alias forms in which one part declares the member optional and
+ *  another declares it required and admitting `undefined`. */
+const OPTIONAL_PART_BESIDE_REQUIRED_OR_UNDEFINED = new Set([7, 8]);
+
+/** What stands after `interface Name`. */
+const INTERFACE_FORMS: Array<(t: string) => string> = [
+  (t) => `{ a: ${t} }`,
+  (t) => `{ a?: ${t} }`,
+  (t) => `{ a: (${t}) | undefined }`,
+  (t) => `{ a?: (${t}) | undefined }`,
+  () => 'extends Partial<RequiredDeclared%> {}',
+  () => 'extends Required<Declared%> {}',
+  () => 'extends Declared%, DeclaredAgain% {}',
+  () => `extends Pick<DeclaredTwice%, 'a'> {}`,
+  () => `extends Omit<DeclaredTwice%, 'b'> {}`,
+  (t) => `extends Partial<Record<'a', ${t}>> {}`,
+];
+
+/** Every form, the aliases first: its index, how it is written, and the
+ *  statement that declares it under a name. */
+const MEMBER_FORMS = [
+  ...ALIAS_FORMS.map((form) => ({
+    kind: 'alias' as const,
+    written: (t: string) => `type = ${form(t)}`,
+    declare: (name: string, t: string) => `export type ${name} = ${form(t)};`,
+  })),
+  ...INTERFACE_FORMS.map((form) => ({
+    kind: 'interface' as const,
+    written: (t: string) => `interface ${form(t)}`,
+    declare: (name: string, t: string) => `export interface ${name} ${form(t)}`,
+  })),
+];
+
+const formName = (type: number, form: number) => `Form${form}_${type}`;
+
+/**
+ * The SDK that declares every form for every member type, what `tsc` makes
+ * of each pair of forms (an assignment each way, in a file of its own that
+ * the SDK does not export), and what the extractor records for each form.
+ */
+const memberTables = new Map<string, ReturnType<typeof buildMemberTable>>();
+function memberTable(compilerOptions: ts.CompilerOptions): ReturnType<typeof buildMemberTable> {
+  const mode = JSON.stringify(compilerOptions);
+  if (!memberTables.has(mode)) memberTables.set(mode, buildMemberTable(compilerOptions));
+  return memberTables.get(mode)!;
+}
+
+async function buildMemberTable(compilerOptions: ts.CompilerOptions) {
+  const index = ['export type Box<V> = { a: V };', 'export type OptionalBox<V> = { a?: V };'];
+  const check = ["import type * as sdk from './index.js';"];
+  const assignment = new Map<number, string>();
+  const key = (type: number, from: number, to: number) => `${type}:${from}:${to}`;
+  MEMBER_TYPES.forEach((memberType, type) => {
+    index.push(
+      `export interface Declared_${type} { a?: ${memberType} }`,
+      `export interface DeclaredAgain_${type} { a?: ${memberType} }`,
+      `export interface RequiredDeclared_${type} { a: ${memberType} }`,
+      `export interface DeclaredTwice_${type} { a?: ${memberType} }`,
+      `export interface DeclaredTwice_${type} { b?: number }`,
+    );
+    MEMBER_FORMS.forEach((form, at) => {
+      index.push(form.declare(formName(type, at), memberType).replaceAll('%', `_${type}`));
+    });
+    MEMBER_FORMS.forEach((_, from) => {
+      MEMBER_FORMS.forEach((_, to) => {
+        if (from === to) return;
+        assignment.set(check.length, key(type, from, to));
+        check.push(
+          `export const c_${type}_${from}_${to}: sdk.${formName(type, to)} = null! as sdk.${formName(type, from)};`,
+        );
+      });
+    });
+  });
+  const root = writeSdk({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { ...compilerOptions, noEmit: true }, include: ['src'] }),
+    'src/index.ts': index.join('\n'),
+    'src/check.ts': check.join('\n'),
+  });
+
+  // `tsc -p <root>`: the diagnostics of the file of assignments, by line.
+  const config = ts.parseJsonConfigFileContent(
+    ts.readConfigFile(join(root, 'tsconfig.json'), ts.sys.readFile).config,
+    ts.sys,
+    root,
+  );
+  const program = ts.createProgram(config.fileNames, config.options);
+  const checkFile = program.getSourceFile(join(root, 'src/check.ts'))!;
+  const refused = new Set(
+    program
+      .getSemanticDiagnostics(checkFile)
+      .map((diagnostic) => assignment.get(checkFile.getLineAndCharacterOfPosition(diagnostic.start!).line)),
+  );
+  const mutuallyAssignable = (type: number, one: number, other: number) =>
+    !refused.has(key(type, one, other)) && !refused.has(key(type, other, one));
+
+  const extracted = await nodeExtractor.extract(root);
+  const record = (type: number, form: number) =>
+    (MEMBER_FORMS[form].kind === 'alias' ? extracted.typeAliases : extracted.interfaces)[formName(type, form)].fields;
+  /** An SDK whose `Options` type is the form, taken by a method. */
+  const snapshot = (type: number, form: number) =>
+    apiSurfaceToSnapshot({
+      language: 'node',
+      extractedFrom: root,
+      extractedAt: '2026-01-01T00:00:00.000Z',
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {
+            send: [
+              {
+                name: 'send',
+                params: [{ name: 'options', type: 'Options', optional: false }],
+                returnType: 'void',
+                async: false,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+      interfaces:
+        MEMBER_FORMS[form].kind === 'interface'
+          ? { Options: { ...extracted.interfaces[formName(type, form)], name: 'Options' } }
+          : {},
+      typeAliases:
+        MEMBER_FORMS[form].kind === 'alias'
+          ? { Options: { ...extracted.typeAliases[formName(type, form)], name: 'Options' } }
+          : {},
+      enums: {},
+      exports: {},
+    });
+
+  const label = (type: number, form: number) => `T = ${MEMBER_TYPES[type]}: ${MEMBER_FORMS[form].written('T')}`;
+  const pairs: Array<{
+    type: number;
+    one: number;
+    other: number;
+    mutual: boolean;
+    sameRecord: boolean;
+    aliases: boolean;
+  }> = [];
+  MEMBER_TYPES.forEach((_, type) => {
+    for (let one = 0; one < MEMBER_FORMS.length; one++) {
+      for (let other = one + 1; other < MEMBER_FORMS.length; other++) {
+        pairs.push({
+          type,
+          one,
+          other,
+          mutual: mutuallyAssignable(type, one, other),
+          sameRecord: JSON.stringify(record(type, one)) === JSON.stringify(record(type, other)),
+          aliases: MEMBER_FORMS[one].kind === 'alias' && MEMBER_FORMS[other].kind === 'alias',
+        });
+      }
+    }
+  });
+  const named = (pair: (typeof pairs)[number]) => `${label(pair.type, pair.one)}  and  ${label(pair.type, pair.other)}`;
+  return {
+    pairs,
+    record,
+    snapshot,
+    label,
+    named,
+    sdkDiagnostics: program.getSemanticDiagnostics(program.getSourceFile(join(root, 'src/index.ts'))!).length,
+  };
+}
+
+describe('#750 two types that accept the same values diff as the same type', () => {
+  const MODES: Array<[string, ts.CompilerOptions]> = [
+    ['strict', { strict: true }],
+    ['strict with exactOptionalPropertyTypes', { strict: true, exactOptionalPropertyTypes: true }],
+    ['not strict', { strict: false }],
+  ];
+
+  it.each(MODES)('%s: two aliases record the same member, however each is written', async (_mode, compilerOptions) => {
+    const table = await memberTable(compilerOptions);
+    expect(table.sdkDiagnostics).toBe(0);
+    for (const type of MEMBER_TYPES.keys()) {
+      for (const form of MEMBER_FORMS.keys()) expect(table.record(type, form), table.label(type, form)).toBeDefined();
+    }
+    const aliases = table.pairs.filter((pair) => pair.aliases);
+    const mutual = aliases.filter((pair) => pair.mutual);
+    // The table says something: hundreds of pairs `tsc` assigns each way, and hundreds it does not.
+    expect(mutual.length).toBeGreaterThan(500);
+    expect(aliases.length - mutual.length).toBeGreaterThan(500);
+    // The same member, optionality and type text.
+    expect(mutual.filter((pair) => !pair.sameRecord).map(table.named)).toEqual([]);
+  });
+
+  it.each(MODES)(
+    '%s: rewriting one as the other is no change, an interface included',
+    async (_mode, compilerOptions) => {
+      const table = await memberTable(compilerOptions);
+      const mutual = table.pairs.filter((pair) => pair.mutual);
+      expect(mutual.filter((pair) => !pair.aliases).length).toBeGreaterThan(300);
+      const reported = mutual.flatMap((pair) =>
+        [
+          ...lines(diffSnapshots(table.snapshot(pair.type, pair.one), table.snapshot(pair.type, pair.other))),
+          ...lines(diffSnapshots(table.snapshot(pair.type, pair.other), table.snapshot(pair.type, pair.one))),
+        ].map((line) => `${table.named(pair)}: ${line}`),
+      );
+      expect(reported).toEqual([]);
+    },
+  );
+
+  it.each(MODES)('%s: and two aliases that do not, record different members', async (_mode, compilerOptions) => {
+    const table = await memberTable(compilerOptions);
+    const recordedAlike = table.pairs.filter((pair) => pair.aliases && !pair.mutual && pair.sameRecord);
+    if (compilerOptions.exactOptionalPropertyTypes !== true) {
+      expect(recordedAlike.map(table.named)).toEqual([]);
+      return;
+    }
+    // With exactOptionalPropertyTypes one shape is recorded as what it reads
+    // as, though `tsc` writes it otherwise: `{ a?: T } & { a: T | undefined }`
+    // has a required `a` of type `T | undefined`, into which no `undefined`
+    // may be written. Every pair recorded alike involves it.
+    expect(recordedAlike.length).toBeGreaterThan(0);
+    for (const pair of recordedAlike) {
+      expect(
+        OPTIONAL_PART_BESIDE_REQUIRED_OR_UNDEFINED.has(pair.one) ||
+          OPTIONAL_PART_BESIDE_REQUIRED_OR_UNDEFINED.has(pair.other),
+        table.named(pair),
+      ).toBe(true);
+    }
+  });
+
+  it('records three members for what a strict SDK can mean by `a`, and the text an interface keeps', async () => {
+    // The fourth text below is an interface's alone: a member made optional
+    // by what the interface extends keeps the `| undefined` every baseline
+    // holds, and is compared as the optional `string` it is.
+    const table = await memberTable({ strict: true });
+    const records = new Map<string, string[]>();
+    MEMBER_FORMS.forEach((form, at) => {
+      const recorded = Object.values(table.record(0, at) ?? {}).map(
+        (field) => `a${field.optional ? '?' : ''}: ${field.type}`,
+      )[0];
+      records.set(recorded, [...(records.get(recorded) ?? []), form.written('T').replaceAll('%', '')]);
+    });
+    expect(Object.fromEntries(records)).toMatchInlineSnapshot(`
+      {
+        "a: string": [
+          "type = { a: T }",
+          "type = { readonly a: T }",
+          "type = { a?: T } & { a: T }",
+          "type = { a: T } & { a?: T }",
+          "type = { a: T } & { a: (T) | undefined }",
+          "type = Required<{ a?: T }>",
+          "type = Required<{ a?: (T) | undefined }>",
+          "type = Partial<{ a: T }> & Required<{ a?: T }>",
+          "type = { [K in 'a']: T }",
+          "type = Omit<{ a: T; b: number }, 'b'>",
+          "type = Record<'a', T>",
+          "type = Box<T>",
+          "type = RequiredDeclared & { a?: T }",
+          "interface { a: T }",
+          "interface extends Required<Declared> {}",
+        ],
+        "a: string | undefined": [
+          "type = { a: (T) | undefined }",
+          "type = { a?: T } & { a: (T) | undefined }",
+          "type = { a: (T) | undefined } & { a?: T }",
+          "type = { [K in 'a']-?: (T) | undefined }",
+          "interface { a: (T) | undefined }",
+        ],
+        "a?: string": [
+          "type = { a?: T }",
+          "type = { a?: (T) | undefined }",
+          "type = { a?: T } & { a?: T }",
+          "type = { a?: (T) | undefined } & { a?: T }",
+          "type = Partial<{ a: T }>",
+          "type = Partial<{ a: (T) | undefined }>",
+          "type = Readonly<{ a?: T }>",
+          "type = { [K in 'a']?: T }",
+          "type = Pick<{ a?: T; b: number }, 'a'>",
+          "type = Pick<{ [K in 'a' | 'b']?: T }, 'a'>",
+          "type = OptionalBox<T>",
+          "type = Declared & DeclaredAgain",
+          "type = Pick<DeclaredTwice, 'a'>",
+          "type = Omit<DeclaredTwice, 'b'>",
+          "interface { a?: T }",
+          "interface { a?: (T) | undefined }",
+          "interface extends Declared, DeclaredAgain {}",
+          "interface extends Pick<DeclaredTwice, 'a'> {}",
+          "interface extends Omit<DeclaredTwice, 'b'> {}",
+        ],
+        "a?: string | undefined": [
+          "interface extends Partial<RequiredDeclared> {}",
+          "interface extends Partial<Record<'a', T>> {}",
+        ],
+      }
+    `);
+  });
+});
+
+describe("#750 an optional field's type, where an interface is involved", () => {
+  type Owner = 'interface' | 'alias';
+  const withMember = (owner: Owner, type: string, optional: boolean | undefined): CompatSnapshot => {
+    const member = { name: 'a', type, optional: optional ?? false };
+    const snapshot = apiSurfaceToSnapshot(
+      surface(
+        owner === 'interface'
+          ? { interfaces: { Options: { name: 'Options', fields: { a: member }, extends: [] } } }
+          : { typeAliases: { Options: { name: 'Options', value: '{ … }', fields: { a: member }, extends: [] } } },
+      ),
+    );
+    // `undefined`: a snapshot that records no optionality, as one written before the key.
+    return optional === undefined ? writtenBefore750(snapshot) : snapshot;
+  };
+  const RETYPED = ['breaking field_type_changed Options.a'];
+
+  it.each<[string, [Owner, string, boolean | undefined], [Owner, string, boolean | undefined], string[]]>([
+    // Optional on both sides, an interface on either: the `undefined` is the one optionality adds.
+    ['interface → interface', ['interface', 'string | undefined', true], ['interface', 'string', true], []],
+    [
+      'interface → interface, the other way',
+      ['interface', 'string', true],
+      ['interface', 'string | undefined', true],
+      [],
+    ],
+    ['interface → alias', ['interface', 'string | undefined', true], ['alias', 'string', true], []],
+    ['alias → interface', ['alias', 'string', true], ['interface', 'string | undefined', true], []],
+    ['undefined written first', ['interface', 'undefined | string', true], ['alias', 'string', true], []],
+    ['beside null', ['interface', 'string | null | undefined', true], ['alias', 'string | null', true], []],
+    [
+      'a function',
+      ['interface', '((attempt: number) => void) | undefined', true],
+      ['alias', '((attempt: number) => void)', true],
+      [],
+    ],
+    // Anything else than that `undefined` is a retype.
+    ['another type', ['interface', 'string | undefined', true], ['alias', 'number', true], RETYPED],
+    ['null is a value', ['interface', 'string | null', true], ['alias', 'string', true], RETYPED],
+    ['undefined inside', ['interface', 'Array<string | undefined>', true], ['alias', 'Array<string>', true], RETYPED],
+    // A required member that admits undefined is not one that does not.
+    ['required on both sides', ['interface', 'string | undefined', false], ['interface', 'string', false], RETYPED],
+    ['required, then optional', ['interface', 'string | undefined', false], ['alias', 'string', true], RETYPED],
+    // Two aliases' members are written by one rule: an `undefined` there is one the SDK wrote.
+    ['alias → alias', ['alias', 'string | undefined', true], ['alias', 'string', true], RETYPED],
+    // A snapshot that records no optionality is compared as before.
+    ['an older baseline', ['interface', 'string | undefined', undefined], ['interface', 'string', true], RETYPED],
+    ['an older candidate', ['interface', 'string | undefined', true], ['interface', 'string', undefined], RETYPED],
+    ['an older pair', ['interface', 'string | undefined', undefined], ['interface', 'string', undefined], RETYPED],
+  ])('%s', (_name, before, after, expected) => {
+    expect(lines(diffSnapshots(withMember(...before), withMember(...after)))).toEqual(expected);
+  });
+
+  it('is no change when an interface is rewritten as an alias with the same members', async () => {
+    const members = '{ tag?: string; list: string[]; retry?(attempt: number): void; ping(): void }';
+    const result = await nodeDiff(
+      (side) => `export interface Base { name: string; count: number }
+${inNew(side, `export type Options = Partial<Base> & ${members};`, `export interface Options extends Partial<Base> ${members}`)}
+export declare class Client { send(options: Options): void; }
+`,
+    );
+    expect(result.lines).toEqual([]);
+    const back = await nodeDiff(
+      (side) => `export interface Base { name: string; count: number }
+${inNew(side, `export interface Options extends Partial<Base> ${members}`, `export type Options = Partial<Base> & ${members};`)}
+export declare class Client { send(options: Options): void; }
+`,
+    );
+    expect(back.lines).toEqual([]);
+  });
+
+  it('is no change between two spellings of one interface', async () => {
+    const result = await nodeDiff(
+      (side) => `export interface Base { name: string }
+export interface Options ${inNew(side, '{ name?: string; retry?: () => void }', 'extends Partial<Base> { retry?(): void }')}
+export declare class Client { send(options: Options): void; }
+`,
+    );
+    expect(result.lines).toEqual([]);
   });
 });
 

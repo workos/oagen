@@ -30,7 +30,7 @@
  */
 
 import type { DeclaredTypes, RecordedMember, TypeLookup } from './type-graph.js';
-import { declaresSupertype, recordedMembers } from './type-graph.js';
+import { declaresSupertype, isObjectAlias, recordedMembers } from './type-graph.js';
 import {
   handsBackItsArgument,
   objectTypeMembers,
@@ -366,6 +366,7 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
   // pass: the rule compares fields and has none to compare.
   if (oldFields.size === 0) return false;
   const declared = declaresSupertype(context.newTypes, oldType, newType);
+  const anInterface = isInterface(context.oldTypes, oldType) || isInterface(context.newTypes, newType);
   for (const [name, newField] of newFields) {
     if (!newField.optional && oldFields.get(name)?.optional !== false) return false;
   }
@@ -373,8 +374,9 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
     const newField = newFields.get(name);
     if (newField === undefined) return false;
     if (declared) continue;
-    const oldMembers = membersBehindAliases(fieldTypeMembers(oldField), context.oldTypes);
-    const newMembers = membersBehindAliases(fieldTypeMembers(newField), context.newTypes);
+    const withoutUndefined = anInterface && oldField.optional && newField.optional;
+    const oldMembers = fieldTypeMembers(oldField, withoutUndefined, context.oldTypes);
+    const newMembers = fieldTypeMembers(newField, withoutUndefined, context.newTypes);
     if (!membersAccept(oldMembers, newMembers, context)) return false;
   }
   context.fields.set(JSON.stringify([oldType, newType]), { oldType, newType });
@@ -392,15 +394,31 @@ function fieldsOf(member: string, types: TypeLookup): ReadonlyMap<string, Record
   return objectTypeMembers(member) ?? recordedMembers(types, member);
 }
 
+/** A declared type that is no type alias: an interface, a model class. Not an
+ *  object type written in place, which no snapshot declares. */
+function isInterface(types: TypeLookup, typeName: string): boolean {
+  const type = types.get(typeName);
+  return type !== undefined && !isObjectAlias(type);
+}
+
 /**
- * The members of a field's type, for a value that is there. An optional
- * field's type is recorded with or without the `undefined` its `?` adds (an
- * interface's field without, a mapped type's member and an inline object
- * type's with), and the `?` already says it, so that member is set aside.
+ * The members of a field's type, behind its aliases, to weigh against the
+ * other side's.
+ *
+ * A field's type is weighed as it stands, an `undefined` included: under
+ * `exactOptionalPropertyTypes` an optional `name?: string | undefined` takes
+ * a value an optional `name?: string` does not, and a type alias's member is
+ * recorded apart there. An interface's optional field is another matter. Its
+ * text carries the `undefined` its `?` adds or not by where the `?` is
+ * written, whatever the SDK meant, so the differ reads two optional fields
+ * as one type when either owner is an interface and they differ by that
+ * `undefined` alone (`sameOptionalFieldType`, #750). The same holds here:
+ * `withoutUndefined` leaves it out, on both sides, of two optional fields
+ * one of which an interface owns.
  */
-function fieldTypeMembers(field: RecordedMember): string[] | undefined {
+function fieldTypeMembers(field: RecordedMember, withoutUndefined: boolean, types: TypeLookup): string[] | undefined {
   const members = unionMembers(field.type);
-  if (!field.optional || members === undefined) return members;
-  const present = members.filter((member) => member !== 'undefined');
-  return present.length > 0 ? present : members;
+  if (!withoutUndefined || members === undefined) return membersBehindAliases(members, types);
+  const defined = members.filter((member) => member !== 'undefined');
+  return membersBehindAliases(defined.length > 0 ? defined : members, types);
 }
