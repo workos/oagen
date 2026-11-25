@@ -219,20 +219,23 @@ Compat report:
 
 Which rule decides is the policy's `parameterTypesAreStructural`.
 
-**By shape, where it is `true` (Node).** Both type texts are read as unions, a text that is no union as a union of one, and each member of the old union has to be accepted by a member of the new one. A member accepts another when it is
+**By shape, where it is `true` (Node).** Both type texts are read as unions, a text that is no union as a union of one, and each member of the old union has to be accepted by a member of the new one. Each member is read for what it is, the old one in the baseline and the new one in the candidate, and a member accepts another when it is
 
-- the same text;
 - an array, or a generic known to hand its argument back, of a type that accepts the old one's: `Old[]` → `New[]`, `Promise<Old>` → `Promise<New>`, `Set<Old>` → `Set<New>`. The generics are the ones a narrowed field or return is read through (a promise, a collection; see [above](#detected-patterns)), on the same condition that the SDK declares no type of that name itself. A `readonly` array takes a writable one (`Old[]` → `readonly New[]`), and a writable array does not take a `readonly` one;
 - an object type that keeps the old one's fields, each of the two declared (an interface, an object type alias) or written in place (`{ timeout?: number }`). It keeps them when it
   - has every field of the old type. A caller may write any of them in an object literal at the call site, and TypeScript refuses a literal that names a field the parameter's type does not have (TS2353), though it would take the same value from a variable;
-  - gives each a type that accepts the old field's, which is this same question asked of the two field types, or the candidate declares that the old type extends the new one, which a compiler has then checked field by field;
+  - gives each a type that accepts the old field's, which is this same question asked of the two field types;
   - requires no field the old type did not require.
+
+  Two types that refer to themselves (`Tree.children: Tree[]` → `Tree2.children: Tree2[]`) are settled as a compiler settles them: their pair holds unless one of their fields says otherwise. A type without fields takes any object and does not say what callers pass, so it is accepted by another without fields only.
 
   A field's type is weighed as it stands, with one exception for the `undefined` of an optional field. Under `exactOptionalPropertyTypes` an optional `name?: string | undefined` takes a value an optional `name?: string` does not, and a type alias's members are recorded apart there, so between two type aliases, or object types written in place, it is a member like any other. An interface's optional field is recorded with or without it by where its `?` is written, whatever the SDK meant (see [Compatibility IR → Types and Their Members](compatibility-ir.md#types-and-their-members)), so where either type is an interface it is left out of two optional fields, as it is when the same field is compared across the two snapshots. An object type written in place is printed with `| undefined` on each optional member unless the SDK is compiled with that option, and nothing in its text says which: `options: { timeout?: number }` → an interface `RequestOptions` is `soft-risk`, → a type alias `RequestOptions` stays `breaking`.
 
 A type alias the snapshot records by its text (`type PetId = string | number`) is read as that text, on either side.
 
-So the new type may add optional fields, make required fields optional, widen a field's type and add members to a union, and `string` → `string | number`, `T` → `T | null` and a required parameter made optional (`T` → `T | undefined`) are all `soft-risk`. Nothing else is read into, and each of these is accepted as the same text only: any other generic's argument (`Sink<Old>` → `Sink<New>`, `Record<string, Old>` → `Record<string, New>`, since whether a `Sink<Old>` is taken where a `Sink<New>` is expected depends on how `Sink` uses its argument), a tuple, a function type, a literal its primitive would take (`'asc'` → `string`) and `unknown`.
+So the new type may add optional fields, make required fields optional, widen a field's type and add members to a union, and `string` → `string | number`, `T` → `T | null` and a required parameter made optional (`T` → `T | undefined`) are all `soft-risk`. Two members of one text are read the same way, and not taken for one type: `Options` may have lost a field between the two snapshots, and `Id[]` may stand over a type alias that lost a member. Nothing else may say so, since a type alias's text is compared nowhere and `oagen verify` leaves a type the spec does not derive out of its comparison.
+
+Nothing else is read into. A primitive, a literal, a class and each of the following is accepted as the same text only, and only when every type the text mentions is declared alike in both snapshots: any other generic's argument (`Sink<Old>` → `Sink<New>`, `Record<string, Old>` → `Record<string, New>`, since whether a `Sink<Old>` is taken where a `Sink<New>` is expected depends on how `Sink` uses its argument), a tuple, a function type, a literal its primitive would take (`'asc'` → `string`) and `unknown`.
 
 **By declaration, where it is `false` (every other language).** The old type declares, directly or through the types it extends, that it extends the new one, as the candidate's `extends` records it (a PHP class's base, a Python model's base under `hints.modelBaseClasses`), and the retype does nothing else: both texts are one type's name under the same optional spelling and at most one array suffix (`?RetryOptions` → `?BaseOptions`). Two classes with the same fields are not related by it, and a generic's argument is not read: a Python `list[RetryOptions]` is no `list[BaseOptions]`, since a list is written to as well as read.
 
@@ -252,7 +255,7 @@ So the new type may add optional fields, make required fields optional, widen a 
 
 The right column holds where the surface records the old type with its supertype: a PHP class with a public property of its own (one that declares none is recorded as a plain class, without a base, and its retype stays `breaking`), a Python model under `hints.modelBaseClasses`. The other extractors record no supertype, so every row is `breaking` there. The row of arrays and promises is Python's `list[RetryOptions]` → `list[BaseOptions]` in that column; PHP has no typed arrays.
 
-The third row is the one where the two kinds of language part. A PHP caller passes a `RetryOptions` it built, which is a `BaseOptions`. A TypeScript caller may write `get(id, { maxRetries: 2 })`, and `BaseOptions` has no `maxRetries`: the declaration says nothing a literal can use, so the new type has to keep every field there as well.
+The third row is the one where the two kinds of language part. A PHP caller passes a `RetryOptions` it built, which is a `BaseOptions`. A TypeScript caller may write `get(id, { maxRetries: 2 })`, and `BaseOptions` has no `maxRetries`: the declaration says nothing a literal can use, so it is not read there at all, and the fields decide with or without it.
 
 The old type is read from both snapshots. A value callers pass today is a value of the type as the baseline declares it, and the code that names the type will be compiled against the candidate's declaration of it; the retype is `soft-risk` only when the new type accepts both. A type alias the candidate widens to `string | number` while the parameter moves from the alias to `string` is `breaking` for that reason.
 
@@ -262,9 +265,7 @@ Where the snapshots do not say, the retype stays `breaking`:
 - a type is not declared in the snapshot (another package's, a generic's instantiation), or is a class, whose properties carry no optionality;
 - a type's fields are not all a value may carry: it has an index signature or a call signature, or the extractor does not say (`hasUnlistedMembers`, see [Compatibility IR → Types and Their Members](compatibility-ir.md#types-and-their-members));
 - a field's optionality is not recorded, or a type extends something the snapshot does not record the same way (`extends Partial<Base>`);
-- the old type has no fields, so it takes any object and does not say what callers pass;
-- the extractor cut a type text short (`"a" | "b" | ... 12 more ... | "z"`): what it left out of the old type may be missing from the new one, so the cut member is accepted by nothing, the same text included;
-- two types refer to themselves (`Tree.children: Tree[]` → `Tree2.children: Tree2[]`).
+- the extractor cut a type text short (`"a" | "b" | ... 12 more ... | "z"`): what it left out of the old type may be missing from the new one, so the cut member is accepted by nothing, the same text included.
 
 A parameter's old and new type are not recorded as a rename: the change of an unrelated field or return between the same two types is judged on its own.
 

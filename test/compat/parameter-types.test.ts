@@ -397,7 +397,8 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     // A type without fields takes any object: nothing says what callers pass.
     ['an old type without fields', {}, { timeout: '?number' }, REFUSED],
     ['a new type without fields', { timeout: '?number' }, {}, REFUSED],
-    ['two types without fields', {}, {}, REFUSED],
+    // ... and a type without fields takes whatever the other one took.
+    ['two types without fields', {}, {}, ACCEPTED],
     ['a field name with a dot in it', { 'a.b': '?number' }, { 'a.b': '?number', c: '?number' }, ACCEPTED],
   ])('%s: %s', (_, oldFields, newFields, accepted) => {
     expect(pair(oldFields, newFields) !== undefined).toBe(accepted);
@@ -495,19 +496,58 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     expect(byShape('A | B', 'NeedsA | B', declared)).toBeDefined();
   });
 
-  it('does not settle two types that refer to themselves', () => {
+  it('settles two types that refer to themselves: their pair holds unless a field says otherwise', () => {
     const declared = types(
       objectType('Tree', { children: '?Tree[]', depth: '?number' }),
       objectType('Tree2', { children: '?Tree2[]', depth: '?number', label: '?string' }),
+      objectType('BadTree', { children: '?BadTree[]', depth: '?string' }),
+      objectType('NeedyTree', { children: '?NeedyTree[]', depth: '?number', root: 'string' }),
       objectType('Ping', { pong: '?Pong' }),
       objectType('Pong', { ping: '?Ping' }),
-      objectType('Ping2', { pong: '?Pong2' }),
+      objectType('Ping2', { pong: '?Pong2', more: '?string' }),
       objectType('Pong2', { ping: '?Ping2' }),
+      objectType('BadPing', { pong: '?BadPong' }),
+      objectType('BadPong', { ping: '?BadPing', must: 'string' }),
     );
-    expect(byShape('Tree', 'Tree2', declared)).toBeUndefined();
-    expect(byShape('Ping', 'Ping2', declared)).toBeUndefined();
-    // The same type on both sides is the same text.
-    expect(byShape('Tree', 'Tree | undefined', declared)).toBeDefined();
+    expect(byShape('Tree', 'Tree2', declared)).toEqual({
+      rule: 'shape',
+      fields: [{ oldType: 'Tree', newType: 'Tree2' }],
+    });
+    expect(byShape('Tree', 'Tree | undefined', declared)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('Tree[]', 'Tree2[]', declared)).toBeDefined();
+    expect(byShape('Ping', 'Ping2', declared)).toBeDefined();
+    expect(byShape('Pong', 'Pong2', declared)).toBeDefined();
+    // A field that does not fit, on the type itself or on one it leads to.
+    expect(byShape('Tree', 'BadTree', declared)).toBeUndefined();
+    expect(byShape('Tree', 'NeedyTree', declared)).toBeUndefined();
+    expect(byShape('Tree2', 'Tree', declared)).toBeUndefined();
+    expect(byShape('Ping', 'BadPing', declared)).toBeUndefined();
+    expect(byShape('Pong', 'BadPong', declared)).toBeUndefined();
+  });
+
+  it('forgets what it settled on the strength of a pair that turns out not to hold', () => {
+    // `Q` → `Q2` holds if `P` → `P2` does, and is reached while that pair is
+    // open; `P` → `P2` then fails on `bad`. `P` is taken by `P3`, and `Q` by
+    // nothing: not by `Q2`, whatever was thought of it on the way.
+    const declared = types(
+      objectType('P', { q: '?Q', bad: '?number' }),
+      objectType('Q', { p: '?P' }),
+      objectType('P2', { q: '?Q2', bad: '?string' }),
+      objectType('Q2', { p: '?P2' }),
+      objectType('P3', { q: '?Q3', bad: '?number' }),
+      objectType('Q3', { p: '?P3' }),
+    );
+    expect(byShape('P', 'P2', declared)).toBeUndefined();
+    expect(byShape('Q', 'Q2', declared)).toBeUndefined();
+    expect(byShape('P', 'P3', declared)).toBeDefined();
+    expect(byShape('P | Q', 'P2 | Q2 | P3', declared)).toBeUndefined();
+    expect(byShape('P | Q', 'P2 | Q2 | P3 | Q3', declared)).toEqual({
+      rule: 'shape',
+      fields: [
+        { oldType: 'Q', newType: 'Q3' },
+        { oldType: 'P', newType: 'P3' },
+      ],
+    });
   });
 
   it('settles each pair of types once, however many fields lead to it', () => {
@@ -531,7 +571,7 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
-  describe('where the candidate declares that the old type extends the new one', () => {
+  describe('where the old type declares that it extends the new one', () => {
     const declared = (
       retry: Record<string, string>,
       base: Record<string, string>,
@@ -547,22 +587,99 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
       expect(byDeclaration('RetryOptions', 'BaseOptions', widened)).toBeDefined();
     });
 
-    it('takes the declaration for the field types, which a compiler has checked', () => {
-      const narrowed = declared({ mode: '?"fast" | "slow"' }, { mode: '?string' });
-      expect(byShape('StrictOptions', 'BaseOptions', narrowed)).toBeUndefined();
-      expect(byShape('RetryOptions', 'BaseOptions', narrowed)).toBeDefined();
-      // Without the declaration a literal's primitive is not read.
+    it('does not take the declaration for the fields: they are weighed with it as without', () => {
+      const same = declared({ timeout: '?number' }, { timeout: '?number' });
+      expect(byShape('RetryOptions', 'BaseOptions', same)).toBeDefined();
       expect(
-        byShape('RetryOptions', 'BaseOptions', declared({ mode: '?"fast" | "slow"' }, { mode: '?string' }, [])),
-      ).toBeUndefined();
+        byShape('RetryOptions', 'BaseOptions', declared({ timeout: '?number' }, { timeout: '?number' }, [])),
+      ).toBeDefined();
+      // A member the subtype narrows: a literal's primitive is not read, declared or not.
+      const narrowed = declared({ mode: '?"fast" | "slow"' }, { mode: '?string' });
+      expect(byShape('RetryOptions', 'BaseOptions', narrowed)).toBeUndefined();
     });
 
-    it('reads the declaration from the candidate', () => {
-      const candidate = declared({ mode: '?"fast"' }, { mode: '?string' }, []);
-      const baseline = declared({ mode: '?"fast"' }, { mode: '?string' });
+    it('does not let the candidate vouch for what callers pass today', () => {
+      // Both SDKs are valid. The baseline has `BaseOptions.mode: string |
+      // number`; the candidate narrows it to `string` on both types and moves
+      // the parameter to the base. `get({ mode: 1 })` no longer compiles.
+      const baseline = declared({ mode: '?string | number' }, { mode: '?string | number' });
+      const candidate = declared({ mode: '?string' }, { mode: '?string' });
+      expect(byShape('RetryOptions', 'BaseOptions', candidate)).toBeDefined();
       expect(byShape('RetryOptions', 'BaseOptions', candidate, baseline)).toBeUndefined();
-      expect(byShape('RetryOptions', 'BaseOptions', baseline, candidate)).toBeDefined();
     });
+  });
+});
+
+describe('#752 by shape: one text on both sides is two declarations', () => {
+  // The same name may stand for another type in the candidate, and nothing
+  // else may say so: a type alias's text is compared nowhere, and a type the
+  // spec does not derive is outside what `oagen verify` compares.
+  it('reads a type alias behind an unchanged name from each snapshot', () => {
+    const baseline = types(alias('Id', 'string | number'));
+    const narrowed = types(alias('Id', 'string | boolean'));
+    const widened = types(alias('Id', 'string | number | boolean'));
+    // `get([1])` compiles against the baseline alone.
+    expect(byShape('Id[]', 'Id[] | null', narrowed, baseline)).toBeUndefined();
+    expect(byShape('Id', 'Id | null', narrowed, baseline)).toBeUndefined();
+    expect(byShape('Promise<Id>', 'Promise<Id> | null', narrowed, baseline)).toBeUndefined();
+    expect(byShape('{ id: Id; }', '{ id: Id; } | null', narrowed, baseline)).toBeUndefined();
+    expect(byShape('Id[]', 'Id[] | null', widened, baseline)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('Id[]', 'Id[] | null', baseline, baseline)).toEqual({ rule: 'shape', fields: [] });
+    // ... and from the candidate, for the code that names the alias: it
+    // widens under the callers' feet where the parameter does not follow.
+    expect(byShape('Id', 'string | number', widened, baseline)).toBeUndefined();
+  });
+
+  it('reads an alias inside a text that is not taken apart', () => {
+    const baseline = types(alias('Id', 'string | number'), alias('Key', 'Id'));
+    const narrowed = types(alias('Id', 'string'), alias('Key', 'Id'));
+    for (const [text, orNull] of [
+      ['Record<string, Id>', 'Record<string, Id> | null'],
+      ['Map<Id, string>', 'Map<Id, string> | null'],
+      ['[Id, string]', '[Id, string] | null'],
+      ['(id: Id) => void', '((id: Id) => void) | null'],
+      ['Box<Id>', 'Box<Id> | null'],
+      // through an alias of the alias
+      ['Box<Key>', 'Box<Key> | null'],
+    ]) {
+      expect([text, byShape(text, orNull, baseline, baseline) !== undefined]).toEqual([text, true]);
+      expect([text, byShape(text, orNull, narrowed, baseline) !== undefined]).toEqual([text, false]);
+    }
+    // An alias only one snapshot declares is not one type.
+    expect(byShape('Box<Id>', 'Box<Id> | null', types(), baseline)).toBeUndefined();
+    expect(byShape('Box<Id>', 'Box<Id> | null', baseline, types())).toBeUndefined();
+    // A name no snapshot declares is: a primitive, a type of another package.
+    expect(byShape('Box<Buffer>', 'Box<Buffer> | null', baseline, baseline)).toBeDefined();
+  });
+
+  it('reads an object type behind an unchanged name from each snapshot', () => {
+    const baseline = types(objectType('Options', { timeout: '?number', maxRetries: '?number' }));
+    const lostAField = types(objectType('Options', { timeout: '?number' }));
+    const gainedAField = types(objectType('Options', { timeout: '?number', maxRetries: '?number', signal: '?string' }));
+    const requiresMore = types(objectType('Options', { timeout: '?number', maxRetries: 'number' }));
+    expect(byShape('Options', 'Options | undefined', baseline, baseline)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('Options', 'Options | undefined', gainedAField, baseline)).toEqual({ rule: 'shape', fields: [] });
+    expect(byShape('Options', 'Options | undefined', lostAField, baseline)).toBeUndefined();
+    expect(byShape('Options', 'Options | undefined', requiresMore, baseline)).toBeUndefined();
+    expect(byShape('Options[]', 'Options[] | undefined', lostAField, baseline)).toBeUndefined();
+    // Inside a text that is not taken apart it has to be the same declaration.
+    expect(byShape('Box<Options>', 'Box<Options> | null', baseline, baseline)).toBeDefined();
+    expect(byShape('Box<Options>', 'Box<Options> | null', gainedAField, baseline)).toBeUndefined();
+    expect(byShape('Box<Options>', 'Box<Options> | null', lostAField, baseline)).toBeUndefined();
+  });
+
+  it('reads a type whose fields one snapshot does not record whole as no answer', () => {
+    const [symbolOf, fieldOf] = objectType('Options', { timeout: '?number' });
+    const whole = types(symbolOf, fieldOf);
+    const older = types({ ...symbolOf, hasUnlistedMembers: undefined }, fieldOf);
+    expect(byShape('Options', 'Options | undefined', whole, older)).toBeUndefined();
+    expect(byShape('Options', 'Options | undefined', older, whole)).toBeUndefined();
+    // Neither records them: a class, an enum, a type of two older snapshots.
+    // What changes of it is its own lines, and the text is all there is.
+    expect(byShape('Options', 'Options | undefined', older, older)).toBeDefined();
+    const classes = types(symbol('service_accessor', 'Client'));
+    expect(byShape('Client', 'Client | null', classes, classes)).toBeDefined();
+    expect(byShape('Status', 'Status | null', types(symbol('enum', 'Status')))).toBeDefined();
   });
 });
 
