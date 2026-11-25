@@ -1215,7 +1215,7 @@ describe('#683', () => {
             "model-added CreatePetResponseDraftResponse2",
             "model-modified CreatePetResponse (breaking)",
             "model-modified CreatePetResponseDraftResponse (breaking)",
-            "operation-modified ",
+            "operation-modified  (breaking)",
           ]
         `);
         // Nothing `createPet` nests is named like the other operation's response.

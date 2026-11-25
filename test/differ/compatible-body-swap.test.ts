@@ -25,7 +25,7 @@ import { compatibleShape, documentTypes, sameShape, type DocumentShapes } from '
 import type { Change, DiffReport } from '../../src/differ/types.js';
 import { diffCommand } from '../../src/cli/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Enum, Field, Model, Operation, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Field, Model, Operation, TypeRef, UnionType } from '../../src/ir/types.js';
 
 const OPENAPI_VERSIONS = ['3.1.0', '3.0.3'] as const;
 
@@ -525,19 +525,32 @@ describe('#753 a body moved to a model that still serves its reader or its write
       }
     });
 
-    it.each(Object.entries(SITES))('%s moved to a model both documents declare is judged the same', async (_, site) => {
-      // Neither name is new to its document: the fields alone decide.
-      for (const [edit, moved] of Object.entries(EDITS)) {
-        const schemas = { Pet: BasePet, Pet2: moved };
-        const report = await diffDocuments(
-          siteDocument(openapi, site, schemas, ref('Pet')),
-          siteDocument(openapi, site, schemas, ref('Pet2')),
-        );
-        expect(report.changes, edit).toHaveLength(1);
-        expect(site.reported(bodyChange(report)), edit).toBe(true);
-        expect(bodyChange(report).classification, edit).toBe(EXPECTED[site.side][edit]);
-      }
-    });
+    it.each(Object.entries(SITES))(
+      '%s moved to a model both documents declare stays breaking, whatever its fields (#390)',
+      async (_, site) => {
+        // Neither name is new to its document, so no `model-added` stands in for
+        // the move: the generated SDK types the body by another model. An
+        // identical copy (`Note` → `NoteCopy`) and a superset (`Note` →
+        // `NoteWithExtra`) are no exception, in either direction.
+        const moves: Record<string, Schema> = { 'an identical copy': BasePet, ...EDITS };
+        for (const [edit, moved] of Object.entries(moves)) {
+          const schemas = { Pet: BasePet, Pet2: moved };
+          for (const [from, to] of [
+            ['Pet', 'Pet2'],
+            ['Pet2', 'Pet'],
+          ]) {
+            const report = await diffDocuments(
+              siteDocument(openapi, site, schemas, ref(from)),
+              siteDocument(openapi, site, schemas, ref(to)),
+            );
+            expect(report.changes, `${edit}: ${from} → ${to}`).toHaveLength(1);
+            expect(site.reported(bodyChange(report)), `${edit}: ${from} → ${to}`).toBe(true);
+            expect(bodyChange(report).classification, `${edit}: ${from} → ${to}`).toBe('breaking');
+            expect(exitOf(report), `${edit}: ${from} → ${to}`).toBe(2);
+          }
+        }
+      },
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -552,8 +565,9 @@ describe('#753 a body moved to a model that still serves its reader or its write
       'a map': (body) => ({ type: 'object', additionalProperties: body }),
       'a nullable': (body) => nullable(body),
       'an array of nullables': (body) => ({ type: 'array', items: nullable(body) }),
-      'a union': (body) => ({ oneOf: [body, ref('Dog')] }),
-      'a union with a mapping': (body, name) => ({
+      'an `anyOf` union': (body) => ({ anyOf: [body, ref('Dog')] }),
+      'a `oneOf` union': (body) => ({ oneOf: [body, ref('Dog')] }),
+      'a `oneOf` union with a mapping': (body, name) => ({
         oneOf: [body, ref('Dog')],
         discriminator: {
           propertyName: 'id',
@@ -562,8 +576,28 @@ describe('#753 a body moved to a model that still serves its reader or its write
       }),
     };
     const sites = { response: SITES['the success response'], request: SITES['the request body'] };
+    /** `Pet2`, new to the second document: `Pet` with one more optional field. */
+    const added: Schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
+    /** What the body's entry is called, moved from `before` in a document with `Pet` alone to `after` in one that adds `Pet2`. */
+    const classified = async (site: Site, before: Schema, after: Schema, extra: Schemas = {}): Promise<string> =>
+      bodyChange(
+        await diffDocuments(
+          siteDocument(openapi, site, { Pet: BasePet, ...extra }, before),
+          siteDocument(openapi, site, { ...added, ...extra }, after),
+        ),
+      ).classification;
+    /**
+     * A request body's `oneOf` asks more of a variant than the request body
+     * itself would: one that admits more — a required field made optional —
+     * can match a body only the other variant matched, and a body that
+     * matches two is rejected (Greptile, #758 review round 3).
+     */
+    const expected = (wrapper: string, side: 'reader' | 'writer', edit: string): 'additive' | 'breaking' =>
+      side === 'writer' && wrapper.includes('`oneOf`') && edit === 'a required field made optional'
+        ? 'breaking'
+        : EXPECTED[side][edit];
 
-    it.each(Object.entries(WRAPPERS))('%s around the model', async (_, wrap) => {
+    it.each(Object.entries(WRAPPERS))('%s around the model', async (wrapper, wrap) => {
       for (const site of Object.values(sites)) {
         for (const [edit, moved] of Object.entries(EDITS)) {
           const report = await diffDocuments(
@@ -571,13 +605,12 @@ describe('#753 a body moved to a model that still serves its reader or its write
             siteDocument(openapi, site, { Pet: BasePet, Pet2: moved }, wrap(ref('Pet2'), 'Pet2')),
           );
           expect(site.reported(bodyChange(report)), `${site.side}: ${edit}`).toBe(true);
-          expect(bodyChange(report).classification, `${site.side}: ${edit}`).toBe(EXPECTED[site.side][edit]);
+          expect(bodyChange(report).classification, `${site.side}: ${edit}`).toBe(expected(wrapper, site.side, edit));
         }
       }
     });
 
     it('keeps a wrapper added, removed or exchanged around a compatible model a breaking type change', async () => {
-      const compatible = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
       const array = WRAPPERS['an array'];
       const map = WRAPPERS['a map'];
       const pairs: Array<[string, Schema, Schema]> = [
@@ -588,43 +621,23 @@ describe('#753 a body moved to a model that still serves its reader or its write
       ];
       for (const site of Object.values(sites)) {
         for (const [label, before, after] of pairs) {
-          const report = await diffDocuments(
-            siteDocument(openapi, site, compatible, before),
-            siteDocument(openapi, site, compatible, after),
-          );
-          expect(bodyChange(report).classification, `${site.side}: ${label}`).toBe('breaking');
+          expect(await classified(site, before, after), `${site.side}: ${label}`).toBe('breaking');
         }
       }
     });
 
     it('keeps a union whose keyword changed beside the move breaking, on both sides (Greptile, #758 review round 1)', async () => {
-      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
       const union = (keyword: 'anyOf' | 'oneOf', name: string): Schema => ({ [keyword]: [ref(name), ref('Dog')] });
       for (const site of Object.values(sites)) {
-        const classified = async (before: Schema, after: Schema) =>
-          bodyChange(
-            await diffDocuments(
-              siteDocument(openapi, site, schemas, before),
-              siteDocument(openapi, site, schemas, after),
-            ),
-          ).classification;
-        expect(await classified(union('anyOf', 'Pet'), union('oneOf', 'Pet2')), site.side).toBe('breaking');
-        expect(await classified(union('oneOf', 'Pet'), union('anyOf', 'Pet2')), site.side).toBe('breaking');
-        expect(await classified(union('anyOf', 'Pet'), union('anyOf', 'Pet2')), site.side).toBe('additive');
-        expect(await classified(union('oneOf', 'Pet'), union('oneOf', 'Pet2')), site.side).toBe('additive');
+        expect(await classified(site, union('anyOf', 'Pet'), union('oneOf', 'Pet2')), site.side).toBe('breaking');
+        expect(await classified(site, union('oneOf', 'Pet'), union('anyOf', 'Pet2')), site.side).toBe('breaking');
+        expect(await classified(site, union('anyOf', 'Pet'), union('anyOf', 'Pet2')), site.side).toBe('additive');
+        expect(await classified(site, union('oneOf', 'Pet'), union('oneOf', 'Pet2')), site.side).toBe('additive');
       }
     });
 
     it('reads two string variants that changed places with a `pattern` as the same union, beside the move (Greptile, #758 review round 2)', async () => {
-      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
       const patterned = { type: 'string', pattern: '^pet_' };
-      const classified = async (site: Site, before: Schema, after: Schema) =>
-        bodyChange(
-          await diffDocuments(
-            siteDocument(openapi, site, schemas, before),
-            siteDocument(openapi, site, schemas, after),
-          ),
-        ).classification;
       for (const site of Object.values(sites)) {
         // The finding: `anyOf: [Pet, { anyOf: [patterned, string] }]` → `anyOf: [Pet2, { anyOf: [string, patterned] }]`.
         expect(
@@ -645,20 +658,31 @@ describe('#753 a body moved to a model that still serves its reader or its write
       expect(await classified(sites.response, ...added)).toBe('additive');
     });
 
+    it('reads two nested unions that changed places, each written the other way round, as the same union (Greptile, #758 review round 4)', async () => {
+      const A = [{ type: 'string', pattern: '^a' }, { type: 'string' }];
+      const B = [
+        { type: 'string', maxLength: 5 },
+        { type: 'string', minLength: 6 },
+      ];
+      const before = { anyOf: [ref('Pet'), { anyOf: A }, { anyOf: B }] };
+      const after = (b: Schema[]) => ({
+        anyOf: [ref('Pet2'), { anyOf: [...b].reverse() }, { anyOf: [...A].reverse() }],
+      });
+      for (const site of Object.values(sites)) {
+        expect(await classified(site, before, after(B)), site.side).toBe('additive');
+      }
+      // The same with a branch tightened breaks a request alone.
+      const tighter = [{ type: 'string', maxLength: 4 }, B[1]];
+      expect(await classified(sites.request, before, after(tighter))).toBe('breaking');
+      expect(await classified(sites.response, before, after(tighter))).toBe('additive');
+    });
+
     it('judges the limits of the body’s own array by side, as a field’s are', async () => {
-      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
       const array = (name: string, maxItems?: number): Schema => ({
         type: 'array',
         items: ref(name),
         ...(maxItems === undefined ? {} : { maxItems }),
       });
-      const classified = async (site: Site, before: Schema, after: Schema) =>
-        bodyChange(
-          await diffDocuments(
-            siteDocument(openapi, site, schemas, before),
-            siteDocument(openapi, site, schemas, after),
-          ),
-        ).classification;
       // Tightened: a request the old body accepted is rejected. A reader is handed fewer items.
       expect(await classified(sites.request, array('Pet', 10), array('Pet2', 5))).toBe('breaking');
       expect(await classified(sites.request, array('Pet'), array('Pet2', 5))).toBe('breaking');
@@ -672,8 +696,7 @@ describe('#753 a body moved to a model that still serves its reader or its write
     });
 
     it('keeps a union whose mapping lost or renamed a key breaking, and one that gained a variant beside the move', async () => {
-      const mapped = WRAPPERS['a union with a mapping'];
-      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'], Bird: object({ id: string }) };
+      const mapped = WRAPPERS['a `oneOf` union with a mapping'];
       const renamedKey = {
         oneOf: [ref('Pet2'), ref('Dog')],
         discriminator: {
@@ -685,13 +708,10 @@ describe('#753 a body moved to a model that still serves its reader or its write
       for (const site of Object.values(sites)) {
         for (const [label, before, after] of [
           ['key renamed', mapped(ref('Pet'), 'Pet'), renamedKey],
-          ['variant added beside the move', WRAPPERS['a union'](ref('Pet'), 'Pet'), widened],
+          ['variant added beside the move', WRAPPERS['a `oneOf` union'](ref('Pet'), 'Pet'), widened],
         ] as const) {
-          const report = await diffDocuments(
-            siteDocument(openapi, site, schemas, before),
-            siteDocument(openapi, site, schemas, after),
-          );
-          expect(bodyChange(report).classification, `${site.side}: ${label}`).toBe('breaking');
+          const bird = { Bird: object({ id: string }) };
+          expect(await classified(site, before, after, bird), `${site.side}: ${label}`).toBe('breaking');
         }
       }
     });
@@ -736,11 +756,14 @@ describe('#753 a body moved to a model that still serves its reader or its write
       expect(await judged([chain, ref('Pet2')], [chain, ref('PetTagged')])).toEqual(breaking);
     });
 
-    it('reads an identical model as compatible both ways, whether it is new, renamed or declared by both', async () => {
+    it('reads an identical model as compatible both ways when one of the two names is new to its side, and never when both documents declare both', async () => {
       const copy: [Schemas, Schema] = [{ Pet: BasePet, Pet2: BasePet }, ref('Pet2')];
+      // `Pet2` is added with the move, or goes with it.
       expect(await judged(old, copy)).toEqual(additive);
       expect(await judged(copy, old)).toEqual(additive);
-      expect(await judged([{ Pet: BasePet, Pet2: BasePet }, ref('Pet')], copy)).toEqual(additive);
+      // Both documents declare both: a move between two models, which nothing else reports (#390).
+      expect(await judged([{ Pet: BasePet, Pet2: BasePet }, ref('Pet')], copy)).toEqual(breaking);
+      expect(await judged(copy, [{ Pet: BasePet, Pet2: BasePet }, ref('Pet')])).toEqual(breaking);
       // Renamed: the operation's own change is additive, and the removed model is what breaks.
       const renamed: [Schemas, Schema] = [{ Pet2: BasePet }, ref('Pet2')];
       expect(await judged(old, renamed)).toEqual(additive);
@@ -762,7 +785,7 @@ describe('#753 a body moved to a model that still serves its reader or its write
       const to = (schema: Schema): [Schemas, Schema] => [{ Pet: BasePet, Pet2: schema }, ref('Pet2')];
       expect(await judged(old, to(limited(5)))).toEqual({ response: 'additive', request: 'breaking' });
       expect(await judged(to(limited(5)), old)).toEqual(additive);
-      const from = (schema: Schema): [Schemas, Schema] => [{ Pet: schema, Pet2: limited(10) }, ref('Pet')];
+      const from = (schema: Schema): [Schemas, Schema] => [{ Pet: schema }, ref('Pet')];
       const moved = (schema: Schema): [Schemas, Schema] => [{ Pet: schema, Pet2: limited(10) }, ref('Pet2')];
       expect(await judged(from(limited(5)), moved(limited(5)))).toEqual(additive);
       expect(await judged(from(limited(20)), moved(limited(20)))).toEqual({
@@ -775,16 +798,41 @@ describe('#753 a body moved to a model that still serves its reader or its write
       const Child = object({ id: string });
       const kids = (child: string, maxItems: number): Schema =>
         object({ id: string, kids: { anyOf: [{ type: 'array', items: ref(child), maxItems }, string] } }, ['id']);
-      const moved = (before: number, after: number): [[Schemas, Schema], [Schemas, Schema]] => {
-        const declared = { Child, ChildCopy: Child, Pet: kids('Child', before) };
+      // `ChildCopy` comes with `Pet2`: one shape with `Child`, as a renamed model is.
+      const moved = (before: number, after: number, old: Schemas = {}): [[Schemas, Schema], [Schemas, Schema]] => {
+        const declared = { Child, Pet: kids('Child', before), ...old };
         return [
           [declared, ref('Pet')],
-          [{ ...declared, Pet2: kids('ChildCopy', after) }, ref('Pet2')],
+          [{ ...declared, ChildCopy: Child, Pet2: kids('ChildCopy', after) }, ref('Pet2')],
         ];
       };
       expect(await judged(...moved(10, 5))).toEqual({ response: 'additive', request: 'breaking' });
       expect(await judged(...moved(5, 10))).toEqual(additive);
       expect(await judged(...moved(10, 10))).toEqual(additive);
+      // A `ChildCopy` the old document already declares is another type, whatever the limits (#390).
+      expect(await judged(...moved(10, 10, { ChildCopy: Child }))).toEqual(breaking);
+    });
+
+    it('keeps a `oneOf` whose branch admits more breaking for a request, since a body may now match two (Greptile, #758 review round 3)', async () => {
+      const branches = (keyword: 'oneOf' | 'anyOf', maxLength: number): Schema => ({
+        [keyword]: [
+          { type: 'string', maxLength },
+          { type: 'string', minLength: 6 },
+        ],
+      });
+      // `Code` in the old document, and a new `Code2` beside it in the new one.
+      const moved = (keyword: 'oneOf' | 'anyOf', before: number, after: number) =>
+        judged(
+          [{ Code: branches(keyword, before) }, ref('Code')],
+          [{ Code: branches(keyword, before), Code2: branches(keyword, after) }, ref('Code2')],
+        );
+      // `'abcdef'` matched the second branch of `Code` alone, and matches both branches of `Code2`.
+      expect(await moved('oneOf', 5, 10)).toEqual({ response: 'additive', request: 'breaking' });
+      expect(await moved('oneOf', 10, 5)).toEqual({ response: 'additive', request: 'breaking' });
+      expect(await moved('oneOf', 5, 5)).toEqual(additive);
+      // An `anyOf` admits it either way; only the tightened branch breaks a request.
+      expect(await moved('anyOf', 5, 10)).toEqual(additive);
+      expect(await moved('anyOf', 10, 5)).toEqual({ response: 'additive', request: 'breaking' });
     });
 
     it('passes over deprecation, on a field and on the model, so a body can move off a deprecated model', async () => {
@@ -809,7 +857,7 @@ describe('#753 a body moved to a model that still serves its reader or its write
       }
     });
 
-    it('reads an inline enum and an inline object the parser names after each model as one type, new or not', async () => {
+    it('reads an inline enum and an inline object the parser names after the new model as one type with the old model’s', async () => {
       const properties = {
         id: string,
         size: { type: 'string', enum: ['small', 'large'] },
@@ -821,8 +869,10 @@ describe('#753 a body moved to a model that still serves its reader or its write
       expect(await judged([{ Pet: inline }, ref('Pet')], [{ Pet: inline, Pet2: grown }, ref('Pet2')])).toEqual(
         additive,
       );
+      // The names the parser minted under `Pet2` are new with it, so `sameShape` reads each as
+      // a rename of `Pet`'s; once both documents declare both models they are four names each.
       const declared = { Pet: inline, Pet2: grown };
-      expect(await judged([declared, ref('Pet')], [declared, ref('Pet2')])).toEqual(additive);
+      expect(await judged([declared, ref('Pet')], [declared, ref('Pet2')])).toEqual(breaking);
       expect(await judged([declared, ref('Pet2')], [declared, ref('Pet')])).toEqual(breaking);
       // An enum with another value, or an object with another field, is another type.
       const widened = object({ ...properties, size: { type: 'string', enum: ['small', 'large', 'huge'] } }, ['id']);
@@ -852,7 +902,9 @@ describe('#753 a body moved to a model that still serves its reader or its write
 
     it('stays breaking when the operation also changed in a way that is breaking on its own', async () => {
       const verbose = { name: 'verbose', in: 'query', schema: string };
-      const before = document(openapi, getPet({ '200': response('OK', ref('Pet')) }, [...petId, verbose]), moved);
+      const before = document(openapi, getPet({ '200': response('OK', ref('Pet')) }, [...petId, verbose]), {
+        Pet: BasePet,
+      });
       const after = document(openapi, getPet({ '200': response('OK', ref('Pet2')) }), moved);
       const forward = bodyChange(await diffDocuments(before, after));
       expect(forward).toMatchObject({
@@ -863,12 +915,12 @@ describe('#753 a body moved to a model that still serves its reader or its write
       // Backward the parameter is added, optional: additive, and the body is compatible both ways?
       // No: `Pet2` → `Pet` drops `tag`, so the body is what breaks there.
       expect(bodyChange(await diffDocuments(after, before)).classification).toBe('breaking');
-      const identical = { Pet: BasePet, Pet2: BasePet };
+      // An identical copy that goes with the move, beside a parameter added: additive throughout.
       expect(
         bodyChange(
           await diffDocuments(
-            document(openapi, getPet({ '200': response('OK', ref('Pet2')) }), identical),
-            document(openapi, getPet({ '200': response('OK', ref('Pet')) }, [...petId, verbose]), identical),
+            document(openapi, getPet({ '200': response('OK', ref('Pet2')) }), { Pet: BasePet, Pet2: BasePet }),
+            document(openapi, getPet({ '200': response('OK', ref('Pet')) }, [...petId, verbose]), { Pet: BasePet }),
           ),
         ),
       ).toMatchObject({
@@ -968,19 +1020,20 @@ describe('#753 a body moved to a model that still serves its reader or its write
           ref('Pet2'),
         ],
       );
-      // A nested model with the same fields is the same type, renamed or declared by both documents.
+      // A nested model that was only renamed is the same type, as it is everywhere else.
       const renamed = await diffDocuments(
         siteDocument(openapi, response200, { Owner, Pet: owned('Owner') }, ref('Pet')),
         siteDocument(openapi, response200, { Owner2: Owner, Pet2: owned('Owner2') }, ref('Pet2')),
       );
       expect(bodyChange(renamed).classification).toBe('additive');
-      const copies = { Owner, OwnerCopy: Owner, Pet: owned('Owner'), Pet2: owned('OwnerCopy') };
+      // An identical nested model both documents declare is another type, as it is for `sameShape` (#390).
+      const copies = { Owner, OwnerCopy: Owner, Pet: owned('Owner') };
       for (const site of [response200, request]) {
         const copied = await diffDocuments(
           siteDocument(openapi, site, copies, ref('Pet')),
-          siteDocument(openapi, site, copies, ref('Pet2')),
+          siteDocument(openapi, site, { ...copies, Pet2: owned('OwnerCopy') }, ref('Pet2')),
         );
-        expect(bodyChange(copied).classification).toBe('additive');
+        expect(bodyChange(copied).classification).toBe('breaking');
       }
     });
 
@@ -1199,7 +1252,7 @@ describe('#753 compatibleShape', () => {
     expect(moved({ ...pet, typeParams: [{ name: 'T' }] })).toEqual(neither);
   });
 
-  it('compares a field’s type as one shape, whatever names it carries, and never by compatibility', () => {
+  it('compares a field’s type as `sameShape` does, its guard included, and never by compatibility', () => {
     const owner: Model = { name: 'Owner', fields: [field('id', str, true)] };
     const owned = (name: string, ownerName: string): Model => ({
       name,
@@ -1220,10 +1273,12 @@ describe('#753 compatibleShape', () => {
     expect(
       judge(before, [{ ...owner, name: 'Owner2' }, owned('Pet', 'Owner2'), owned('Pet2', 'Owner2')], 'Pet2'),
     ).toEqual(both);
-    // An identical nested model both documents declare: one shape too. Neither
-    // name has to be new, under the body as at it.
+    // A copy that comes with the new body's model, the old one kept: one shape too, as the
+    // model the parser names after `Pet2` for an inline object is.
     const copy = { ...owner, name: 'OwnerCopy' };
-    expect(judge([...before, copy], [...before, copy, owned('Pet2', 'OwnerCopy')], 'Pet2')).toEqual(both);
+    expect(judge(before, [...before, copy, owned('Pet2', 'OwnerCopy')], 'Pet2')).toEqual(both);
+    // An identical nested model both documents declare is another type (#390).
+    expect(judge([...before, copy], [...before, copy, owned('Pet2', 'OwnerCopy')], 'Pet2')).toEqual(neither);
     // A nested model that is only compatible: another type, on both sides.
     expect(judge(before, [...before, tagged, owned('Pet2', 'OwnerWithTag')], 'Pet2')).toEqual(neither);
     expect(judge([...before, tagged], [...before, tagged, owned('Pet2', 'OwnerWithTag')], 'Pet2')).toEqual(neither);
@@ -1241,41 +1296,73 @@ describe('#753 compatibleShape', () => {
     });
     const enums = (old: Enum[], next: Enum[]) => {
       const shapes = shapesOf(
-        { models: [sized('Pet', 'PetSize'), sized('Pet2', 'Pet2Size')], enums: old },
+        { models: [sized('Pet', 'PetSize')], enums: old },
         { models: [sized('Pet', 'PetSize'), sized('Pet2', 'Pet2Size')], enums: next },
       );
       return compatibleShape(model('Pet'), model('Pet2'), 'reader', shapes);
     };
-    expect(enums([size('PetSize'), size('Pet2Size')], [size('PetSize'), size('Pet2Size')])).toBe(true);
     expect(enums([size('PetSize')], [size('PetSize'), size('Pet2Size')])).toBe(true);
     expect(enums([size('PetSize')], [size('PetSize'), size('Pet2Size', ['small', 'large', 'huge'])])).toBe(false);
+    // An enum of those values that both documents declare is another type too.
+    expect(enums([size('PetSize'), size('Pet2Size')], [size('PetSize'), size('Pet2Size')])).toBe(false);
   });
 
-  it('does not ask whether either name is new to its document, where `sameShape` does', () => {
+  it('never reads two names both documents declare as compatible, by the guard `sameShape` has (#390)', () => {
     const copy: Model = { ...pet, name: 'PetCopy' };
-    const shapes = shapesOf({ models: [pet, copy] }, { models: [pet, copy] });
-    expect(sameShape(model('Pet'), model('PetCopy'), shapes)).toBe(false);
-    expect(compatibleShape(model('Pet'), model('PetCopy'), 'reader', shapes)).toBe(true);
-    expect(compatibleShape(model('Pet'), model('PetCopy'), 'writer', shapes)).toBe(true);
-    // An enum body is read the same way: the same values, under whatever name.
+    const withExtra: Model = { name: 'PetWithExtra', fields: [...pet.fields, field('tag', str, false)] };
+    const declared = [pet, copy, withExtra];
+    const shapes = shapesOf({ models: declared }, { models: declared });
+    // `Note` → `NoteCopy`, and `Note` → `NoteWithExtra`, which has every field of `Note`.
+    for (const [from, to] of [
+      ['Pet', 'PetCopy'],
+      ['PetCopy', 'Pet'],
+      ['Pet', 'PetWithExtra'],
+      ['PetWithExtra', 'Pet'],
+    ]) {
+      expect(sameShape(model(from), model(to), shapes), `${from} → ${to}`).toBe(false);
+      expect(compatibleShape(model(from), model(to), 'reader', shapes), `${from} → ${to}`).toBe(false);
+      expect(compatibleShape(model(from), model(to), 'writer', shapes), `${from} → ${to}`).toBe(false);
+    }
+    // Under a wrapper, and as an inline union's variant or mapping target.
+    const array = (name: string): TypeRef => ({ kind: 'array', items: model(name) });
+    const union = (name: string): TypeRef => ({
+      kind: 'union',
+      compositionKind: 'anyOf',
+      variants: [model(name), str],
+      discriminator: { property: 'id', mapping: { pet: name } },
+    });
+    for (const wrap of [array, union, (name: string): TypeRef => ({ kind: 'nullable', inner: model(name) })]) {
+      expect(compatibleShape(wrap('Pet'), wrap('PetWithExtra'), 'reader', shapes)).toBe(false);
+      expect(compatibleShape(wrap('Pet'), wrap('PetCopy'), 'writer', shapes)).toBe(false);
+    }
+    // The same two models are compatible once one name is new to its side: `PetWithExtra` added
+    // with the move, or `Pet` gone with it. That is the guard, to the letter.
+    const added = shapesOf({ models: [pet] }, { models: [pet, withExtra] });
+    expect(compatibleShape(model('Pet'), model('PetWithExtra'), 'reader', added)).toBe(true);
+    expect(compatibleShape(model('Pet'), model('PetWithExtra'), 'writer', added)).toBe(true);
+    const gone = shapesOf({ models: [pet, withExtra] }, { models: [withExtra] });
+    expect(compatibleShape(model('Pet'), model('PetWithExtra'), 'reader', gone)).toBe(true);
+    expect(sameShape(model('Pet'), model('PetWithExtra'), gone)).toBe(false);
+    // An enum body is read the same way.
     const level = (name: string, values: string[]): Enum => ({
       name,
       values: values.map((value) => ({ name: value, value })),
     });
-    const declared = [level('Level', ['low', 'high']), level('Grade', ['low', 'high']), level('Tier', ['low'])];
-    const enumShapes = shapesOf({ enums: declared }, { enums: declared });
+    const levels = [level('Level', ['low', 'high']), level('Grade', ['low', 'high'])];
     const enumRef = (name: string): TypeRef => ({ kind: 'enum', name });
-    expect(sameShape(enumRef('Level'), enumRef('Grade'), enumShapes)).toBe(false);
     for (const side of ['reader', 'writer'] as const) {
-      expect(compatibleShape(enumRef('Level'), enumRef('Grade'), side, enumShapes)).toBe(true);
-      expect(compatibleShape(enumRef('Level'), enumRef('Tier'), side, enumShapes)).toBe(false);
-      expect(compatibleShape(enumRef('Tier'), enumRef('Level'), side, enumShapes)).toBe(false);
+      expect(
+        compatibleShape(enumRef('Level'), enumRef('Grade'), side, shapesOf({ enums: levels }, { enums: levels })),
+      ).toBe(false);
+      expect(
+        compatibleShape(enumRef('Level'), enumRef('Grade'), side, shapesOf({ enums: [levels[0]] }, { enums: levels })),
+      ).toBe(true);
     }
     // The old model is read in the old document and the new one in the new document.
     const grown: Model = { ...copy, fields: [...copy.fields, field('tag', str, true)] };
-    const swapped = shapesOf({ models: [pet, copy] }, { models: [pet, grown] });
-    expect(compatibleShape(model('Pet'), model('PetCopy'), 'writer', swapped)).toBe(false);
-    expect(compatibleShape(model('PetCopy'), model('Pet'), 'writer', swapped)).toBe(true);
+    const renamed = shapesOf({ models: [pet] }, { models: [grown] });
+    expect(compatibleShape(model('Pet'), model('PetCopy'), 'reader', renamed)).toBe(true);
+    expect(compatibleShape(model('Pet'), model('PetCopy'), 'writer', renamed)).toBe(false);
   });
 
   it('is compatible on both sides wherever `sameShape` reads one shape with the same union keywords and limits', () => {
@@ -1396,9 +1483,11 @@ describe('#753 compatibleShape', () => {
       name,
       fields: [field('kids', kids(childName, maxItems), true)],
     });
-    const judge = (before: number, after: number, to = 'ChildCopy') => {
-      const declared = [child('Child'), child('ChildCopy'), parent('Pet', 'Child', before)];
-      const shapes = shapesOf({ models: declared }, { models: [...declared, parent('Pet2', to, after)] });
+    // `ChildCopy` comes with `Pet2` unless the old document is said to declare it already.
+    const judge = (before: number, after: number, to = 'ChildCopy', copyDeclared = false) => {
+      const old = [child('Child'), parent('Pet', 'Child', before), ...(copyDeclared ? [child('ChildCopy')] : [])];
+      const next = [child('Child'), child('ChildCopy'), parent('Pet', 'Child', before), parent('Pet2', to, after)];
+      const shapes = shapesOf({ models: old }, { models: next });
       return {
         reader: compatibleShape(model('Pet'), model('Pet2'), 'reader', shapes),
         writer: compatibleShape(model('Pet'), model('Pet2'), 'writer', shapes),
@@ -1410,6 +1499,9 @@ describe('#753 compatibleShape', () => {
     expect(judge(10, 5)).toEqual(readerOnly);
     expect(judge(5, 10)).toEqual(both);
     expect(judge(10, 10)).toEqual(both);
+    // A `ChildCopy` both documents declare is another type, whatever the limits (#390).
+    expect(judge(10, 10, 'ChildCopy', true)).toEqual(neither);
+    expect(judge(5, 10, 'ChildCopy', true)).toEqual(neither);
     // The same items by name pair as on any field.
     expect(judge(10, 5, 'Child')).toEqual(readerOnly);
     expect(judge(5, 10, 'Child')).toEqual(both);
@@ -1448,12 +1540,18 @@ describe('#753 compatibleShape', () => {
     expect(around(array('Pet', 5), array('Pet2'))).toEqual(both);
     expect(around(map('Pet', 10), map('Pet2', 5))).toEqual(readerOnly);
     expect(around(map('Pet', 5), map('Pet2', 10))).toEqual(both);
-    const nested = (name: string, maxItems: number): TypeRef => ({
+    const nested = (name: string, maxItems: number, compositionKind?: 'anyOf' | 'oneOf'): TypeRef => ({
       kind: 'nullable',
-      inner: { kind: 'union', variants: [array(name, maxItems), str] },
+      inner: { kind: 'union', variants: [array(name, maxItems), str], ...(compositionKind ? { compositionKind } : {}) },
     });
-    expect(around(nested('Pet', 10), nested('Pet2', 5))).toEqual(readerOnly);
-    expect(around(nested('Pet', 5), nested('Pet2', 10))).toEqual(both);
+    expect(around(nested('Pet', 10, 'anyOf'), nested('Pet2', 5, 'anyOf'))).toEqual(readerOnly);
+    expect(around(nested('Pet', 5, 'anyOf'), nested('Pet2', 10, 'anyOf'))).toEqual(both);
+    // A variant of a union that is not an `anyOf` keeps its limits (round 3, below).
+    for (const keyword of ['oneOf', undefined] as const) {
+      expect(around(nested('Pet', 10, keyword), nested('Pet2', 5, keyword))).toEqual(readerOnly);
+      expect(around(nested('Pet', 5, keyword), nested('Pet2', 10, keyword))).toEqual(readerOnly);
+      expect(around(nested('Pet', 5, keyword), nested('Pet2', 5, keyword))).toEqual(both);
+    }
   });
 
   it('looks through the same wrapper on both sides, and through nothing else', () => {
@@ -1537,18 +1635,18 @@ describe('#753 compatibleShape', () => {
       name,
       fields: [field('value', union(variants), true)],
     });
+    // `Child` and `Kid` are in both documents; `ChildCopy` and `KidCopy` come with `Pet2`.
     const under = (before: TypeRef[], after: TypeRef[]) => {
-      const declared = [child('Child'), child('ChildCopy'), holder('Pet', before)];
-      return judge(a, b, shapesOf({ models: declared }, { models: [...declared, holder('Pet2', after)] }));
+      const declared = [child('Child'), child('Kid'), holder('Pet', before)];
+      const added = [child('ChildCopy'), child('KidCopy'), holder('Pet2', after)];
+      return judge(a, b, shapesOf({ models: declared }, { models: [...declared, ...added] }));
     };
     expect(under([array('Child'), patterned, str], [array('ChildCopy'), str, patterned])).toEqual(both);
     expect(under([array('Child', 10), patterned, str], [array('ChildCopy', 5), str, patterned])).toEqual(readerOnly);
     expect(under([array('Child', 5), patterned, str], [array('ChildCopy', 10), str, patterned])).toEqual(both);
-    // Two variants that are one shape under each other's name, their limits kept in place.
-    expect(under([array('Child', 10), array('ChildCopy', 5)], [array('ChildCopy', 10), array('Child', 5)])).toEqual(
-      both,
-    );
-    expect(under([array('Child', 10), array('ChildCopy', 5)], [array('ChildCopy', 5), array('Child', 5)])).toEqual(
+    // Two variants of one shape, each under a new name, their limits kept in place.
+    expect(under([array('Child', 10), array('Kid', 5)], [array('KidCopy', 10), array('ChildCopy', 5)])).toEqual(both);
+    expect(under([array('Child', 10), array('Kid', 5)], [array('KidCopy', 5), array('ChildCopy', 5)])).toEqual(
       readerOnly,
     );
     // A named union's variants are read the same way.
@@ -1567,6 +1665,222 @@ describe('#753 compatibleShape', () => {
     expect(moved([patterned, str], [str, patterned])).toEqual(both);
     expect(moved([str, int], [patterned, int])).toEqual(readerOnly);
     expect(moved([patterned, int], [str, int])).toEqual(both);
+  });
+
+  it('puts nested unions in step too, so two that changed places are each other’s however their own branches are written (Greptile, #758 review round 4)', () => {
+    const limited = (constraints: NonNullable<Field['constraints']>): TypeRef => ({ ...str, constraints });
+    const union = (variants: TypeRef[], compositionKind: 'anyOf' | 'oneOf' = 'anyOf'): UnionType => ({
+      kind: 'union',
+      compositionKind,
+      variants,
+    });
+    const reverse = (type: UnionType): UnionType => ({ ...type, variants: [...type.variants].reverse() });
+    const grown: Model = { name: 'Pet2', fields: [...pet.fields, field('tag', str, false)] };
+    const shapes = shapesOf({ models: [pet] }, { models: [pet, grown] });
+    const judge = (a: TypeRef, b: TypeRef) => ({
+      reader: compatibleShape(a, b, 'reader', shapes),
+      writer: compatibleShape(a, b, 'writer', shapes),
+    });
+    const readerOnly = { reader: true, writer: false };
+    const [a, b] = [model('Pet'), model('Pet2')];
+    const A = union([limited({ pattern: '^a' }), str]);
+    const B = union([limited({ maxLength: 5 }), limited({ minLength: 6 })]);
+    // The finding: both nested unions keep their branches and limits, at both levels the other way round.
+    expect(judge(union([a, A, B]), union([b, reverse(B), reverse(A)]))).toEqual(both);
+    expect(judge(union([a, A, B]), union([b, B, A]))).toEqual(both);
+    expect(judge(union([a, A, B]), union([b, reverse(A), reverse(B)]))).toEqual(both);
+    expect(judge(union([a, A, B], 'oneOf'), union([b, reverse(B), reverse(A)], 'oneOf'))).toEqual(both);
+    // A branch that really tightened is still read, wherever its union now sits.
+    const tighter = union([limited({ maxLength: 4 }), limited({ minLength: 6 })]);
+    expect(judge(union([a, A, B]), union([b, reverse(tighter), reverse(A)]))).toEqual(readerOnly);
+    expect(judge(union([a, A, B]), union([b, reverse(A), tighter]))).toEqual(readerOnly);
+    // One level further down, under an array.
+    const listed = (inner: TypeRef): TypeRef => ({ kind: 'array', items: union([inner, int]) });
+    expect(judge(union([a, listed(A), listed(B)]), union([b, listed(reverse(B)), listed(reverse(A))]))).toEqual(both);
+    expect(judge(union([a, listed(A), listed(B)]), union([b, listed(reverse(tighter)), listed(reverse(A))]))).toEqual(
+      readerOnly,
+    );
+    // Many unions of one type: each pair is put in step once, however many places try it.
+    const many = Array.from({ length: 12 }, (_, i) =>
+      union([limited({ maxLength: i + 1 }), limited({ minLength: i + 20 }), limited({ pattern: `^${i}` })]),
+    );
+    const scrambled = [...many].reverse().map((entry) => reverse(entry));
+    expect(judge(union([a, ...many]), union([b, ...scrambled]))).toEqual(both);
+  });
+
+  it('puts two unions in step by shape across the two documents, never by a name that changed hands (Greptile, #758 review round 3)', () => {
+    const literal = (value: string): TypeRef => ({ kind: 'literal', value });
+    const kind = (name: string, value: string): Model => ({ name, fields: [field('kind', literal(value), true)] });
+    const array = (name: string, maxItems: number): TypeRef => ({
+      kind: 'array',
+      items: model(name),
+      constraints: { maxItems },
+    });
+    const union = (variants: TypeRef[]): TypeRef => ({ kind: 'union', compositionKind: 'anyOf', variants });
+    const judge = (a: TypeRef, b: TypeRef, old: Model[], next: Model[]) => {
+      const shapes = shapesOf({ models: old }, { models: next });
+      return { reader: compatibleShape(a, b, 'reader', shapes), writer: compatibleShape(a, b, 'writer', shapes) };
+    };
+    const readerOnly = { reader: true, writer: false };
+    // The finding, as the guard for two declared names leaves it reachable: `X` changes its
+    // definition under its name, to the one `W` had; `W` goes and `Z` comes with the definition
+    // `X` had. The union's variants change places with them. In order the shapes agree (old `X`
+    // is new `Z`, old `W` is new `X`) and `maxItems` drops from 10 to 5 on the first; by name
+    // `X[]` kept its `maxItems: 10`, which is another model's.
+    const old = [kind('X', 'a'), kind('W', 'b')];
+    const next = [kind('X', 'b'), kind('Z', 'a')];
+    expect(judge(union([array('X', 10), array('W', 5)]), union([array('Z', 5), array('X', 10)]), old, next)).toEqual(
+      readerOnly,
+    );
+    // With the limits moved along, each variant kept its own: six items of kind `a` are still admitted.
+    expect(judge(union([array('X', 10), array('W', 5)]), union([array('Z', 10), array('X', 5)]), old, next)).toEqual(
+      both,
+    );
+    // Two models that changed under their names, among four variants: paired by name, every
+    // variant keeps its limits (`X[]` 10, `Y[]` 7, and the two renamed ones theirs), though
+    // old `X` is new `N1` and old `Y` is new `N2`. Arrays of kind `a` were admitted up to 10
+    // items (`X[]`) and are admitted up to 7 (`Y[]`, which is kind `a` now).
+    const four = {
+      old: [kind('X', 'a'), kind('M1', 'b'), kind('Y', 'b'), kind('M2', 'a')],
+      new: [kind('N1', 'a'), kind('X', 'b'), kind('N2', 'b'), kind('Y', 'a')],
+    };
+    expect(
+      judge(
+        union([array('X', 10), array('M1', 5), array('Y', 7), array('M2', 3)]),
+        union([array('N1', 3), array('X', 10), array('N2', 5), array('Y', 7)]),
+        four.old,
+        four.new,
+      ),
+    ).toEqual(readerOnly);
+    // `A` and `B` exchanging their definitions while both documents declare both is no move
+    // the comparison looks at: two declared names are never one shape (#390).
+    const [a, b] = [kind('A', 'a'), kind('B', 'b')];
+    const exchanged = [kind('A', 'b'), kind('B', 'a')];
+    expect(
+      judge(union([array('A', 10), array('B', 5)]), union([array('B', 10), array('A', 5)]), [a, b], exchanged),
+    ).toEqual({ reader: false, writer: false });
+    // Unchanged models, the union's variants written the other way round beside a moved one.
+    const patterned: TypeRef = { ...str, constraints: { pattern: '^a' } };
+    const copy = kind('C', 'a');
+    expect(
+      judge(union([array('A', 10), patterned, str]), union([array('C', 10), str, patterned]), [a, b], [a, b, copy]),
+    ).toEqual(both);
+    expect(
+      judge(union([array('A', 10), patterned, str]), union([array('C', 5), str, patterned]), [a, b], [a, b, copy]),
+    ).toEqual(readerOnly);
+  });
+
+  it('asks an exact fit of a writer’s variants under a union that is not an `anyOf` (Greptile, #758 review round 3)', () => {
+    const limited = (constraints: NonNullable<Field['constraints']>): TypeRef => ({ ...str, constraints });
+    const readerOnly = { reader: true, writer: false };
+    // The finding: a named `oneOf` whose first branch is loosened. `'abcdef'` matched the second
+    // branch alone and now matches both, which a `oneOf` rejects.
+    const named = (name: string, variants: TypeRef[], compositionKind: 'oneOf' | 'anyOf'): Model => ({
+      name,
+      fields: [],
+      variants,
+      compositionKind,
+    });
+    const moved = (before: TypeRef[], after: TypeRef[], keyword: 'oneOf' | 'anyOf') => {
+      const shapes = shapesOf(
+        { models: [named('Code', before, keyword)] },
+        { models: [named('Code', before, keyword), named('Code2', after, keyword)] },
+      );
+      return {
+        reader: compatibleShape(model('Code'), model('Code2'), 'reader', shapes),
+        writer: compatibleShape(model('Code'), model('Code2'), 'writer', shapes),
+      };
+    };
+    const [short, long, longer] = [limited({ maxLength: 5 }), limited({ minLength: 6 }), limited({ maxLength: 10 })];
+    expect(moved([short, long], [longer, long], 'oneOf')).toEqual(readerOnly);
+    expect(moved([longer, long], [short, long], 'oneOf')).toEqual(readerOnly);
+    expect(moved([short, long], [short, long], 'oneOf')).toEqual(both);
+    // Written the other way round, each branch with its own limits, is the same union.
+    expect(moved([short, long], [long, short], 'oneOf')).toEqual(both);
+    // An `anyOf` admits a value that matches two branches, so a branch may admit more.
+    expect(moved([short, long], [longer, long], 'anyOf')).toEqual(both);
+    expect(moved([longer, long], [short, long], 'anyOf')).toEqual(readerOnly);
+
+    // An inline union at the body, with a moved model beside the branch.
+    const grown: Model = { name: 'Pet2', fields: [...pet.fields, field('tag', str, false)] };
+    const shapes = shapesOf({ models: [pet] }, { models: [pet, grown] });
+    const union = (name: string, branch: TypeRef, compositionKind?: 'oneOf' | 'anyOf'): UnionType => ({
+      kind: 'union',
+      variants: [model(name), branch],
+      ...(compositionKind ? { compositionKind } : {}),
+    });
+    const judge = (a: TypeRef, b: TypeRef, documents = shapes) => ({
+      reader: compatibleShape(a, b, 'reader', documents),
+      writer: compatibleShape(a, b, 'writer', documents),
+    });
+    // Written without a keyword is read as exclusive: the request-body parser writes none on a `oneOf`.
+    for (const keyword of ['oneOf', undefined] as const) {
+      expect(judge(union('Pet', short, keyword), union('Pet2', longer, keyword))).toEqual(readerOnly);
+      expect(judge(union('Pet', longer, keyword), union('Pet2', short, keyword))).toEqual(readerOnly);
+      expect(judge(union('Pet', short, keyword), union('Pet2', short, keyword))).toEqual(both);
+    }
+    expect(judge(union('Pet', short, 'anyOf'), union('Pet2', longer, 'anyOf'))).toEqual(both);
+    // The limits the union's own schema carries bind the value whichever branch it takes: by side.
+    const whole = (name: string, maxLength: number): TypeRef => ({
+      ...union(name, str, 'oneOf'),
+      constraints: { maxLength },
+    });
+    expect(judge(whole('Pet', 5), whole('Pet2', 10))).toEqual(both);
+    expect(judge(whole('Pet', 10), whole('Pet2', 5))).toEqual(readerOnly);
+
+    // A union under a field of the moved model.
+    const holder = (name: string, type: TypeRef): Model => ({ name, fields: [field('code', type, true)] });
+    const under = (keyword: 'oneOf' | 'anyOf', before: TypeRef, after: TypeRef) => {
+      const type = (branch: TypeRef): TypeRef => ({ kind: 'union', compositionKind: keyword, variants: [branch, int] });
+      const old = holder('Home', type(before));
+      return judge(
+        model('Home'),
+        model('Home2'),
+        shapesOf({ models: [old] }, { models: [old, holder('Home2', type(after))] }),
+      );
+    };
+    expect(under('oneOf', short, longer)).toEqual(readerOnly);
+    expect(under('oneOf', longer, short)).toEqual(readerOnly);
+    expect(under('anyOf', short, longer)).toEqual(both);
+    expect(under('anyOf', longer, short)).toEqual(readerOnly);
+
+    // A variant that is a model: it may gain optional fields, and may not admit more of the old ones.
+    const cat: Model = { name: 'Cat', fields: [field('id', str, true), field('name', str, true)] };
+    const loose: Model = { name: 'Cat2', fields: [field('id', str, true), field('name', str, false)] };
+    const wider: Model = { name: 'Cat3', fields: [...cat.fields, field('tag', str, false)] };
+    const looser: Model = { name: 'Cat4', fields: [field('id', str, true), field('name', longer, true)] };
+    const tight: Model = { name: 'Cat5', fields: [field('id', str, true), field('name', short, true)] };
+    const cats = shapesOf({ models: [cat, tight, pet] }, { models: [cat, loose, wider, looser, tight, pet] });
+    const variant = (name: string, keyword: 'oneOf' | 'anyOf'): UnionType => ({
+      kind: 'union',
+      compositionKind: keyword,
+      variants: [model(name), model('Pet')],
+    });
+    const between = (from: string, to: string, keyword: 'oneOf' | 'anyOf') =>
+      judge(variant(from, keyword), variant(to, keyword), cats);
+    expect(between('Cat', 'Cat3', 'oneOf')).toEqual(both);
+    expect(between('Cat', 'Cat2', 'oneOf')).toEqual(neither);
+    expect(between('Cat', 'Cat2', 'anyOf')).toEqual({ reader: false, writer: true });
+    // `name` loosened from `maxLength: 5` to `10`, under each keyword.
+    expect(between('Cat5', 'Cat4', 'oneOf')).toEqual(readerOnly);
+    expect(between('Cat5', 'Cat4', 'anyOf')).toEqual(both);
+    // Outside any union the writer's rule is the request body's own.
+    expect(judge(model('Cat'), model('Cat2'), cats)).toEqual({ reader: false, writer: true });
+    expect(judge(model('Cat5'), model('Cat4'), cats)).toEqual(both);
+    // Under an array inside the exclusive union, and under its discriminator's mapping.
+    const listed = (name: string): TypeRef => ({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [{ kind: 'array', items: model(name) }, model('Pet')],
+    });
+    expect(judge(listed('Cat'), listed('Cat2'), cats)).toEqual(neither);
+    expect(judge(listed('Cat'), listed('Cat3'), cats)).toEqual(both);
+    const mapped = (name: string): TypeRef => ({
+      ...variant(name, 'oneOf'),
+      discriminator: { property: 'id', mapping: { cat: name, pet: 'Pet' } },
+    });
+    expect(judge(mapped('Cat'), mapped('Cat2'), cats)).toEqual(neither);
+    expect(judge(mapped('Cat'), mapped('Cat3'), cats)).toEqual(both);
   });
 
   it('compares a named union’s variants and a dispatcher’s mapping as `sameShape` does', () => {

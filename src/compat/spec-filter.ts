@@ -260,6 +260,8 @@ function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Recor
  * For interfaces: when fieldPaths is provided, only keeps fields that appear
  * in the spec-derived field paths. This prevents false positives from hand-added
  * SDK fields that reference spec-derived types but aren't defined in the spec.
+ * The members of a type alias of an object type (`ApiTypeAlias.fields`) are
+ * kept by the same paths.
  *
  * For classes: when methodPaths is provided, only keeps methods whose names
  * appear in the spec-derived method paths. This prevents false positives from
@@ -396,11 +398,27 @@ export function filterSurface(
     filteredEnums = newEnums;
   }
 
+  // Filter a type alias's members as an interface's fields are filtered: a
+  // member the spec does not derive (one added by hand) is out of scope on an
+  // alias of an object type too. An alias recorded without members has none
+  // to filter.
+  const filteredTypeAliases = filterRecord(surface.typeAliases, allowedNames);
+  if (fieldPaths) {
+    for (const [name, alias] of Object.entries(filteredTypeAliases)) {
+      if (typeof alias.fields !== 'object' || alias.fields === null || Array.isArray(alias.fields)) continue;
+      const filteredFields: Record<string, (typeof alias.fields)[string]> = {};
+      for (const [fieldName, field] of Object.entries(alias.fields)) {
+        if (fieldPaths.has(`${name}.${fieldName}`)) filteredFields[fieldName] = field;
+      }
+      filteredTypeAliases[name] = { ...alias, fields: filteredFields };
+    }
+  }
+
   return {
     ...surface,
     classes: filteredClasses,
     interfaces: filteredInterfaces,
-    typeAliases: filterRecord(surface.typeAliases, allowedNames),
+    typeAliases: filteredTypeAliases,
     enums: filteredEnums,
     exports: {}, // exports are structural, not symbol-level — skip for scoped comparison
   };

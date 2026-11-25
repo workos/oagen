@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { bareTypeName } from '../../src/compat/type-names.js';
+import {
+  bareTypeName,
+  genericWrapperOf,
+  objectTypeMembers,
+  singleArgumentGeneric,
+  soleTypeName,
+  unionMembers,
+} from '../../src/compat/type-names.js';
 
 /**
  * `bareTypeName` reads the declared type a recorded type text names. #751:
@@ -497,5 +504,290 @@ describe('bareTypeName (#751)', () => {
     ])('%j → %j', (text, name) => {
       expect(bareTypeName(text)).toBe(name);
     });
+  });
+});
+
+/**
+ * #752: three more readers of a type text, for asking whether a parameter's
+ * new type accepts every value of its old one.
+ */
+describe('unionMembers (#752)', () => {
+  it.each<[string, string[]]>([
+    ['string', ['string']],
+    ['string | number', ['string', 'number']],
+    ['string|number', ['string', 'number']],
+    ['  string  |  number  ', ['string', 'number']],
+    ['RequestOptions | undefined', ['RequestOptions', 'undefined']],
+    ['string | null | undefined', ['string', 'null', 'undefined']],
+    ['str | None', ['str', 'None']],
+    // each member once
+    ['string | string', ['string']],
+    // parentheses around the whole union, and around a member
+    ['(string | number)', ['string', 'number']],
+    ['(string | number) | null', ['string', 'number', 'null']],
+    ['((string))', ['string']],
+    // what a member is made of stays whole
+    ['(string | number)[]', ['(string | number)[]']],
+    ['Array<string | number>', ['Array<string | number>']],
+    ['Record<string, A | B>', ['Record<string, A | B>']],
+    ['{ a: A | B; }', ['{ a: A | B; }']],
+    ['{ a: A | B; } | undefined', ['{ a: A | B; }', 'undefined']],
+    ['[A | B, C]', ['[A | B, C]']],
+    ["'a|b' | 'c'", ["'a|b'", "'c'"]],
+    ['"a|b"', ['"a|b"']],
+    ['`a|${string}` | "c"', ['`a|${string}`', '"c"']],
+    ['A & B | C', ['A & B', 'C']],
+    ['Optional[A | B]', ['Optional[A | B]']],
+    ['string|int|null', ['string', 'int', 'null']],
+  ])('%j → %j', (text, members) => {
+    expect(unionMembers(text)).toEqual(members);
+  });
+
+  describe('a function type is one member, whatever it returns', () => {
+    it.each<[string, string[]]>([
+      ['() => void', ['() => void']],
+      ['() => string | number', ['() => string | number']],
+      ['(pet: Pet | null) => A | B', ['(pet: Pet | null) => A | B']],
+      ['(a: A) -> B | C', ['(a: A) -> B | C']],
+      // among a union's members it stands in parentheses, which go with the union
+      ['(() => void) | undefined', ['() => void', 'undefined']],
+      ['(() => A | B) | undefined', ['() => A | B', 'undefined']],
+      ['((pet: Pet) => void) | (() => void)', ['(pet: Pet) => void', '() => void']],
+      // an arrow inside a bracket is the member's own business
+      ['Array<() => void> | null', ['Array<() => void>', 'null']],
+      ['{ done: () => void; } | null', ['{ done: () => void; }', 'null']],
+    ])('%j → %j', (text, members) => {
+      expect(unionMembers(text)).toEqual(members);
+    });
+  });
+
+  it.each([
+    [''],
+    ['   '],
+    ['| string'],
+    ['string |'],
+    ['string | | number'],
+    ['(string | number'],
+    ['string | number)'],
+    ['Array<string | number'],
+    ['"string | number'],
+    ['(string |) | number'],
+  ])('%j does not read as a union', (text) => {
+    expect(unionMembers(text)).toBeUndefined();
+  });
+
+  it('reads the member a single-type text is', () => {
+    // Every text `bareTypeName` reads as one name is a union of one or of
+    // the name and the absent members around it.
+    for (const text of ['Foo', 'Foo[]', 'Promise<Foo>', '?Foo', 'Foo?', '*Foo', 'Optional[Foo]']) {
+      expect(unionMembers(text)).toEqual([text]);
+    }
+  });
+});
+
+describe('soleTypeName (#752)', () => {
+  it.each<[string, string]>([
+    ['Foo', 'Foo'],
+    ['  Foo  ', 'Foo'],
+    ['Foo[]', 'Foo'],
+    // every optional spelling `bareTypeName` reads through
+    ['Foo | undefined', 'Foo'],
+    ['undefined | Foo', 'Foo'],
+    ['Foo | null', 'Foo'],
+    ['Foo | null | undefined', 'Foo'],
+    ['Foo | None', 'Foo'],
+    ['Foo | nil', 'Foo'],
+    ['?Foo', 'Foo'],
+    ['Foo?', 'Foo'],
+    ['*Foo', 'Foo'],
+    ['Optional[Foo]', 'Foo'],
+    ['typing.Optional[Foo]', 'Foo'],
+    ['NotRequired[Foo]', 'Foo'],
+    ['Option<Foo>', 'Foo'],
+    ['Nullable<Foo>', 'Foo'],
+    ['T.nilable(Foo)', 'Foo'],
+    ['Union[Foo, None]', 'Foo'],
+    ['null|Foo', 'Foo'],
+    // an array's element, optional or not
+    ['Foo[] | undefined', 'Foo'],
+    ['(Foo | null)[]', 'Foo'],
+    ['Foo?[]', 'Foo'],
+    ['?Foo[]', 'Foo'],
+    // PHP's namespace
+    ['\\Acme\\Foo', 'Foo'],
+    ['?\\Acme\\Models\\Foo', 'Foo'],
+  ])('%j names %j', (text, name) => {
+    expect(soleTypeName(text)).toBe(name);
+    // ... and `bareTypeName` reads the same name there.
+    expect(bareTypeName(text)).toBe(name);
+  });
+
+  it.each([
+    // a generic's argument: `bareTypeName` reads `Foo`, this does not
+    ['Promise<Foo>'],
+    ['List<Foo>'],
+    ['Array<Foo>'],
+    ['list[Foo]'],
+    ['Iterator[Foo]'],
+    ['Vec<Foo>'],
+    ['Option<Vec<Foo>>'],
+    ['Promise<Foo> | undefined'],
+    ['Promise<Foo | undefined>'],
+    ['List<Foo>?'],
+    // what names no single type in either reader
+    ['Foo | Bar'],
+    ['Foo | Bar | null'],
+    ['Record<string, Foo>'],
+    ['Foo[][]'],
+    ['{ body: Foo; }'],
+    ['() => Foo'],
+    ['[Foo, Bar]'],
+    ['"Foo"'],
+    ['models.Foo'],
+    ['crate::models::Foo'],
+    ['[]Foo'],
+    ['[Foo]'],
+    ['Foo.t()'],
+    ['\\Acme\\Foo|\\Acme\\Bar'],
+    ['readonly Foo[]'],
+    [''],
+    ['?'],
+    ['[]'],
+    ['Foo<'],
+  ])('%j names no type', (text) => {
+    expect(soleTypeName(text)).toBeUndefined();
+  });
+
+  it('reads a text that is nothing but absence as `bareTypeName` does: a name no type has', () => {
+    expect(soleTypeName('null')).toBe('null');
+    expect(soleTypeName('null | undefined')).toBeUndefined();
+  });
+
+  it('refuses the PHP union `bareTypeName` reads as its last member', () => {
+    expect(bareTypeName('\\Acme\\Other|\\Acme\\Foo')).toBe('Foo');
+    expect(soleTypeName('\\Acme\\Other|\\Acme\\Foo')).toBeUndefined();
+  });
+});
+
+describe('singleArgumentGeneric (#752)', () => {
+  it.each<[string, string, string]>([
+    ['Promise<Foo>', 'Promise', 'Foo'],
+    ['  Promise<Foo>  ', 'Promise', 'Foo'],
+    ['Promise<Foo | null>', 'Promise', 'Foo | null'],
+    ['Promise<Foo[]>', 'Promise', 'Foo[]'],
+    ['Promise<Set<Foo>>', 'Promise', 'Set<Foo>'],
+    ['Promise<{ a: A; b: B; }>', 'Promise', '{ a: A; b: B; }'],
+    ['Promise<[A, B]>', 'Promise', '[A, B]'],
+    ['Promise<Record<string, Foo>>', 'Promise', 'Record<string, Foo>'],
+    ['Promise<(a: A, b: B) => void>', 'Promise', '(a: A, b: B) => void'],
+    ['Promise<"a,b">', 'Promise', '"a,b"'],
+    ['Sequence[Foo]', 'Sequence', 'Foo'],
+    ['typing.Sequence[Foo | None]', 'typing.Sequence', 'Foo | None'],
+    ['Optional[Foo]', 'Optional', 'Foo'],
+  ])('%j is %j around %j', (text, generic, argument) => {
+    expect(singleArgumentGeneric(text)).toEqual({ generic, argument });
+  });
+
+  it.each([
+    ['Foo'],
+    ['Foo[]'],
+    ['Promise<Foo>[]'],
+    ['Promise<Foo> | null'],
+    ['Promise<A> | Promise<B>'],
+    ['Promise<A> & Extra<B>'],
+    ['Record<string, Foo>'],
+    ['Map<K, V>'],
+    ['Promise<>'],
+    ['Promise< >'],
+    ['Promise<Foo'],
+    ['Promise<Foo>>'],
+    ['<Foo>'],
+    ['[Foo]'],
+    ['{ a: Promise<Foo>; }'],
+    ['() => Promise<Foo>'],
+    ['?Promise<Foo>'],
+    [''],
+  ])('%j is not one generic around one argument', (text) => {
+    expect(singleArgumentGeneric(text)).toBeUndefined();
+  });
+
+  it('reads the generic `genericWrapperOf` (#750) reads, where that one reads any', () => {
+    for (const text of ['Promise<Foo>', 'models.Page[Foo]', 'List<Foo>', 'Iterator[*Foo]']) {
+      expect(singleArgumentGeneric(text)?.generic).toBe(genericWrapperOf(text));
+    }
+    // That reader looks through an optional spelling and an array to find
+    // its generic; this one takes a text that is the generic itself.
+    expect(genericWrapperOf('Promise<Foo>[]')).toBe('Promise');
+    expect(genericWrapperOf('Promise<Foo[]>')).toBeUndefined();
+    expect(singleArgumentGeneric('Promise<Foo[]>')).toEqual({ generic: 'Promise', argument: 'Foo[]' });
+  });
+});
+
+describe('objectTypeMembers (#752)', () => {
+  const members = (text: string) => {
+    const read = objectTypeMembers(text);
+    return (
+      read &&
+      Object.fromEntries([...read].map(([name, member]) => [name, `${member.optional ? '?' : ''}${member.type}`]))
+    );
+  };
+
+  it.each<[string, Record<string, string>]>([
+    // as TypeScript prints an object type
+    ['{ id: string; name?: string | undefined; }', { id: 'string', name: '?string | undefined' }],
+    ['{ id: string }', { id: 'string' }],
+    ['{id:string;name?:number}', { id: 'string', name: '?number' }],
+    ['  { id: string; }  ', { id: 'string' }],
+    ['{}', {}],
+    ['{ }', {}],
+    ['{ readonly id: string; readonly name?: string; }', { id: 'string', name: '?string' }],
+    ['{ "content-type"?: string; \'x-id\': number; }', { 'content-type': '?string', 'x-id': 'number' }],
+    ['{ 0: string; 1?: number; }', { 0: 'string', 1: '?number' }],
+    ['{ $ref: string; _id: string; }', { $ref: 'string', _id: 'string' }],
+    // a member's type is whatever follows its colon
+    ['{ filter?: { name?: string; tag: string; }; }', { filter: '?{ name?: string; tag: string; }' }],
+    ['{ done: (error: Error | null) => void; }', { done: '(error: Error | null) => void' }],
+    ['{ pick: Record<string, { a: A; }>; ids: string[]; }', { pick: 'Record<string, { a: A; }>', ids: 'string[]' }],
+    ['{ kind: "a;b" | "c:d"; }', { kind: '"a;b" | "c:d"' }],
+    ['{ which: T extends string ? A : B; }', { which: 'T extends string ? A : B' }],
+    ['{ order: "asc" | "desc"; }', { order: '"asc" | "desc"' }],
+  ])('%j', (text, expected) => {
+    expect(members(text)).toEqual(expected);
+  });
+
+  it.each([
+    // not an object type in braces
+    ['RequestOptions'],
+    ['string'],
+    ['{ id: string; }[]'],
+    ['{ id: string; } | undefined'],
+    ['{ id: string; } & Extra'],
+    ['[{ id: string; }]'],
+    [''],
+    ['{ id: string;'],
+    ['{ id: string; }}'],
+    // a member that is not a name and a type
+    ['{ [key: string]: unknown; }'],
+    ['{ id: string; [key: string]: unknown; }'],
+    ['{ readonly [key: string]: string; }'],
+    ['{ [K in Keys]?: string; }'],
+    ['{ (attempt: number): void; }'],
+    ['{ new (attempt: number): Retry; }'],
+    ['{ retry(attempt: number): void; }'],
+    ['{ retry?(attempt: number): void; }'],
+    ['{ get id(): string; }'],
+    ['{ [Symbol.iterator]: () => Iterator<string>; }'],
+    ['{ id; }'],
+    ['{ id: ; }'],
+    ['{ : string; }'],
+    ['{ a b: string; }'],
+    ['{ "id: string; }'],
+    // a name written twice
+    ['{ id: string; id: number; }'],
+    ['{ id: string; "id": number; }'],
+    // a type TypeScript cut short
+    ['{ a: string; b: string; ... 12 more ...; z: string; }'],
+  ])('%j says nothing', (text) => {
+    expect(members(text)).toBeUndefined();
   });
 });
