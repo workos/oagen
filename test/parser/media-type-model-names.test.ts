@@ -495,7 +495,7 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
         'webhook-modified noteAdded',
       ],
     ])(
-      'a case edit to one of two case-only keys swaps their models on a %s: breaking for the two models (the bodies themselves keep their fields, additive since #753)',
+      'a case edit to one of two case-only keys swaps their models on a %s: breaking',
       async (_, build, bare, stepped, site) => {
         const before = build([
           ['application/yaml', 'title'],
@@ -518,7 +518,7 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
         expect(await diff(before, after)).toEqual([
           `breaking model-modified ${bare}`,
           `breaking model-modified ${stepped}`,
-          `additive ${site}`,
+          `breaking ${site}`,
         ]);
       },
     );
@@ -544,11 +544,10 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
         [utf8]: 'ListNotesApplicationYamlCharsetResponse { title }',
         'application/yaml; charset=windows-1252': 'ListNotesApplicationYamlCharsetResponse200 { summary }',
       });
-      // The two models are breaking; each body kept its fields under the other name, additive since #753.
       expect(await diff(before, after)).toEqual([
         'breaking model-modified ListNotesApplicationYamlCharsetResponse',
         'breaking model-modified ListNotesApplicationYamlCharsetResponse200',
-        'additive operation-modified listNotes',
+        'breaking operation-modified listNotes',
       ]);
     });
 
@@ -569,11 +568,10 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
         'application/yaml; a=1; b=2': 'ListNotesApplicationYamlA1B2Response { summary }',
         'application/yaml; b=2; a=1': 'ListNotesApplicationYamlA1B2Response200 { title }',
       });
-      // The two models are breaking; each body kept its fields under the other name, additive since #753.
       expect(await diff(before, after)).toEqual([
         'breaking model-modified ListNotesApplicationYamlA1B2Response',
         'breaking model-modified ListNotesApplicationYamlA1B2Response200',
-        'additive operation-modified listNotes',
+        'breaking operation-modified listNotes',
       ]);
     });
 

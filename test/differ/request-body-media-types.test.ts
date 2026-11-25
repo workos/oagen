@@ -382,7 +382,7 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
     });
   });
 
-  it('reports a form body moved to an identical component both documents declare as retyped (issue #390 review; additive since #753)', async () => {
+  it('reports a form body moved to an identical component both documents declare as retyped, breaking (issue #390 review)', async () => {
     const note = { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } };
     /** The JSON body on `Note` beside a form body on `form`, with `Note` and an identical `NoteCopy` declared. */
     const notes = (form: string) => ({
@@ -403,9 +403,9 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
         removed: [],
         retyped: ['application/x-www-form-urlencoded'],
         reparameterized: [],
-        classification: 'additive',
+        classification: 'breaking',
       },
-      classification: 'additive',
+      classification: 'breaking',
     });
   });
 });
@@ -489,7 +489,7 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
     });
   });
 
-  it('reports a payload moved to another model of its shape that both documents declare as retyped (issue #390; additive since #753)', () => {
+  it('reports a payload moved to another model of its shape that both documents declare as retyped, breaking (issue #390)', () => {
     const both = (noteModel: string): ApiSpec => ({
       ...spec(noteModel, note(noteModel)),
       models: [adoptionEvent, note('OldNote'), note('NewNote')],
@@ -499,9 +499,9 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
     expect(changes[0]).toMatchObject({
       kind: 'webhook-modified',
       requestBodyChanged: true,
-      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'additive' },
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
       details: 'payload media type text/plain retyped',
-      classification: 'additive',
+      classification: 'breaking',
     });
   });
 });

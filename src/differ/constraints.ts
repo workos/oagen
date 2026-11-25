@@ -1,6 +1,6 @@
 import type { Constraints, TypeRef } from '../ir/types.js';
 import { assertNever, typeRefConstraints } from '../ir/types.js';
-import { addedUnionVariants, sameCompositionKinds, typeRefsEqual } from './models.js';
+import { addedUnionVariants, typeRefsEqual } from './models.js';
 
 /**
  * A site whose validation keywords the differ compares (#599): a field or a
@@ -43,29 +43,17 @@ export interface ConstraintsShift {
 
 /**
  * How two unions' variants are paired when their limits are compared.
- *
  * `byType` is `pairVariants`: for two unions the differ reads as one type,
- * whose variants of one type may have changed places. It is what every
- * comparison of the differ's own uses.
- *
- * The other two are for two unions a caller has already matched variant by
- * variant under other names: `compatibleShape` reads `array<Child>` and
- * `array<ChildCopy>` as one shape when the two models are, which
- * `pairVariants`, matching by name, leaves unpaired, so a limit tightened
- * on that variant went unread (Greptile, #758 review round 1). `inOrder`
- * pairs every variant by position. `byTypeThenOrder` pairs by type the
- * variants `pairVariants` can pair and by position the rest
- * (`pairedByTypeThenOrder`). Each pairs every old variant with one new
- * variant of its shape, so either one finding no level tightened shows
- * that the new union admits every value the old one did; neither is the
- * better reading everywhere, so a caller that needs "may a value now be
- * rejected" asks both. In order reads two variants of one type that
- * changed places with their limits (`[{ pattern }, string]` become
- * `[string, { pattern }]`) as a `pattern` added (round 2); by type reads
- * `[Child[] ≤ 10, ChildCopy[] ≤ 5]` become `[ChildCopy[] ≤ 10, Child[] ≤
- * 5]` as the `Child[]` variant tightened.
+ * whose variants of one type may have changed places; every comparison of
+ * the differ's own uses it. `inOrder` pairs them by position: for two
+ * unions a caller has already put in step, variant by variant —
+ * `compatibleShape` reads `array<Child>` and `array<ChildCopy>` as one
+ * shape when the two models are, which `pairVariants`, matching by name,
+ * leaves unpaired, so a limit tightened on that variant went unread
+ * (Greptile, #758 review round 1), and it decides itself, by shape, which
+ * variant is which (`inStep` in `shapes.ts`).
  */
-export type VariantPairing = 'byType' | 'inOrder' | 'byTypeThenOrder';
+export type VariantPairing = 'byType' | 'inOrder';
 
 /** The two sides of `shift` alone, each present when the site declares limits there, to spread onto the entry that reports it. */
 export function constraintsSides(shift: ConstraintsShift): Pick<ConstraintsShift, 'oldConstraints' | 'newConstraints'> {
@@ -361,9 +349,9 @@ function typeLevels(
  * The levels under two types of one kind that differ, each path prefixed
  * with `path` and the child's key: an array's `items.`, a map's
  * `valueType.`, a union's `variants[i].` for each new variant paired with
- * an old one, `i` the new variant's index, as `pairing` pairs them
- * (`VariantPairing`). Two types of different kinds, or two leaves, have no
- * children to compare.
+ * an old one, `i` the new variant's index — by `pairVariants`, or by
+ * position when `pairing` is `inOrder`. Two types of different kinds, or
+ * two leaves, have no children to compare.
  */
 function childLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo, pairing: VariantPairing): LevelShift[] {
   const [x, y] = [unwrap(a), unwrap(b)];
@@ -372,12 +360,10 @@ function childLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo, pairi
     return typeLevels(`${path}valueType.`, x.valueType, y.valueType, memo, pairing);
   }
   if (x.kind === 'union' && y.kind === 'union') {
-    const pairs =
-      pairing === 'byType'
-        ? [...pairVariants(x.variants, y.variants, memo)]
-        : pairing === 'inOrder'
-          ? pairedInOrder(x.variants, y.variants)
-          : pairedByTypeThenOrder(x.variants, y.variants, memo);
+    const pairs: Array<[number, TypeRef]> =
+      pairing === 'inOrder'
+        ? x.variants.slice(0, y.variants.length).map((old, i) => [i, old])
+        : [...pairVariants(x.variants, y.variants, memo)];
     return pairs.flatMap(([i, old]) => typeLevels(`${path}variants[${i}].`, old, y.variants[i], memo, pairing));
   }
   return [];
@@ -733,17 +719,7 @@ export function pairVariants(
   newVariants: readonly TypeRef[],
   memo: PairMemo = new WeakMap(),
 ): Map<number, TypeRef> {
-  return new Map([...pairedByType(oldVariants, newVariants, memo, 'byType')].map(([i, k]) => [i, oldVariants[k]]));
-}
-
-/** `pairVariants` by index: the old variant's index for each new variant's that pairs, in the new variants' order. `pairing` is the comparison's own, which the levels it reads are memoized under. */
-function pairedByType(
-  oldVariants: readonly TypeRef[],
-  newVariants: readonly TypeRef[],
-  memo: PairMemo,
-  pairing: VariantPairing,
-): Map<number, number> {
-  const pairs = new Map<number, number>();
+  const pairs = new Map<number, TypeRef>();
   const taken = new Set<number>();
   const sameType = (old: TypeRef, variant: TypeRef): boolean =>
     typeRefsEqual(old, variant) || addedUnionVariants(old, variant) !== undefined;
@@ -753,47 +729,11 @@ function pairedByType(
     const j = candidates[i].find((k) => !taken.has(k) && accept(oldVariants[k]));
     if (j === undefined) return;
     taken.add(j);
-    pairs.set(i, j);
+    pairs.set(i, oldVariants[j]);
   };
-  newVariants.forEach((variant, i) => claim(i, (old) => typeLevels('', old, variant, memo, pairing).length === 0));
+  newVariants.forEach((variant, i) => claim(i, (old) => typeLevels('', old, variant, memo).length === 0));
   newVariants.forEach((_, i) => {
     if (!pairs.has(i)) claim(i, () => true);
   });
   return new Map([...pairs].sort(([a], [b]) => a - b));
-}
-
-/** Each new variant with the old variant in its place (`VariantPairing`'s `inOrder`). */
-function pairedInOrder(oldVariants: readonly TypeRef[], newVariants: readonly TypeRef[]): Array<[number, TypeRef]> {
-  return oldVariants.slice(0, newVariants.length).map((old, i) => [i, old]);
-}
-
-/**
- * `VariantPairing`'s `byTypeThenOrder`: the variants `pairVariants` pairs
- * keep that pairing, so two of one type that changed places with their
- * limits are still each other's, and every other new variant — one under
- * another name, which the caller matched by position — takes the old
- * variant in its place. The whole union falls back to `pairedInOrder`
- * when that would not pair each old variant once with a variant of its
- * shape: the old variant in a place is already taken, there is none, or
- * two paired by type differ in a composition keyword, which
- * `typeRefsEqual` passes over and the caller compared in order.
- */
-function pairedByTypeThenOrder(
-  oldVariants: readonly TypeRef[],
-  newVariants: readonly TypeRef[],
-  memo: PairMemo,
-): Array<[number, TypeRef]> {
-  const byType = pairedByType(oldVariants, newVariants, memo, 'byTypeThenOrder');
-  const taken = new Set(byType.values());
-  const pairs: Array<[number, TypeRef]> = [];
-  for (const [i, variant] of newVariants.entries()) {
-    const k = byType.get(i);
-    if (k !== undefined) {
-      if (!sameCompositionKinds(oldVariants[k], variant)) return pairedInOrder(oldVariants, newVariants);
-    } else if (i >= oldVariants.length || taken.has(i)) {
-      return pairedInOrder(oldVariants, newVariants);
-    }
-    pairs.push([i, oldVariants[k ?? i]]);
-  }
-  return pairs;
 }

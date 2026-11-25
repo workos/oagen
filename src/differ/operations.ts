@@ -281,7 +281,7 @@ export function diffOperations(
       // that only gained variants: callers may send the new variant but need
       // not, as for a named union's `variant-added` (`addedUnionVariants`,
       // #428). And a body moved to a type that accepts every body built for
-      // the old one — a model with every old field, each of the same type,
+      // the old one — a new model with every old field, each of the same type,
       // that requires nothing more (`compatibleShape` for the writer, #753).
       // An absent flag reads as optional, as it does in OpenAPI.
       const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
@@ -295,7 +295,7 @@ export function diffOperations(
       // from the other side. A response written as an inline union that only
       // gained variants, which a reader may now receive as it may a new enum
       // value (#428). And a response moved to a type that gives a reader
-      // everything it read — a model with every old field, each of the same
+      // everything it read — a new model with every old field, each of the same
       // type and required wherever it was (`compatibleShape` for the reader,
       // #753). Gaining or losing the only 2xx/3xx is breaking whatever the
       // body.
@@ -967,7 +967,7 @@ function classifyFallbackResponsesChange(
  * breaking (it loses one), and a shared key whose body type changed is
  * breaking — a body gained or lost included — unless the new type gives a
  * reader everything it read from the old one (`compatibleShape` through
- * `shapes`: a model with every old field, each of the same type and
+ * `shapes`: a new model with every old field, each of the same type and
  * required wherever it was; #753), which is a change still, and additive. A
  * key with no body on either side is unchanged.
  */

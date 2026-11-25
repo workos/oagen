@@ -6,15 +6,16 @@
  * `ErrorBody`, `ErrorBody[]`, `Promise<ErrorBody>`, `ErrorBody | undefined`,
  * `?ErrorBody`, `*ErrorBody`. The differ's fork and rename rules ask which
  * declared type such a text names, and `bareTypeName` is the one place that
- * answers. `typeNamesIn` reads every name a text mentions, for following a
- * type to the types it is built from, and `supertypeName` reads a declared
- * supertype's entry. Three more read a parameter's type, to ask whether its
- * new text accepts every value of its old one: `unionMembers` takes a union
- * apart, `objectTypeMembers` an object type written in place, and
- * `soleTypeName` reads the name of a text that is one declared type and
- * nothing a caller would have to wrap a value in. All six read text only:
- * they take no language and no snapshot, so the same text reads the same
- * whichever extractor wrote it.
+ * answers; `genericWrapperOf` says which generic it read the name through.
+ * `typeNamesIn` reads every name a text mentions, for following a type to the
+ * types it is built from, and `supertypeName` reads a declared supertype's
+ * entry. Three more read a parameter's type, to ask whether its new text
+ * accepts every value of its old one: `unionMembers` takes a union apart,
+ * `objectTypeMembers` an object type written in place, and `soleTypeName`
+ * reads the name of a text that is one declared type and nothing a caller
+ * would have to wrap a value in. All of them read text only: they take no
+ * language and no snapshot, so the same text reads the same whichever
+ * extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -31,6 +32,43 @@ const OPTIONAL_WRAPPERS = new Set(['Optional', 'Option', 'Nullable', 'NotRequire
 
 /** Python's `Union[X, None]`: a union spelled as a wrapper. */
 const UNION_WRAPPER = 'Union';
+
+/**
+ * Generics that hold values of their argument for the caller to read: the
+ * promise of one (`Promise<X>`, `Awaitable[X]`) and a collection of them
+ * (`list[X]`, `Sequence[X]`, `Iterable<X>`, `Set<X>`), which is to its
+ * argument what an array (`X[]`) is to its element. Compared with the last
+ * segment of the generic's name (`typing.Sequence[X]`).
+ *
+ * A closed list, because nothing in a type text says how a generic uses its
+ * argument: `Sink<X>`, `Observer<X>` and `Comparator<X>` take an `X` where
+ * these hand one back. The names are TypeScript's and Python's, the
+ * languages with generics whose surfaces record a supertype for the differ
+ * to credit (see `handsBackItsArgument`).
+ */
+const VALUE_HOLDERS = new Set([
+  'Promise',
+  'PromiseLike',
+  'Awaitable',
+  'Array',
+  'ReadonlyArray',
+  'Set',
+  'ReadonlySet',
+  'Iterable',
+  'Iterator',
+  'IterableIterator',
+  'AsyncIterable',
+  'AsyncIterator',
+  'AsyncIterableIterator',
+  'list',
+  'List',
+  'Sequence',
+  'Collection',
+  'set',
+  'frozenset',
+  'FrozenSet',
+  'AbstractSet',
+]);
 
 const CLOSING_BRACKET = new Map([
   ['(', ')'],
@@ -92,6 +130,40 @@ export function bareTypeName(typeText: string): string {
     }
   }
   return text;
+}
+
+/**
+ * The generic `bareTypeName` reads a text's name through, when it reads it
+ * through one: `Promise` for `Promise<Foo>` and for `Promise<Foo | null>[]`,
+ * `models.Page` for `models.Page[Foo]`. Undefined when the name stands with no
+ * generic around it (`Foo`, `Foo[]`, `Foo | null`, and `Optional[Foo]`, which
+ * is an optional spelling) and when the text names no single type.
+ *
+ * It takes the steps `bareTypeName` takes, so the two agree on which texts
+ * have a wrapper: one generic, around one argument that is a plain name.
+ */
+export function genericWrapperOf(typeText: string): string | undefined {
+  let text = presentType(typeText.trim());
+  if (text.endsWith('[]')) text = presentType(text.slice(0, -2));
+  if (text.startsWith('\\')) text = text.slice(text.lastIndexOf('\\') + 1);
+  const argument = (ANGLE_GENERIC.exec(text) ?? SQUARE_GENERIC.exec(text))?.[1];
+  if (argument === undefined || splitTopLevel(argument, ',')?.length !== 1) return undefined;
+  if (!GENERIC_ARGUMENT_NAME.test(presentType(argument).trim())) return undefined;
+  return text.slice(0, text.length - argument.length - 2);
+}
+
+/**
+ * Whether a generic of this name (as `genericWrapperOf` returns it) is known
+ * to hand its argument back and never take it: a promise or a collection
+ * (`VALUE_HOLDERS`). A value read out of `Promise<Sub>` is still a `Base`; a
+ * `Sink<Sub>` no longer accepts one, and a generic that is not on the list
+ * may be either.
+ */
+export function handsBackItsArgument(genericName: string): boolean {
+  const name = genericName.trim();
+  return VALUE_HOLDERS.has(
+    name.slice(Math.max(name.lastIndexOf('.'), name.lastIndexOf(':'), name.lastIndexOf('\\')) + 1),
+  );
 }
 
 /** A name as a type text writes it, alone or under a module path:

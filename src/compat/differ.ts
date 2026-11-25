@@ -19,7 +19,7 @@ import {
   summarizeChanges,
 } from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
-import { bareTypeName } from './type-names.js';
+import { bareTypeName, genericWrapperOf, handsBackItsArgument, typeNamesIn } from './type-names.js';
 import { declaredTypes, declaresSupertype, inputTypes, isObjectAlias, isRecordedByNameOnly } from './type-graph.js';
 import type { DeclaredTypes } from './type-graph.js';
 import { acceptsEveryValue } from './parameter-types.js';
@@ -49,9 +49,14 @@ export interface SnapshotDiffContext {
   /**
    * The baseline SDK's whole snapshot, when `baseline` is a part of it (the
    * symbols a spec derives, as `oagen verify` scopes it). The scoped part is
-   * still what is compared; the whole one says which types the SDK's callers
-   * build and which fields the SDK already has, so a field the scope left out
-   * of the baseline is not taken for one the candidate added as required.
+   * still what is compared, and a type it leaves out stays outside the
+   * check. The whole one says which of the compared types the SDK's callers
+   * build (a method the scope leaves out still takes its options) and which
+   * fields the SDK already has, so a field the scope left out of the baseline
+   * is not taken for one the candidate added as required. It also says what
+   * the old type of a compared method's parameter takes: a retyped parameter
+   * is weighed against that type as the SDK declares it, the fields the
+   * scope leaves out included, since callers pass those as well.
    */
   unscopedBaseline?: CompatSnapshot;
 }
@@ -76,9 +81,10 @@ export function diffSnapshots(
   // method now accepts) has no caller yet that a new required field breaks.
   const baselineTypes = declaredTypes(recordedBaseline);
   const candidateTypes = declaredTypes(recordedCandidate);
-  const callersBaseline = context?.unscopedBaseline ?? recordedBaseline;
-  const callersTypes = context?.unscopedBaseline ? declaredTypes(callersBaseline) : baselineTypes;
-  const takenBy = inputTypes(callersBaseline, callersTypes);
+  // The types of the baseline SDK as a whole, where the compared baseline is
+  // a part of it.
+  const wholeBaselineTypes = context?.unscopedBaseline ? declaredTypes(context.unscopedBaseline) : baselineTypes;
+  const takenBy = inputTypes(context?.unscopedBaseline ?? recordedBaseline, wholeBaselineTypes);
   // The fields the SDK has today, where the compared baseline is a part of it.
   const fieldsOutOfScope = context?.unscopedBaseline
     ? new Set(context.unscopedBaseline.symbols.map((sym) => sym.fqName))
@@ -122,16 +128,15 @@ export function diffSnapshots(
   // Asked of a field the baseline lacks and of one it records as optional;
   // a snapshot that does not record a field's optionality (an older one, an
   // extractor that cannot tell) never has `optional: false` or `true`, so it
-  // neither raises nor answers the question. Nor does a baseline that
-  // records the owning type by name only: what it does not list, it does not
-  // say was missing.
-  const requiredOfCallers = (field: CompatSymbol, owner: string | undefined): string | undefined =>
-    field.kind === 'field' &&
-    field.optional === false &&
-    owner !== undefined &&
-    !isRecordedByNameOnly(callersTypes.get(owner))
-      ? takenBy.get(owner)
-      : undefined;
+  // neither raises nor answers the question. Nor does a compared baseline
+  // that lacks the owning type (a type that is new, or one the scope leaves
+  // out, whose fields are outside the check whoever takes it) or records it
+  // by name only: what it does not list, it does not say was missing.
+  const requiredOfCallers = (field: CompatSymbol, owner: string | undefined): string | undefined => {
+    if (field.kind !== 'field' || field.optional !== false || owner === undefined) return undefined;
+    const compared = baselineTypes.get(owner);
+    return compared !== undefined && !isRecordedByNameOnly(compared) ? takenBy.get(owner) : undefined;
+  };
 
   // Compare each baseline symbol against candidate
   for (const baseSym of baseline.symbols) {
@@ -199,10 +204,11 @@ export function diffSnapshots(
   // callers pass today. It reads the two type texts and what the snapshots
   // record about the types they name, and nothing of the renames above: a
   // parameter's old and new type are not a rename the other passes may use.
-  // The old type is the whole baseline's, as the types callers build are.
+  // The old type is read from the whole baseline: a field the scope leaves
+  // out of the comparison is still one callers pass.
   creditAcceptedParameterTypes(changes, {
     structural: (effectivePolicy as Partial<CompatPolicyHints> | null | undefined)?.parameterTypesAreStructural,
-    baselineTypes: callersTypes,
+    baselineTypes: wholeBaselineTypes,
     candidateTypes,
   });
 
@@ -696,19 +702,30 @@ function cascadeRenameDowngrades(
    * around the name is not: `ErrorBody` → `DetailedErrorBody[]` hands the
    * caller a list, `ErrorBody` → `DetailedErrorBody | undefined` a value that
    * may be missing.
+   *
+   * Nor is one under a generic that may take its argument. `Sink<ErrorBody>`
+   * → `Sink<DetailedErrorBody>` narrows what `Sink<T>.accept(value: T)`
+   * takes, and neither a type text nor the snapshot says how a generic uses
+   * its argument. So the name is read through a generic only when it is one
+   * known to hand its argument back, a promise or a collection
+   * (`handsBackItsArgument`), and the SDK declares no type of that name: a
+   * `Sequence<T>` of its own is as unknown as its `Sink<T>`.
    */
   const narrowsToDeclaredSubtype = (
     oldText: string | undefined,
     newText: string | undefined,
     oldT: string,
     newT: string,
-  ): boolean =>
-    oldText !== undefined &&
-    newText !== undefined &&
-    oldT !== '' &&
-    newT !== '' &&
-    oldText.split(oldT).join('\0') === newText.split(newT).join('\0') &&
-    declaresSupertype(candidateTypes, newT, oldT);
+  ): boolean => {
+    if (oldText === undefined || newText === undefined || oldT === '' || newT === '') return false;
+    if (oldText.split(oldT).join('\0') !== newText.split(newT).join('\0')) return false;
+    const generic = genericWrapperOf(newText);
+    if (generic !== undefined) {
+      if (!handsBackItsArgument(generic)) return false;
+      if (typeNamesIn(generic).some((name) => candidateTypes.has(name))) return false;
+    }
+    return declaresSupertype(candidateTypes, newT, oldT);
+  };
 
   for (const change of changes) {
     if (change.severity !== 'breaking') continue;

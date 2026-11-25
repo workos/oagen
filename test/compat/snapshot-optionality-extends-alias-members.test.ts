@@ -1359,6 +1359,114 @@ export declare class Holder% { ${inNew(side, after, before)}; }
     for (const [name, { expected, actual }] of Object.entries(cases)) expect(actual, name).toEqual(expected);
   });
 
+  it('keeps its severity under a generic the SDK declares', async () => {
+    const under = (name: string, declarations: string, member: string, expected: string[]): NodeCase => ({
+      name,
+      source: (side) => `export interface ErrorBody% { message: string }
+export interface Detailed% extends ErrorBody% { details: string }
+${declarations}
+export declare class Holder% { ${member.replaceAll('T', inNew(side, 'Detailed%', 'ErrorBody%'))}; }
+`,
+      expected,
+    });
+    const RETURN = (severity: string) => [`${severity} return_type_changed Holder%.last`];
+    const cases = await nodeCases([
+      // `Sink<T>.accept` takes a `T`: a caller that passed an `ErrorBody` no longer can.
+      under(
+        'a generic that takes its argument',
+        'export interface Sink%<T> { accept: (value: T) => void }',
+        'last(): Sink%<T>',
+        RETURN('breaking'),
+      ),
+      under(
+        'on a field',
+        'export interface Sink%<T> { accept: (value: T) => void }',
+        'body: Sink%<T>',
+        BODY('breaking'),
+      ),
+      // The snapshot does not say how a generic uses its argument, so one that only hands it out is not told apart.
+      under(
+        'a generic that hands its argument out',
+        'export interface Page%<T> { data: T[] }',
+        'last(): Page%<T>',
+        RETURN('breaking'),
+      ),
+      under('a generic alias', 'export type Box%<T> = { value: T };', 'last(): Box%<T>', RETURN('breaking')),
+      under(
+        'a generic class',
+        'export declare class Cell%<T> { value: T; set(value: T): void }',
+        'last(): Cell%<T>',
+        RETURN('breaking'),
+      ),
+      under(
+        'an optional one',
+        'export interface Page%<T> { data: T[] }',
+        'last(): Page%<T> | undefined',
+        RETURN('breaking'),
+      ),
+      // Nor is a generic the snapshot knows nothing of: this one is not exported.
+      under(
+        'a generic that is not declared',
+        'interface Hidden%<T> { accept(value: T): void }',
+        'last(): Hidden%<T>',
+        RETURN('breaking'),
+      ),
+      under('a library generic that takes its argument', '', 'last(): WritableStream<T>', RETURN('breaking')),
+      // A promise or a collection hands its argument back, as an array does.
+      under('Promise', '', 'last(): Promise<T>', RETURN('soft-risk')),
+      under('PromiseLike', '', 'last(): PromiseLike<T>', RETURN('soft-risk')),
+      under('Set', '', 'last(): Set<T>', RETURN('soft-risk')),
+      under('AsyncIterable', '', 'last(): AsyncIterable<T>', RETURN('soft-risk')),
+      // Unless the SDK declares a type of that name itself.
+      under(
+        'a Sequence the SDK declares',
+        'export interface Sequence<T> { push(value: T): void }',
+        'last(): Sequence<T>',
+        RETURN('breaking'),
+      ),
+      under('Iterable', '', 'body: Iterable<T>', BODY('soft-risk')),
+      under('Array', '', 'body: Array<T>', BODY('soft-risk')),
+    ]);
+    for (const [name, { expected, actual }] of Object.entries(cases)) expect(actual, name).toEqual(expected);
+  });
+
+  it('judges each retype where it stands: the pair is not recorded as a rename', async () => {
+    // One pair of types, retyped in four places. Only the one that is read,
+    // with nothing else changed around the name, is downgraded; it does not
+    // carry the others with it, as a recorded rename of the pair would.
+    const result = await nodeDiff((side) => {
+      const type = inNew(side, 'DetailedErrorBody', 'ErrorBody');
+      return `export interface ErrorBody { message: string }
+export interface DetailedErrorBody extends ErrorBody { details: string }
+export interface Sink<T> { accept: (value: T) => void }
+export declare class Reader { body: ${type}; list: ${inNew(side, 'DetailedErrorBody[]', 'ErrorBody')}; sink(): Sink<${type}>; }
+export interface Options { body: ${type} }
+export interface Counter { count: ${inNew(side, 'number', 'string')} }
+export declare class Client { send(options: Options): Counter; }
+`;
+    });
+    const hint = (remediation: string | undefined) =>
+      remediation === undefined
+        ? 'no hint'
+        : remediation.includes('declared subtype')
+          ? 'declared subtype'
+          : remediation.includes('recorded rename')
+            ? 'recorded rename'
+            : remediation;
+    expect(
+      result.diff.changes.map((change) => [
+        `${change.severity} ${change.category} ${change.symbol}`,
+        hint(change.remediation),
+      ]),
+    ).toEqual([
+      ['breaking return_type_changed Reader.sink', 'no hint'],
+      ['soft-risk field_type_changed Reader.body', 'declared subtype'],
+      ['breaking field_type_changed Reader.list', 'no hint'],
+      ['breaking field_type_changed Counter.count', 'no hint'],
+      ['breaking field_type_changed Options.body', 'no hint'],
+    ]);
+  });
+
   it('is not what a retype to the supertype, or to a sibling, is', async () => {
     const toSupertype = await nodeDiff(
       (side) => `export interface ErrorBody { message: string }
@@ -2231,6 +2339,52 @@ export declare class Pets { createPet(options: CreatePetOptions): Promise<Pet>; 
     const unscoped = await runCompatCheck(baseline, writeSdk(nodeSdk(sdk('; tag: string'))), 'node');
     expect(unscoped.scopedToSpec).toBe(false);
     expect(lines(unscoped.diff)).toEqual(['breaking field_requiredness_increased CreatePetOptions.tag']);
+  });
+
+  it("scopes a type alias's members as it scopes an interface's fields", async () => {
+    // `helper` is a member the spec does not derive, added to the SDK by hand.
+    const models = (helper: string) => `export type Pet = { id: string; name: string${helper} };
+export interface CreatePetOptions { name: string${helper} }
+`;
+    const baseline = await nodeExtractor.extract(writeSdk(nodeSdk(models('; helper?: string'))));
+    const dropped = await runCompatCheck(baseline, writeSdk(nodeSdk(models(''))), 'node', spec);
+    expect(lines(dropped.diff)).toEqual([]);
+    expect(dropped.passed).toBe(true);
+    // Out of scope, the same change is seen on both.
+    const unscoped = await runCompatCheck(baseline, writeSdk(nodeSdk(models(''))), 'node');
+    expect(lines(unscoped.diff)).toEqual([
+      'breaking symbol_removed CreatePetOptions.helper',
+      'breaking symbol_removed Pet.helper',
+    ]);
+    // A member the spec does derive is compared.
+    const derived = await runCompatCheck(
+      baseline,
+      writeSdk(nodeSdk('export type Pet = { id: string };\nexport interface CreatePetOptions { name: string }\n')),
+      'node',
+      spec,
+    );
+    expect(lines(derived.diff)).toEqual(['breaking symbol_removed Pet.name']);
+  });
+
+  it('leaves a type the scope leaves out outside the check, whoever takes it', async () => {
+    // `ManualOptions` and the method that takes it are written by hand: the
+    // spec derives neither, so neither is in the compared baseline.
+    const manual = (extra: string) => `${sdk('')}export interface ManualOptions { reason: string${extra} }
+export declare class Manual { send(options: ManualOptions): Promise<void>; }
+`;
+    const baseline = await nodeExtractor.extract(writeSdk(nodeSdk(manual(''))));
+    const added = await runCompatCheck(baseline, writeSdk(nodeSdk(manual('; urgent: boolean'))), 'node', spec);
+    const about = (name: string) => lines(added.diff).filter((line) => line.split(' ')[2].startsWith(name));
+    // As before: everything about an out-of-scope type reads as an addition.
+    expect(about('ManualOptions')).toEqual([
+      'additive symbol_added ManualOptions',
+      'additive symbol_added ManualOptions.reason',
+      'additive symbol_added ManualOptions.urgent',
+    ]);
+    expect(added.passed).toBe(true);
+    // Compared whole, the type is one the baseline's callers build.
+    const unscoped = await runCompatCheck(baseline, writeSdk(nodeSdk(manual('; urgent: boolean'))), 'node');
+    expect(lines(unscoped.diff)).toEqual(['breaking field_requiredness_increased ManualOptions.urgent']);
   });
 
   it('reads which types are taken from the whole baseline', async () => {
