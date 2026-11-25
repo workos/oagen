@@ -1032,6 +1032,188 @@ describe('#745 a union', () => {
   });
 });
 
+describe('#745 a type list that collapsed, among the variants of another union', () => {
+  // Greptile, #749: a type list that collapses to one type leaves a type
+  // like any other. It was still recorded as a list's variant, and a union
+  // read every variant so recorded as one of its own list's, so a format
+  // beside a `oneOf` of several variants reached it.
+  const uuid = { format: 'uuid' };
+  const integer = { type: 'integer' };
+  const LISTS: Schemas = {
+    Text: string,
+    Flag: { type: 'boolean' },
+    Tag: { type: ['string', 'boolean'] },
+    Collapsed: { type: ['string', 'boolean'], allOf: [string] },
+    CollapsedFlag: { type: ['boolean', 'string'], allOf: [{ type: 'boolean' }] },
+    NullableCollapsed: { type: ['string', 'boolean', 'null'], allOf: [string] },
+    Owner: { type: ['object', 'string'], properties: { name: string } },
+    Holder: {
+      type: 'object',
+      properties: { tag: { type: ['string', 'boolean'] }, collapsed: { type: ['string', 'boolean'], allOf: [string] } },
+    },
+  };
+  /** Each group: the plain spelling of a type first, then spellings that are that type by a type list. */
+  const GROUPS: Record<string, Record<string, unknown>> = {
+    string: {
+      plain: string,
+      'a list a member types': { type: ['string', 'boolean'], allOf: [string] },
+      'the list reversed': { type: ['boolean', 'string'], allOf: [string] },
+      'a list a $ref member types': { type: ['string', 'boolean'], allOf: [ref('Text')] },
+      'a $ref to a collapsed list': ref('Collapsed'),
+      'a list narrowed by the type beside it': { type: 'string', allOf: [ref('Tag')] },
+      'a list narrowed by a member': { allOf: [ref('Tag'), string] },
+      'a member that is a collapsed list': { allOf: [{ type: ['string', 'boolean'], allOf: [string] }] },
+      'a list of one type around a list': { type: ['string'], allOf: [{ type: ['string', 'boolean'] }] },
+    },
+    boolean: {
+      plain: { type: 'boolean' },
+      'a list a member types': { type: ['boolean', 'string'], allOf: [{ type: 'boolean' }] },
+      'a list a $ref member types': { type: ['string', 'boolean'], allOf: [ref('Flag')] },
+      'a $ref to a collapsed list': ref('CollapsedFlag'),
+      'a list narrowed by the type beside it': { type: 'boolean', allOf: [ref('Tag')] },
+    },
+    'nullable string': {
+      plain: { type: ['string', 'null'] },
+      'a list naming null that a member types': { type: ['string', 'boolean', 'null'], allOf: [string] },
+      'a collapsed list under a nullable wrapper': { oneOf: [{ type: ['string', 'boolean'], allOf: [string] }, nil] },
+      'a $ref to a nullable collapsed list': ref('NullableCollapsed'),
+      'a nullable wrapper around a $ref to a collapsed list': { anyOf: [nil, ref('Collapsed')] },
+    },
+  };
+  /** Where a format written around `x` reaches no node: beside a union of several variants, an array or a map. */
+  const NOWHERE: Record<string, (x: unknown) => Schema> = {
+    'beside a oneOf of x and an integer': (x) => ({ oneOf: [x, integer], ...uuid }),
+    'beside a oneOf of an integer and x': (x) => ({ oneOf: [integer, x], ...uuid }),
+    'beside an anyOf of x and an integer': (x) => ({ anyOf: [x, integer], ...uuid }),
+    'beside a nullable oneOf of x and an integer': (x) => ({ oneOf: [x, integer, nil], ...uuid }),
+    'a member beside a oneOf of x and an integer': (x) => ({ allOf: [{ oneOf: [x, integer] }, uuid] }),
+    'a member before an anyOf of an integer and x': (x) => ({ allOf: [uuid, { anyOf: [integer, x] }] }),
+    'beside a oneOf of an array of x and an integer': (x) => ({
+      oneOf: [{ type: 'array', items: x }, integer],
+      ...uuid,
+    }),
+    'beside a oneOf of a map of x and an integer': (x) => ({
+      oneOf: [{ type: 'object', additionalProperties: x }, integer],
+      ...uuid,
+    }),
+    'beside a oneOf that nests a oneOf of x': (x) => ({
+      oneOf: [{ oneOf: [x, { type: 'number' }] }, integer],
+      ...uuid,
+    }),
+    'beside an array of x': (x) => ({ type: 'array', items: x, ...uuid }),
+    'beside a map of x': (x) => ({ type: 'object', additionalProperties: x, ...uuid }),
+  };
+  /** Where a format written around `x` reaches it. */
+  const SOMEWHERE: Record<string, (x: unknown) => Schema> = {
+    'a member beside x': (x) => ({ allOf: [x, uuid] }),
+    'a member before x': (x) => ({ allOf: [uuid, x] }),
+    'beside an allOf of x': (x) => ({ allOf: [x], ...uuid }),
+    'beside a nullable wrapper around x': (x) => ({ oneOf: [x, nil], ...uuid }),
+    'beside a oneOf of x alone': (x) => ({ oneOf: [x], ...uuid }),
+    'x alone': (x) => x as Schema,
+  };
+  const at = async (x: unknown, openapi: Version) =>
+    show(fieldType(await parse(createNote(openapi, { ...LISTS, Note: note(x) }))));
+
+  it("types the finding's document as it types a plain string in its place", async () => {
+    const collapsed = { type: ['string', 'boolean'], allOf: [string] };
+    expect(
+      await table([
+        ['a oneOf of a collapsed list and an integer', { oneOf: [collapsed, integer], ...uuid }],
+        ['the same, of a plain string', { oneOf: [string, integer], ...uuid }],
+        ['the variants reversed', { oneOf: [integer, collapsed], ...uuid }],
+        ['an anyOf', { anyOf: [collapsed, integer], ...uuid }],
+        ['the format in a member beside the oneOf', { allOf: [{ oneOf: [collapsed, integer] }, uuid] }],
+        ['the collapsed list alone, a format beside it', { ...collapsed, ...uuid }],
+        ['the collapsed list, a format in a member beside it', { allOf: [collapsed, uuid] }],
+      ]),
+    ).toMatchInlineSnapshot(`
+      "a oneOf of a collapsed list and an integer: (string | integer)
+      the same, of a plain string: (string | integer)
+      the variants reversed: (integer | string)
+      an anyOf: (string | integer)
+      the format in a member beside the oneOf: (string | integer)
+      the collapsed list alone, a format beside it: string(uuid)
+      the collapsed list, a format in a member beside it: string(uuid)"
+    `);
+  });
+
+  for (const openapi of VERSIONS) {
+    it(`types a list that collapsed as the type it collapsed to, wherever a format is written (OAS ${openapi})`, async () => {
+      for (const [group, { plain, ...spellings }] of Object.entries(GROUPS)) {
+        for (const [context, around] of Object.entries({ ...NOWHERE, ...SOMEWHERE })) {
+          const expected = await at(around(plain), openapi);
+          for (const [name, x] of Object.entries(spellings)) {
+            expect(await at(around(x), openapi), `${group}, ${name}: ${context}`).toBe(expected);
+          }
+        }
+      }
+    });
+
+    it(`gives no variant a format written beside a union of several, an array or a map (OAS ${openapi})`, async () => {
+      const slots: Record<string, unknown> = {
+        ...Object.fromEntries(
+          Object.entries(GROUPS).flatMap(([group, spellings]) =>
+            Object.entries(spellings).map(([name, x]) => [`${group}, ${name}`, x]),
+          ),
+        ),
+        'a type list': { type: ['string', 'boolean'] },
+        'a type list of numbers': { type: ['integer', 'number'] },
+        'a nullable type list': { type: ['string', 'boolean', 'null'] },
+        'a $ref to a type list': ref('Tag'),
+        'a type list naming an array': { type: ['array', 'string'], items: string },
+        'a $ref to a model that admits a string': ref('Owner'),
+        'an inline object that admits a string': { type: ['object', 'string'], properties: { name: string } },
+        'a JSON Pointer to a type list': pointer('Holder/properties/tag'),
+        'a JSON Pointer to a collapsed list': pointer('Holder/properties/collapsed'),
+        'a union of one type list': { oneOf: [{ type: ['string', 'boolean'] }] },
+      };
+      /** `schema` without the format the context wrote: beside it, or as the `{ format }` member of its `allOf`. */
+      const bare = ({ format: _format, ...rest }: Schema): Schema =>
+        Array.isArray(rest.allOf) ? { ...rest, allOf: rest.allOf.filter((member) => member !== uuid) } : rest;
+      for (const [slot, x] of Object.entries(slots)) {
+        for (const [context, around] of Object.entries(NOWHERE)) {
+          expect(await at(around(x), openapi), `${slot}: ${context}`).toBe(await at(bare(around(x)), openapi));
+        }
+      }
+    });
+  }
+
+  it('gives a list that collapses the format it writes itself as its per-type copy keeps it', async () => {
+    // Where the list is written, its one variant is the list's copy of that
+    // type: a `boolean` copy sheds the list's `format`, as it always did.
+    expect(
+      await table(
+        [
+          ['a string, the format beside the list', { type: ['string', 'boolean'], ...uuid, allOf: [ref('Text')] }],
+          ['a string, the format in a member', { type: ['string', 'boolean'], allOf: [ref('Text'), uuid] }],
+          ['a boolean, the format beside the list', { type: ['boolean', 'string'], ...uuid, allOf: [ref('Flag')] }],
+          ['a boolean, the format in a member', { type: ['boolean', 'string'], allOf: [ref('Flag'), uuid] }],
+          [
+            'a nullable boolean, the format beside the list',
+            { type: ['boolean', 'string', 'null'], ...uuid, allOf: [ref('Flag')] },
+          ],
+          [
+            'that boolean list in a member, a format beside it',
+            { allOf: [{ type: ['boolean', 'string'], allOf: [ref('Flag')] }, uuid] },
+          ],
+          ['a boolean, the format beside its type', { type: 'boolean', ...uuid }],
+        ],
+        '3.1.0',
+        { ...FIELD, doc: (x, schemas, v) => createNote(v, { ...LISTS, ...schemas, Note: note(x) }) },
+      ),
+    ).toMatchInlineSnapshot(`
+      "a string, the format beside the list: string(uuid)
+      a string, the format in a member: string(uuid)
+      a boolean, the format beside the list: boolean
+      a boolean, the format in a member: boolean
+      a nullable boolean, the format beside the list: nullable<boolean>
+      that boolean list in a member, a format beside it: boolean(uuid)
+      a boolean, the format beside its type: boolean(uuid)"
+    `);
+  });
+});
+
 describe('#745 a JSON Pointer $ref', () => {
   it('gives the type the pointer settles into the format written around the pointer', async () => {
     const schemas = {

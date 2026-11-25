@@ -22,7 +22,7 @@ import {
   componentUnionDispatches,
   composesOwnChain,
   axisDiscriminatorOf,
-  carryListedVariant,
+  carryTypeListMarks,
   handedPastRef,
   documentComponentSchemas,
   declaredComponentProperty,
@@ -1963,10 +1963,11 @@ function recordInheritedRef(ref: ModelRef, key: string): void {
  * inline enum a bare name to the lift. A copy made here carries every mark
  * its original has: the component mark, the inherited record under the same
  * field, the enum's members and link; a union's mapping is copied with its
- * variants; and a variant of a type list's union the JSON types it stands
- * for (`carryListedVariant`), at any depth, so the copy of such a union
- * takes a `format` on the variants the original would (#745: a JSON
- * Pointer `$ref` settles into a copy of the type it lands on). For a type
+ * variants; and the union of a type list that it is one, with the JSON
+ * types each of its variants stands for (`carryTypeListMarks`), at any
+ * depth, so the copy of such a union takes a `format` on the variants the
+ * original would (#745: a JSON Pointer `$ref` settles into a copy of the
+ * type it lands on). For a type
  * copied to a second owner — a webhook sharing a path item's minting
  * (`extractWebhooks`). A copy made only to be serialized for comparison,
  * after its flags are spelled out (`foldedVariantKey`), needs none of
@@ -1974,11 +1975,11 @@ function recordInheritedRef(ref: ModelRef, key: string): void {
  */
 export function cloneTypeRef(ref: TypeRef): TypeRef {
   const copy = copiedTypeRef(ref);
-  carryListedVariant(ref, copy);
+  carryTypeListMarks(ref, copy);
   return copy;
 }
 
-/** `cloneTypeRef`, less the mark every kind of node may carry (`carryListedVariant`). */
+/** `cloneTypeRef`, less the marks every kind of node may carry (`carryTypeListMarks`). */
 function copiedTypeRef(ref: TypeRef): TypeRef {
   switch (ref.kind) {
     case 'model': {
@@ -2045,15 +2046,15 @@ function copiedTypeRef(ref: TypeRef): TypeRef {
  * written into it. The copy is made as `cloneTypeRef` makes one, so every
  * mark rides along: the nested nodes are the copy's own, and a mark on the
  * copy's root — the component mark, an inherited record, an inline enum's
- * members and link, the JSON types a type list's variant stands for — is
- * set on `target`, which takes the root's place.
+ * members and link, what the root is to a type list — is set on `target`,
+ * which takes the root's place.
  */
 export function replaceTypeRef(target: TypeRef, source: TypeRef): void {
   const copy = cloneTypeRef(source);
   const slot = target as unknown as Record<string, unknown>;
   for (const key of Object.keys(slot)) delete slot[key];
   Object.assign(slot, copy);
-  carryListedVariant(copy, target);
+  carryTypeListMarks(copy, target);
   if (copy.kind === 'model') {
     if (isComponentModelRef(copy)) markComponentModelRef(target as ModelRef);
     const key = inheritedModelRefs.get(copy);
