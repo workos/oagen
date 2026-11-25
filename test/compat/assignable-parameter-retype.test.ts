@@ -534,10 +534,20 @@ retypes('#752 however a TypeScript type is declared', [
   },
   {
     name: 'a shape written in place to a declared type with every member of it',
+    newOnly: 'export interface RequestOptions% { name: string; maxRetries?: number }',
+    old: 'options: { name: string }',
+    new: 'options: RequestOptions%',
+    expected: SOFT_RISK,
+  },
+  {
+    // Printed as `{ timeout?: number | undefined; }`: whether that `undefined`
+    // is TypeScript's or the SDK's (`exactOptionalPropertyTypes`) the text
+    // does not say, and the declared field is recorded without one.
+    name: 'a shape written in place with an optional member, to a declared type',
     newOnly: 'export interface RequestOptions% { timeout?: number; maxRetries?: number }',
     old: 'options: { timeout?: number }',
     new: 'options: RequestOptions%',
-    expected: SOFT_RISK,
+    expected: BREAKING,
   },
   {
     name: 'a destructured parameter',
@@ -960,6 +970,52 @@ retypes('#752 a TypeScript parameter whose old type changes in the same release'
     expected: SOFT_RISK,
   },
 ]);
+
+describe('#752 an optional member that may also be `undefined`', () => {
+  const sdk = (compilerOptions: Record<string, boolean>, source: string): Record<string, string> => ({
+    'tsconfig.json': JSON.stringify({ compilerOptions, include: ['src'] }),
+    'src/index.ts': source,
+  });
+  const aliases = (parameter: string) => `export type Plain = { name?: string };
+export type OrUndefined = { name?: string | undefined };
+export declare class PetsClient { get(options: ${parameter}): Promise<string>; }
+`;
+  const retype = async (compilerOptions: Record<string, boolean>, from: string, to: string) =>
+    notAdditive(
+      (await compatDiff(nodeExtractor, sdk(compilerOptions, aliases(from)), sdk(compilerOptions, aliases(to)))).diff,
+    );
+  const GET = (severity: string) => [`${severity} parameter_type_narrowed PetsClient.get`];
+
+  it('is one type without `exactOptionalPropertyTypes`, either way', async () => {
+    const strict = { strict: true };
+    expect(await retype(strict, 'OrUndefined', 'Plain')).toEqual(GET(SOFT_RISK));
+    expect(await retype(strict, 'Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+    expect(await retype(strict, 'Plain', '{ name?: string | undefined }')).toEqual(GET(SOFT_RISK));
+  });
+
+  it('is not told from the `undefined` TypeScript prints for an optional member written in place', async () => {
+    // The parameter's text is `{ name?: string | undefined; }` for
+    // `{ name?: string }` and for `{ name?: string | undefined }` alike,
+    // unless the SDK is compiled with `exactOptionalPropertyTypes`. Nothing
+    // in it says which, so it is not accepted by a declared type whose field
+    // is recorded without one.
+    const strict = { strict: true };
+    expect(await retype(strict, '{ name?: string }', 'Plain')).toEqual(GET(BREAKING));
+    expect(await retype(strict, '{ name?: string | undefined }', 'Plain')).toEqual(GET(BREAKING));
+    expect(await retype(strict, '{ name: string }', 'Plain')).toEqual(GET(SOFT_RISK));
+    expect(await retype(strict, '{ name?: string }', '{ name?: string; tag?: string }')).toEqual(GET(SOFT_RISK));
+  });
+
+  it('is two types with it: the one that takes `undefined` is not accepted by the one that does not', async () => {
+    // `get({ name: undefined })` compiles against `OrUndefined` alone.
+    const exact = { strict: true, exactOptionalPropertyTypes: true };
+    expect(await retype(exact, 'OrUndefined', 'Plain')).toEqual(GET(BREAKING));
+    expect(await retype(exact, 'Plain', 'OrUndefined')).toEqual(GET(SOFT_RISK));
+    expect(await retype(exact, '{ name?: string | undefined; tag?: string }', 'Plain')).toEqual(GET(BREAKING));
+    expect(await retype(exact, 'Plain', '{ name?: string | undefined; tag?: string }')).toEqual(GET(SOFT_RISK));
+    expect(await retype(exact, '{ name?: string }', 'Plain')).toEqual(GET(SOFT_RISK));
+  });
+});
 
 describe('#752 a method with two retyped parameters', () => {
   it('weighs each retyped parameter of a method on its own', async () => {

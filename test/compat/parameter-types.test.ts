@@ -383,14 +383,11 @@ describe("#752 by shape: an object type that keeps the old one's fields", () => 
     ['a required field dropped', { name: 'string', timeout: '?number' }, { timeout: '?number' }, REFUSED],
     ['a field renamed', { timeout: '?number' }, { timeoutMs: '?number' }, REFUSED],
     ['a field renamed in case only', { timeout: '?number' }, { Timeout: '?number' }, REFUSED],
-    // An optional field's type is recorded with or without the `undefined` its `?` adds.
-    [
-      'an optional field recorded with `| undefined`',
-      { timeout: '?number' },
-      { timeout: '?number | undefined' },
-      ACCEPTED,
-    ],
-    ['an optional field recorded without it', { timeout: '?number | undefined' }, { timeout: '?number' }, ACCEPTED],
+    // A field's type is weighed as it is recorded, `undefined` and all: under
+    // `exactOptionalPropertyTypes` an optional `string | undefined` takes a
+    // value an optional `string` does not.
+    ['an optional field gains `| undefined`', { timeout: '?number' }, { timeout: '?number | undefined' }, ACCEPTED],
+    ['an optional field loses `| undefined`', { timeout: '?number | undefined' }, { timeout: '?number' }, REFUSED],
     ['a field that is only ever undefined', { never: '?undefined' }, { never: '?undefined' }, ACCEPTED],
     // A required field that may be `undefined` still has to be written.
     ['required `T | undefined` made optional `T`', { name: 'string | undefined' }, { name: '?string' }, REFUSED],
@@ -533,6 +530,7 @@ describe('#752 by shape: an object type written in place', () => {
   const declared = types(
     objectType('RequestOptions', { timeout: '?number' }),
     objectType('RetryRequestOptions', { timeout: '?number', maxRetries: '?number' }),
+    objectType('ThreeFields', { a: '?string', b: '?number', c: 'boolean' }),
   );
 
   it.each<[string, string, boolean]>([
@@ -558,10 +556,22 @@ describe('#752 by shape: an object type written in place', () => {
     ['{ timeout?: number; } | string', '{ timeout?: number; maxRetries?: number; } | string | number', ACCEPTED],
     // one side declared, the other written in place
     ['RequestOptions', '{ timeout?: number | undefined; maxRetries?: number | undefined; }', ACCEPTED],
-    ['{ timeout?: number | undefined; }', 'RetryRequestOptions', ACCEPTED],
+    ['{ timeout?: number; }', 'RetryRequestOptions', ACCEPTED],
+    ['{ timeout?: number | undefined; }', 'RetryRequestOptions', REFUSED],
     ['RetryRequestOptions', '{ timeout?: number | undefined; }', REFUSED],
     ['{ timeout?: number | undefined; maxRetries?: number | undefined; }', 'RequestOptions', REFUSED],
     ['{ retry?: RequestOptions; }', '{ retry?: RetryRequestOptions; }', ACCEPTED],
+    // An optional member's `undefined` is weighed as written. Printed by
+    // TypeScript for every optional member, or written by an SDK compiled
+    // with `exactOptionalPropertyTypes`: the text does not say which, so a
+    // member with one is not accepted by a declared field without one.
+    ['{ a?: string | undefined; b?: number | undefined; c: boolean; }', 'ThreeFields', REFUSED],
+    ['{ a?: string; b?: number; c: boolean; }', 'ThreeFields', ACCEPTED],
+    ['ThreeFields', '{ a?: string | undefined; b?: number | undefined; c: boolean; }', ACCEPTED],
+    ['{ a?: string | undefined; b?: number; }', '{ a?: string; b?: number; }', REFUSED],
+    ['{ a?: string; b?: number; }', '{ a?: string | undefined; b?: number; }', ACCEPTED],
+    ['{ a?: (() => void) | undefined; }', '{ a?: (() => void) | undefined; b?: string | undefined; }', ACCEPTED],
+    ['{ a: string | undefined; }', '{ a: string; }', REFUSED],
     // a type whose members do not say all a value may carry
     ['{ timeout?: number; [key: string]: unknown; }', '{ timeout?: number; }', REFUSED],
     ['{ timeout?: number; }', '{ timeout?: number; [key: string]: unknown; }', REFUSED],

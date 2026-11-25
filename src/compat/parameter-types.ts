@@ -372,10 +372,7 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
   for (const [name, oldField] of oldFields) {
     const newField = newFields.get(name);
     if (newField === undefined) return false;
-    if (declared) continue;
-    const oldMembers = membersBehindAliases(fieldTypeMembers(oldField), context.oldTypes);
-    const newMembers = membersBehindAliases(fieldTypeMembers(newField), context.newTypes);
-    if (!membersAccept(oldMembers, newMembers, context)) return false;
+    if (!declared && !acceptsByShape(oldField.type, newField.type, context)) return false;
   }
   context.fields.set(JSON.stringify([oldType, newType]), { oldType, newType });
   return true;
@@ -387,20 +384,16 @@ function fieldsAccept(oldType: string, newType: string, context: ShapeContext): 
  * whose fields the snapshot records whole (`recordedMembers`). Undefined for
  * anything else, and for either kind when the fields are not all a value may
  * carry.
+ *
+ * A field's type is weighed as it stands, an `undefined` included. Under
+ * `exactOptionalPropertyTypes` an optional `name?: string | undefined` takes
+ * a value an optional `name?: string` does not, and a type alias's members
+ * are recorded apart there. An object type written in place is printed with
+ * `| undefined` on each optional member where the SDK is not compiled with
+ * that option, and nothing in its text says which of the two it is. So an
+ * optional member written in place with one is not accepted by a declared
+ * field without one, though the reverse is.
  */
 function fieldsOf(member: string, types: TypeLookup): ReadonlyMap<string, RecordedMember> | undefined {
   return objectTypeMembers(member) ?? recordedMembers(types, member);
-}
-
-/**
- * The members of a field's type, for a value that is there. An optional
- * field's type is recorded with or without the `undefined` its `?` adds (an
- * interface's field without, a mapped type's member and an inline object
- * type's with), and the `?` already says it, so that member is set aside.
- */
-function fieldTypeMembers(field: RecordedMember): string[] | undefined {
-  const members = unionMembers(field.type);
-  if (!field.optional || members === undefined) return members;
-  const present = members.filter((member) => member !== 'undefined');
-  return present.length > 0 ? present : members;
 }
