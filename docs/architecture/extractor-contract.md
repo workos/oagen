@@ -42,7 +42,7 @@ Each sub-type captures a different kind of public symbol:
 | `ApiParam`     | `name`, `type`, `optional`                                                                    | Method and constructor parameters                                                 |
 | `ApiProperty`  | `name`, `type`, `readonly`                                                                    | Class properties                                                                  |
 | `ApiInterface` | `name`, `sourceFile?`, `fields`, `extends`, `fieldOptionalityUnknown?`, `hasUnlistedMembers?` | Interface declarations, model classes                                             |
-| `ApiField`     | `name`, `type`, `optional`                                                                    | Interface fields                                                                  |
+| `ApiField`     | `name`, `type`, `optional`, `resolvedType?`                                                   | Interface fields                                                                  |
 | `ApiTypeAlias` | `name`, `sourceFile?`, `value`, `fields?`, `extends?`, `hasUnlistedMembers?`                  | Type alias declarations                                                           |
 | `ApiEnum`      | `name`, `sourceFile?`, `members`                                                              | Enum declarations with member values                                              |
 

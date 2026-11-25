@@ -546,24 +546,6 @@ export function withoutRepeatedIntersectionMembers(typeText: string): string {
   return only ?? reduced.join(' | ');
 }
 
-/**
- * Whether two type texts are one type once the `undefined` member of each is
- * left out: `string | undefined` and `string`, `undefined | (() => void)` and
- * `(() => void)`. For the type of a member that is optional on both sides,
- * where an `undefined` in the text is the one optionality adds and a text may
- * carry it or not. `null` is a value like any other and is not left out, and
- * a text whose brackets do not pair up is compared as it stands.
- */
-export function sameButForUndefined(one: string, other: string): boolean {
-  const members = (text: string): string[] => {
-    const all = splitTopLevel(text, '|')?.map((member) => member.trim()) ?? [text.trim()];
-    const defined = all.filter((member) => member !== 'undefined');
-    return defined.length > 0 ? defined : all;
-  };
-  const [left, right] = [members(one), members(other)];
-  return left.length === right.length && left.every((member, index) => member === right[index]);
-}
-
 /** The content of `text` when one bracket pair spans it from its first
  *  character to its last: `(A | B)`, but not `(A) | (B)`. */
 function enclosed(text: string): string | undefined {

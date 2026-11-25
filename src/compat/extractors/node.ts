@@ -76,7 +76,7 @@ export const nodeExtractor: Extractor = {
       if (ts.isClassDeclaration(decl)) {
         classes[resolved.name] = { ...extractClass(resolved, checker), sourceFile };
       } else if (ts.isInterfaceDeclaration(decl)) {
-        interfaces[resolved.name] = { ...extractInterface(resolved, checker), sourceFile };
+        interfaces[resolved.name] = { ...extractInterface(resolved, checker, parsedConfig.options), sourceFile };
       } else if (ts.isTypeAliasDeclaration(decl)) {
         typeAliases[resolved.name] = { ...extractTypeAlias(resolved, checker, parsedConfig.options), sourceFile };
       } else if (ts.isEnumDeclaration(decl)) {
@@ -377,7 +377,7 @@ function extractParameterInfo(
   return { name: fallback, isDestructured: false };
 }
 
-function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface {
+function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker, options: ts.CompilerOptions): ApiInterface {
   const type = checker.getDeclaredTypeOfSymbol(sym);
   const fields: Record<string, ApiField> = {};
   const extendsNames: string[] = [];
@@ -404,18 +404,21 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
     // as it always has been: every baseline holds it so, and a text read any
     // other way would diff against them. So a member that is optional without
     // one (a method signature `retry?(): void`, a member inherited through
-    // `Partial<Base>`) keeps its `| undefined`.
+    // `Partial<Base>`) keeps its `| undefined`, and `a?: string | undefined`
+    // loses its own under exactOptionalPropertyTypes.
     let typeStr = checker.typeToString(propType);
     if (isOptional) {
       typeStr = stripUndefined(typeStr);
     }
+    // What the member is, whatever its spelling: its optionality, which a `?`
+    // on a property signature always sets, and its type, recorded beside the
+    // text above where the two differ.
+    const member = resolvedMember(prop, declarations![0], checker, options);
     fields[prop.name] = {
       name: prop.name,
       type: typeStr,
-      // Its optionality is the resolved member's, which a `?` on a property
-      // signature always sets: a caller may leave such a member out all the
-      // same.
-      optional: isOptionalMember(prop),
+      optional: member.optional,
+      ...(member.type !== typeStr ? { resolvedType: member.type } : {}),
     };
   }
 
@@ -535,8 +538,10 @@ function hasUnnamedMembers(type: ts.Type, checker: ts.TypeChecker): boolean {
 }
 
 /**
- * A member of an alias's resolved type: its optionality and its type text as
- * the checker resolves them, never as one of its declarations writes them. A
+ * A member of a resolved type, an alias's or an interface's: its optionality
+ * and its type text as the checker resolves them, never as one of its
+ * declarations writes them. An alias's field is this; an interface's field
+ * keeps the text baselines hold and carries this one beside it. A
  * member can have several declarations that disagree (the parts of an
  * intersection: `{ a?: string } & { a: string | undefined }` is a required
  * `a`), or one that says something else than the member does (a mapped type:
