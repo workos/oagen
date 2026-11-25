@@ -3360,8 +3360,10 @@ export function resetCombinedDeclarations(): void {
  * (`declaresNull`), else `type: 'array'`; any two declarations that each
  * describe an object — an inline object, a `$ref` to an object component,
  * or an `allOf` that reaches one (`describesObject`, `composesObject`,
- * the component the document's: `componentSchemaOf`) — become the `allOf`
- * of both in document order, which every reader reads as any inline
+ * the component the document's: `componentSchemaOf`), written as it is or
+ * under a nullable `oneOf`/`anyOf` wrapper (`openedNullableUnion`; below)
+ * — become the `allOf` of both in document order, which every reader
+ * reads as any inline
  * `allOf` (`mergeAllOfMembers`, `collectObjectProperties`), carrying the
  * keywords a field reads from either (`declarationKeywords`, the later's
  * over the earlier's) and `null` exactly when every declaration admits it
@@ -3448,6 +3450,44 @@ export function resetCombinedDeclarations(): void {
  * workos/oagen#566: the extractor still got a new object from every merge,
  * and re-entered it without end).
  *
+ * A declaration that is a nullable `oneOf`/`anyOf` wrapper — a union that
+ * leaves one variant once its `null` variants are set aside, in every
+ * spelling the readers strip (`unwrapNullableSchema`: `{ type: 'null' }`,
+ * `{ const: null }`, `{ enum: [null] }`, OAS 3.0 `nullable: true` beside
+ * the union, a wrapper around a wrapper) — describes what that variant
+ * describes, and is conjoined as the declaration it wraps
+ * (`openedNullableUnion`): `tag: { anyOf: [{ $ref: Tag }, { type: 'null' }]
+ * }` beside `tag: { anyOf: [{ $ref: TagOutput }, { type: 'null' }] }` is `{
+ * allOf: [{ $ref: Tag }, { $ref: TagOutput }], type: ['object', 'null'] }`,
+ * a `TagOutput | null` over `TagOutput: { allOf: [{ $ref: Tag }, …] }`, as
+ * the same pair written `{ type: ['object', 'null'], allOf: [{ $ref: … }]
+ * }` is; beside a plain `tag: { $ref: TagOutput }`, in either member order,
+ * it is `{ allOf: [{ $ref: Tag }, { $ref: TagOutput }], type: 'object' }`,
+ * a `TagOutput` — `null` exactly when both declarations admit it, each
+ * asked as written (`schemaAdmitsNull`), as for every other pair; and the
+ * wrapped declaration may be a `$ref`, an `allOf` or an inline object, the
+ * same on both sides or not, a wrapper on one side beside a nullable
+ * `type` on the other. The wrapper's own keywords ride on the conjunction
+ * as any declaration's do (`declarationKeywords`), the members of an
+ * `allOf` it writes beside its union stay members, and the limits a field
+ * reads through it from its variant are kept as a member that declares no
+ * type (workos/oagen#743: `describesObject` was asked of the declaration
+ * as written, and a union of a `$ref` and `null` is neither an inline
+ * object nor a `$ref`/`allOf` that composes one, so the pair kept the first
+ * and a property redeclared as a nullable union of `TagOutput` stayed a
+ * `Tag | null`, where the type-list spelling of the same pair, and a
+ * nullable array of each, conjoined). A union of two or more variants that
+ * are not `null` is no wrapper: such a declaration describes no object
+ * here, and its pair keeps the first as written, as before. So does a
+ * pair that holds a declaration no reader could read at every depth, the
+ * wrapper or the other (`isReadableSchema`), which parsed with the first
+ * kept and the second unread, and so does a later declaration that meets
+ * a conjunction a wrapper opened (`novelConjunctions`). So does a
+ * `$ref` to a component that is a nullable union itself, which names that
+ * union, and a wrapper that writes `properties` beside its union, an
+ * inline object as written (`isInlineObjectSchema`), is conjoined as that
+ * object, as it was.
+ *
  * A declaration the memo cannot hold (`keysMemo`) — a JSON Schema boolean,
  * `meta: true` beside another member's `meta: { type: 'string' }` — writes
  * no keyword and adds nothing: the combination is the other declaration
@@ -3479,10 +3519,49 @@ function keysMemo(declaration: unknown): boolean {
 
 /** What `combineDeclarations` returns, built anew on every call. */
 function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
+  // A conjunction no reader made before met no later declaration either,
+  // so it is combined with one a reader can read, typed or not, and with
+  // no other (`novelConjunctions`).
+  if (novelConjunctions.has(held) && !isReadableSchema(next)) return held;
+  const combined = combineUnrecorded(held, next);
+  // Whatever is made of such a conjunction is one too: its conjunction
+  // with a third declaration, and the copy a typeless one annotates.
+  if (combined !== held && combined !== next && novelConjunctions.has(held)) novelConjunctions.add(combined);
+  return combined;
+}
+
+/** The combination itself, by what each declaration declares (`combineDeclarations`). */
+function combineUnrecorded(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return annotateDeclaration(next, held);
   if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
   return declaresType(held) ? annotateDeclaration(held, next) : mergeAnnotations(held, next);
 }
+
+/**
+ * The conjunctions no reader made before the step that makes them did,
+ * and every declaration combined from one since (`combineAfresh`): those
+ * that exist because a nullable `oneOf`/`anyOf` wrapper was opened
+ * (`openedNullableUnion`; workos/oagen#743). Where one of these stands,
+ * the first declaration stood as written before, a wrapper that described
+ * no object, and whatever a later member declared for the property was
+ * read by no conjunction: `tag: { anyOf: [{ $ref: Tag }, { type: 'null' }]
+ * }`, redeclared as the nullable union of `TagOutput` and then as `{
+ * allOf: [{ $ref: Other }], required: 5 }`, kept the first and parsed. So
+ * a later declaration is combined with one of these only where a reader
+ * can read it at every depth (`isReadableSchema`), as the two a wrapper
+ * is opened for are, and is otherwise left unread, the conjunction
+ * standing as the first did (`combineAfresh`) — a typed declaration,
+ * which the conjunction would hold as a part, and a typeless one alike,
+ * whose keywords it would carry: `{ required: 5 }` beside a wrapper is
+ * read by no reader, and beside an `allOf` that merges inline objects by
+ * the one that iterates it. A conjunction of two declarations that
+ * always conjoined — two `$ref`s, a `$ref` beside an inline object — is
+ * none of these, and meets a third as it always did. A step that comes
+ * to conjoin a pair none conjoined before records what it writes here
+ * the same way. Keyed by the conjunctions themselves, which the memo of
+ * the document being read holds (`combinedDeclarations`).
+ */
+const novelConjunctions = new WeakSet<SchemaObject>();
 
 /**
  * Two declarations neither of which declares a type (`declaresType`), as
@@ -3587,9 +3666,22 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       type: declaresNull(first) || declaresNull(second) ? ['array', 'null'] : 'array',
     };
   }
-  if (describesObject(first) && describesObject(second)) {
-    const held = conjunctionMembers(first);
-    const added = conjunctionMembers(second);
+  // A nullable `oneOf`/`anyOf` wrapper describes what the declaration under
+  // it describes (`openedNullableUnion`), so each side is asked through
+  // its wrapper, and brings the parts of what it wraps. What a wrapper says
+  // of `null`, and of the property it declares, is read from the
+  // declaration as written, as every other declaration's is
+  // (workos/oagen#743: asked as written, `{ anyOf: [{ $ref: Tag }, { type:
+  // 'null' }] }` described no object, so the pair kept the first, and a
+  // property redeclared `{ anyOf: [{ $ref: TagOutput }, { type: 'null' }] }`
+  // stayed a `Tag`).
+  const firstOpened = openedNullableUnion(first, second);
+  const secondOpened = openedNullableUnion(second, first);
+  const firstObject = firstOpened?.wrapped ?? first;
+  const secondObject = secondOpened?.wrapped ?? second;
+  if (describesObject(firstObject) && describesObject(secondObject)) {
+    const held = conjunctionMembers(firstObject, firstOpened?.beside);
+    const added = conjunctionMembers(secondObject, secondOpened?.beside);
     // A part the first already has — the same object, or a `$ref` to the
     // component one of its `$ref`s names — adds nothing to it.
     const members = [...held.members];
@@ -3654,7 +3746,7 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // review's round 7: `{ type: 'object', allOf: [{ $ref: A }] }` beside
     // `{ $ref: B }` spliced the `type` away, and a nullable `{ $ref: C }`
     // then found three nullable parts and restored the `null`).
-    const type = conjunctionType(first, second, nullable);
+    const type = conjunctionType(firstObject, secondObject, nullable);
     // A name beyond `object` is the conjunction's to say, on its `type`
     // alone: the readers type each copy of a type list by the members that
     // say something of its type (`typeListCopy`), so a member that names
@@ -3669,13 +3761,15 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       return names !== undefined && beyond.some((name) => admits(new Set(names), name));
     };
     if (beyond.length > 0 && members.some(typedByMember)) return keptAsWritten(first, second);
-    return {
+    const conjunction: SchemaObject = {
       ...declarationKeywords(first),
       ...declarationKeywords(second),
       allOf: members,
       type,
       ...(required.length > 0 && { required }),
     };
+    if (firstOpened !== undefined || secondOpened !== undefined) novelConjunctions.add(conjunction);
+    return conjunction;
   }
   return keptAsWritten(first, second);
 }
@@ -3874,9 +3968,17 @@ function admittedTypeNames(schema: SchemaObject, path: Set<SchemaObject> = new S
  * wrappers inside the declaration are opened by the one reading of a bare
  * `allOf`'s members (`bareAllOfParts`), which an inline `allOf` written
  * by hand is read by too (`spliceNestedAllOf`; workos/oagen#675).
+ *
+ * `declaration` is the declaration itself, or the one a nullable
+ * `oneOf`/`anyOf` wrapper around it wraps, with `beside` what that wrapper
+ * brings beside it (`openedNullableUnion`; workos/oagen#743), which comes
+ * first among the members.
  */
-function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[]; required: string[] } {
-  if (!splicesOpen(declaration)) return { members: [declaration], required: [] };
+function conjunctionMembers(
+  declaration: SchemaObject,
+  beside: readonly SchemaObject[] = [],
+): { members: SchemaObject[]; required: string[] } {
+  if (!splicesOpen(declaration)) return { members: [...beside, declaration], required: [] };
   // The declaration's own keywords ride on the conjunction
   // (`declarationKeywords`); a wrapper spliced open inside it keeps its own
   // as a member (`bareAllOfParts`; workos/oagen#653 review, round 5: `{
@@ -3886,7 +3988,110 @@ function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[
   // nothing of what an instance is as the keywords in its place
   // (`splicedAllOfMembers`; #731).
   const parts = bareAllOfParts(declaration.allOf ?? [], () => true, undefined, false);
-  return { members: parts.members, required: [...new Set([...(declaration.required ?? []), ...parts.required])] };
+  return {
+    members: [...beside, ...parts.members],
+    required: [...new Set([...(declaration.required ?? []), ...parts.required])],
+  };
+}
+
+/**
+ * A declaration that is a nullable `oneOf`/`anyOf` wrapper, opened for the
+ * reader that conjoins it with another declaration of its property
+ * (`conjoinTypedDeclarations`); `undefined` when `declaration` is no such
+ * wrapper, and is conjoined as written.
+ *
+ * The wrapper is the one every reader strips, asked of the one function
+ * that strips it (`unwrapNullableSchema`): a `oneOf` or an `anyOf` that
+ * leaves one variant once every `null` variant is set aside — `{ type:
+ * 'null' }`, `{ const: null }`, `{ enum: [null] }` (`isNullSchema`), or OAS
+ * 3.0 `nullable: true` standing for one beside the union
+ * (`unionFlaggedNullable`) — at any depth, a wrapper around a wrapper
+ * opened in turn, whatever nullable `type` is written on the way.
+ * `wrapped` is what is left under them: the `$ref`, the `allOf` or the
+ * inline object the type builder types the declaration by, inside
+ * `nullable`. So `{ anyOf: [{ $ref: Tag }, { type: 'null' }] }` is `{ $ref:
+ * Tag }` here, which describes the object `Tag` describes
+ * (`describesObject`) and is the one part the declaration brings
+ * (`conjunctionMembers`), as `{ type: ['object', 'null'], allOf: [{ $ref:
+ * Tag }] }` brings it.
+ *
+ * What the wrapper says of `null` is not answered here. The reader asks
+ * the declaration as written (`schemaAdmitsNull`, `declaresNull`) and
+ * admits `null` for the conjunction exactly when both declarations do, as
+ * it does for a declaration that says so by its `type`. Nor are the
+ * wrapper's own keywords — its text, its flags, the limits written on it:
+ * they ride on the conjunction with every declaration's
+ * (`declarationKeywords`). A keyword the type builder reads none of where
+ * it collapses the wrapper — a `required`, a `discriminator`,
+ * `additionalProperties`, a `type` that names no `object` — is none of the
+ * conjunction's either: `{ required: ['label'], anyOf: [{ $ref: Tag }, {
+ * type: 'null' }] }` is `nullable<Tag>` as the one declaration of a
+ * property, and is conjoined as `{ $ref: Tag }`.
+ *
+ * `beside` is what else a field reads from the wrapper, as members for
+ * the conjunction to hold before the parts of `wrapped`: the members of
+ * an `allOf` written beside the union, which only annotate or limit the
+ * schema wherever the union is a wrapper (`nullableAxisBranch`; #613) and
+ * stay members as those of a bare `allOf` do; and the limits a field
+ * reads through the wrapper from the variant it collapses to
+ * (`extractConstraints`: a variant that is no `$ref`, and a wrapper or an
+ * `allOf` under it the same way), as one member that declares no type —
+ * `{ anyOf: [{ allOf: [{ $ref: Tag }], minProperties: 2 }, { type: 'null'
+ * }] }` beside `{ $ref: TagOutput }` is still limited to two properties,
+ * where the variant's own keywords are otherwise left behind when its
+ * `allOf` is spliced open. What a variant documents itself by — its
+ * `description`, its `deprecated` — is the variant's and reaches no field
+ * through the wrapper, with one declaration or with two.
+ *
+ * `undefined` for a declaration that writes no union; for one that writes
+ * `properties` beside its union, an inline object as written
+ * (`isInlineObjectSchema`), which is conjoined as that object, as it was;
+ * for a union that is no nullable wrapper — two or more variants that are
+ * not `null`, one variant and no `null`, a union beside an `allOf` that
+ * types the schema, a union of consts read as an enum — which describes
+ * no object to conjoin; and for a pair a reader could not read at every
+ * depth (`isReadableSchema`: a `null` where a schema goes, a keyword that
+ * holds another kind of value), the wrapper or `other`, the declaration
+ * it would be conjoined with. Before a wrapper was opened such a pair
+ * kept the first, and nothing in the second was read to conjoin it: not
+ * inside a wrapper declared second (workos/oagen#743), and not in a
+ * declaration that is no wrapper beside one (Greptile, #743 review: only
+ * the wrapper was asked, so `{ allOf: [{ $ref: Other }], required: 5 }`
+ * beside a wrapper reached the readers of a conjunction, which iterate
+ * the `required` it writes, and failed a parse that had kept the first).
+ * So a document may hold anything in either and parse; the wrapper stays
+ * unopened, and the pair keeps the first as written.
+ *
+ * Named for what it returns, for the step that conjoins two maps to ask
+ * as the step for two objects does: `openedNullableUnion(declaration,
+ * other)?.wrapped ?? declaration` is the declaration under its wrapper,
+ * or itself.
+ */
+function openedNullableUnion(
+  declaration: SchemaObject,
+  other: SchemaObject,
+): { wrapped: SchemaObject; beside: SchemaObject[] } | undefined {
+  if (!isSchemaObject(declaration) || (declaration.oneOf === undefined && declaration.anyOf === undefined)) {
+    return undefined;
+  }
+  if (isInlineObjectSchema(declaration) || !isReadableSchema(declaration) || !isReadableSchema(other)) {
+    return undefined;
+  }
+  // Each wrapper the unwrap collapses, outermost first, with the variant
+  // it collapses to; none when the union is no nullable wrapper.
+  const collapsed: { wrapper: SchemaObject; variant: SchemaObject }[] = [];
+  const wrapped = unwrapNullableSchema(declaration, (variant, wrapper) => {
+    collapsed.push({ wrapper, variant });
+    return variant;
+  });
+  const [outermost] = collapsed;
+  if (outermost === undefined) return undefined;
+  const { wrapper, variant } = outermost;
+  const annotating = bareAllOfParts(wrapper.allOf ?? [], () => true, undefined, false).members;
+  // Read as a field reads them through the wrapper (`extractConstraints`):
+  // a variant that is a `$ref` keeps its limits on the model it names.
+  const limits = isSchemaObject(variant) && variant.$ref === undefined ? extractConstraints(variant) : undefined;
+  return { wrapped, beside: [...annotating, ...(limits ? [{ ...limits }] : [])] };
 }
 
 /**
@@ -4514,7 +4719,10 @@ function splicesIntoAllOf(wrapper: SchemaObject, parts: readonly SchemaObject[])
  * `allOf` of both (`conjoinTypedDeclarations`), whichever spelling each
  * uses (workos/oagen#571: only an inline object beside a composing one
  * was conjoined, so a `$ref` beside an inline `allOf`, or two `$ref`s,
- * kept the first).
+ * kept the first). Asked of the schema as handed in: a declaration under a
+ * nullable `oneOf`/`anyOf` wrapper is asked through its wrapper by the
+ * caller (`openedNullableUnion`; workos/oagen#743), and a union of
+ * several variants describes no object here.
  */
 function describesObject(schema: SchemaObject): boolean {
   return isInlineObjectSchema(schema) || composesObject(schema);
