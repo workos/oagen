@@ -380,13 +380,16 @@ function limitsFit(oldSite: ConstrainedSite, newSite: ConstrainedSite, fit: Fit,
   if (fit === 'reader') return true;
   const [oldType, newType] = [oldSite.type, newSite.type];
   const readings: ConstrainedSite[] =
-    oldType && newType ? [oldSite, { ...oldSite, type: inStep(oldType, newType, shapes) }] : [oldSite];
+    oldType && newType ? [oldSite, { ...oldSite, type: inStep(oldType, newType, shapes, new WeakMap()) }] : [oldSite];
   return readings.some((reading) => {
     const shift = constraintsShift(reading, newSite, 'inOrder');
     if (fit === 'exact') return shift === undefined;
     return !shift?.tightened && !(reading.type && newType && exclusiveLimitsMoved(reading.type, newType));
   });
 }
+
+/** `inStep`'s answers for one comparison, by the two types' identity: a pair several outer pairings try is put in step once. */
+type StepMemo = WeakMap<TypeRef, WeakMap<TypeRef, TypeRef>>;
 
 /**
  * `oldType` with every union's variants in the order that puts each one
@@ -396,19 +399,38 @@ function limitsFit(oldSite: ConstrainedSite, newSite: ConstrainedSite, fit: Fit,
  * shape across the two documents (`across`: a model or an enum of one name
  * on both sides is read through both too, so two models that changed
  * hands under their names are no pair; Greptile, #758 review round 3) and
- * carries the same limits at every level; one left over takes the old
- * variant in its place, which the caller matched it with. The union stays
- * as written when that place is already taken.
+ * carries the same limits at every level once the two are themselves put
+ * in step — so two unions that changed places are each other's whichever
+ * way their own branches are written (round 4); one left over takes the
+ * old variant in its place, which the caller matched it with. The union
+ * stays as written when that place is already taken. `memo` keeps each
+ * pair's answer, so the pairs tried at one level are not walked again at
+ * the next.
  */
-function inStep(oldType: TypeRef, newType: TypeRef, shapes: DocumentShapes): TypeRef {
+function inStep(oldType: TypeRef, newType: TypeRef, shapes: DocumentShapes, memo: StepMemo): TypeRef {
+  let byNew = memo.get(oldType);
+  if (!byNew) {
+    byNew = new WeakMap();
+    memo.set(oldType, byNew);
+  }
+  let stepped = byNew.get(newType);
+  if (!stepped) {
+    stepped = putInStep(oldType, newType, shapes, memo);
+    byNew.set(newType, stepped);
+  }
+  return stepped;
+}
+
+/** `inStep`, unmemoized. */
+function putInStep(oldType: TypeRef, newType: TypeRef, shapes: DocumentShapes, memo: StepMemo): TypeRef {
   if (oldType.kind === 'nullable' && newType.kind === 'nullable') {
-    return { ...oldType, inner: inStep(oldType.inner, newType.inner, shapes) };
+    return { ...oldType, inner: inStep(oldType.inner, newType.inner, shapes, memo) };
   }
   if (oldType.kind === 'array' && newType.kind === 'array') {
-    return { ...oldType, items: inStep(oldType.items, newType.items, shapes) };
+    return { ...oldType, items: inStep(oldType.items, newType.items, shapes, memo) };
   }
   if (oldType.kind === 'map' && newType.kind === 'map') {
-    return { ...oldType, valueType: inStep(oldType.valueType, newType.valueType, shapes) };
+    return { ...oldType, valueType: inStep(oldType.valueType, newType.valueType, shapes, memo) };
   }
   if (oldType.kind !== 'union' || newType.kind !== 'union' || oldType.variants.length !== newType.variants.length) {
     return oldType;
@@ -417,7 +439,9 @@ function inStep(oldType: TypeRef, newType: TypeRef, shapes: DocumentShapes): Typ
   const places = newType.variants.map((variant) => {
     const k = oldType.variants.findIndex(
       (old, j) =>
-        !taken.has(j) && sameShapeWithin(old, variant, shapes, new Set(), 'across') && sameLimits(old, variant),
+        !taken.has(j) &&
+        sameShapeWithin(old, variant, shapes, new Set(), 'across') &&
+        sameLimits(inStep(old, variant, shapes, memo), variant),
     );
     if (k >= 0) taken.add(k);
     return k;
@@ -430,7 +454,7 @@ function inStep(oldType: TypeRef, newType: TypeRef, shapes: DocumentShapes): Typ
   }
   return {
     ...oldType,
-    variants: order.map((k, i) => inStep(oldType.variants[k], newType.variants[i], shapes)),
+    variants: order.map((k, i) => inStep(oldType.variants[k], newType.variants[i], shapes, memo)),
   };
 }
 
