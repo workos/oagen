@@ -656,6 +656,28 @@ describe('#753 a body moved to a model that still serves its reader or its write
       expect(await classified(sites.response, ...added)).toBe('additive');
     });
 
+    it('reads two nested unions that changed places, each written the other way round, as the same union (Greptile, #758 review round 4)', async () => {
+      const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
+      const A = [{ type: 'string', pattern: '^a' }, { type: 'string' }];
+      const B = [
+        { type: 'string', maxLength: 5 },
+        { type: 'string', minLength: 6 },
+      ];
+      const before = { anyOf: [ref('Pet'), { anyOf: A }, { anyOf: B }] };
+      const after = (b: Schema[]) => ({
+        anyOf: [ref('Pet2'), { anyOf: [...b].reverse() }, { anyOf: [...A].reverse() }],
+      });
+      const classified = async (site: Site, next: Schema) =>
+        bodyChange(
+          await diffDocuments(siteDocument(openapi, site, schemas, before), siteDocument(openapi, site, schemas, next)),
+        ).classification;
+      for (const site of Object.values(sites)) expect(await classified(site, after(B)), site.side).toBe('additive');
+      // The same with a branch tightened breaks a request alone.
+      const tighter = [{ type: 'string', maxLength: 4 }, B[1]];
+      expect(await classified(sites.request, after(tighter))).toBe('breaking');
+      expect(await classified(sites.response, after(tighter))).toBe('additive');
+    });
+
     it('judges the limits of the body’s own array by side, as a field’s are', async () => {
       const schemas = { Pet: BasePet, Pet2: EDITS['an optional field added'] };
       const array = (name: string, maxItems?: number): Schema => ({
@@ -1605,6 +1627,47 @@ describe('#753 compatibleShape', () => {
     expect(moved([patterned, str], [str, patterned])).toEqual(both);
     expect(moved([str, int], [patterned, int])).toEqual(readerOnly);
     expect(moved([patterned, int], [str, int])).toEqual(both);
+  });
+
+  it('puts nested unions in step too, so two that changed places are each other’s however their own branches are written (Greptile, #758 review round 4)', () => {
+    const limited = (constraints: NonNullable<Field['constraints']>): TypeRef => ({ ...str, constraints });
+    const union = (variants: TypeRef[], compositionKind: 'anyOf' | 'oneOf' = 'anyOf'): UnionType => ({
+      kind: 'union',
+      compositionKind,
+      variants,
+    });
+    const reverse = (type: UnionType): UnionType => ({ ...type, variants: [...type.variants].reverse() });
+    const grown: Model = { name: 'Pet2', fields: [...pet.fields, field('tag', str, false)] };
+    const shapes = shapesOf({ models: [pet] }, { models: [pet, grown] });
+    const judge = (a: TypeRef, b: TypeRef) => ({
+      reader: compatibleShape(a, b, 'reader', shapes),
+      writer: compatibleShape(a, b, 'writer', shapes),
+    });
+    const readerOnly = { reader: true, writer: false };
+    const [a, b] = [model('Pet'), model('Pet2')];
+    const A = union([limited({ pattern: '^a' }), str]);
+    const B = union([limited({ maxLength: 5 }), limited({ minLength: 6 })]);
+    // The finding: both nested unions keep their branches and limits, at both levels the other way round.
+    expect(judge(union([a, A, B]), union([b, reverse(B), reverse(A)]))).toEqual(both);
+    expect(judge(union([a, A, B]), union([b, B, A]))).toEqual(both);
+    expect(judge(union([a, A, B]), union([b, reverse(A), reverse(B)]))).toEqual(both);
+    expect(judge(union([a, A, B], 'oneOf'), union([b, reverse(B), reverse(A)], 'oneOf'))).toEqual(both);
+    // A branch that really tightened is still read, wherever its union now sits.
+    const tighter = union([limited({ maxLength: 4 }), limited({ minLength: 6 })]);
+    expect(judge(union([a, A, B]), union([b, reverse(tighter), reverse(A)]))).toEqual(readerOnly);
+    expect(judge(union([a, A, B]), union([b, reverse(A), tighter]))).toEqual(readerOnly);
+    // One level further down, under an array.
+    const listed = (inner: TypeRef): TypeRef => ({ kind: 'array', items: union([inner, int]) });
+    expect(judge(union([a, listed(A), listed(B)]), union([b, listed(reverse(B)), listed(reverse(A))]))).toEqual(both);
+    expect(judge(union([a, listed(A), listed(B)]), union([b, listed(reverse(tighter)), listed(reverse(A))]))).toEqual(
+      readerOnly,
+    );
+    // Many unions of one type: each pair is put in step once, however many places try it.
+    const many = Array.from({ length: 12 }, (_, i) =>
+      union([limited({ maxLength: i + 1 }), limited({ minLength: i + 20 }), limited({ pattern: `^${i}` })]),
+    );
+    const scrambled = [...many].reverse().map((entry) => reverse(entry));
+    expect(judge(union([a, ...many]), union([b, ...scrambled]))).toEqual(both);
   });
 
   it('puts two unions in step by shape across the two documents, never by a name that changed hands (Greptile, #758 review round 3)', () => {
