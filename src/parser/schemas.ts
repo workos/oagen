@@ -28,6 +28,7 @@ import {
   schemaRefOf,
   schemaRefTarget,
   schemaRefTokens,
+  schemaRefValue,
   withoutNull,
   type DerivedMappingSource,
 } from './schema-refs.js';
@@ -2122,6 +2123,63 @@ export function isSchemaObject(value: unknown): value is SchemaObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Whether what is written as a property's schema declares the property:
+ * the one question every reader of a `properties` map asks of an entry
+ * before it reads it as a schema. `false` says the property is never
+ * there, so the entry is no field of the model — `Pet: { properties: {
+ * name, legacyId: false } }` is `Pet { name }` — and so is everything
+ * else a reader finds nothing to read in (`null`, `0`, `''`). And so is a
+ * `$ref` that leads to one of these, however long the chain — `legacyId:
+ * { $ref: Never }` over `Never: false`, an alias of it (`NeverAlias: {
+ * $ref: Never }`), a JSON Pointer to a property written `false`
+ * (`#/components/schemas/Pet/properties/legacyId`) — whatever is written
+ * beside the `$ref`: the property's schema is the `false` it names
+ * (#746: each reader asked whether the entry itself was falsy, and a
+ * `$ref` is an object, so the `$ref` spelling was a field typed
+ * `unknown`, the type #728 gives a `$ref` to `false`, where the inline
+ * one is no field, and `oagen diff` between the two spellings reported a
+ * field added). Every other entry declares the property and is read as
+ * its schema, `true` and a `$ref` to it among them (`unknown`).
+ *
+ * Asked of a property alone — an entry of `properties`, wherever the
+ * object is written, and `additionalProperties` beside `properties` on a
+ * component, which `false` gives no catch-all field. A `$ref` to `false`
+ * read for a type is `unknown`, as `false` written there is: a union
+ * variant, an `allOf` member, array `items`, map values, a body, a
+ * parameter (#728). So is a property that reaches `false` through
+ * anything but a `$ref` — `{ allOf: [{ $ref: Never }] }`, a nullable
+ * wrapper around the `$ref` — as `{ allOf: [false] }` in its place is.
+ *
+ * A `$ref` that names nothing — a key the document lacks, another
+ * section, a pointer through a token that is not there — declares the
+ * property as it did, and so does a chain that leads back to itself
+ * (`A: { $ref: B }`, `B: { $ref: A }`). `componentSchemas` is the map the
+ * reader resolves a `$ref` in, the document's own when it is handed none
+ * (`componentSchemaOf`).
+ */
+export function isDeclaredProperty(
+  schema: unknown,
+  componentSchemas?: Record<string, SchemaObject>,
+): schema is SchemaObject {
+  if (!schema) return false;
+  if (!isSchemaObject(schema) || schema.$ref === undefined) return true;
+  const schemas = componentSchemas ?? activeComponentSchemas;
+  // The `$ref`s followed so far, kept from the second on: one met again
+  // leads back to itself.
+  let seen: Set<unknown> | undefined;
+  let named = schemaRefValue(schema.$ref, schemas);
+  for (;;) {
+    if (named === undefined) return true;
+    if (!named) return false;
+    if (!isSchemaObject(named) || named.$ref === undefined) return true;
+    seen ??= new Set<unknown>([schema]);
+    if (seen.has(named)) return true;
+    seen.add(named);
+    named = schemaRefValue(named.$ref, schemas);
+  }
+}
+
 /** The keywords of a Schema Object that hold a list of schemas. */
 const SCHEMA_LIST_KEYWORDS = ['allOf', 'oneOf', 'anyOf'] as const;
 
@@ -2155,7 +2213,11 @@ const LIST_KEYWORDS = ['enum', 'required'] as const;
  * another kind of value under a variant (`enum: 'cat'`, `oneOf: {}`, a
  * `mapping` entry that is no string) is read by the merge as nothing and
  * fails the type builder. `readInlineAllOf` leaves an `allOf` whose union
- * member is not readable to the reading it had (workos/oagen#732).
+ * member is not readable to the reading it had (workos/oagen#732), and a
+ * property's declaration that is a nullable `oneOf`/`anyOf` wrapper is
+ * conjoined with another declaration of the property as the declaration
+ * it wraps only where it is readable (`openedNullableUnion`;
+ * workos/oagen#743: declared second, it was dropped unread).
  */
 export function isReadableSchema(schema: unknown): boolean {
   const seen = new Set<unknown>();
@@ -3521,7 +3583,10 @@ function findSchemaByName(pascalName: string, schemas: Record<string, SchemaObje
  * `extractModel` gives such a union. A composed component — an `allOf`, or
  * a typing union beside properties of its own (`composesComponentModel`)
  * — is read by `readComponentAllOf`. `name` is the model's, for the
- * dispatcher detection a variant axis needs.
+ * dispatcher detection a variant axis needs. An entry of `properties` that
+ * declares no property — `false`, or a `$ref` that leads to it — is no
+ * field of the model, here as in every reader of a `properties` map
+ * (`isDeclaredProperty`; #746).
  */
 export function componentPropertyLedger(
   name: string,
@@ -3534,12 +3599,12 @@ export function componentPropertyLedger(
     return ledger;
   }
   for (const [key, value] of Object.entries(schema.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, false);
+    if (isDeclaredProperty(value, schemas)) declareProperty(ledger, key, value, null, false);
   }
   if (ledger.size === 0) {
     for (const variant of unionVariantsOf(schema) ?? []) {
       for (const [key, value] of Object.entries(variant.properties ?? {})) {
-        if (value) declareProperty(ledger, key, value, null, true);
+        if (isDeclaredProperty(value, schemas)) declareProperty(ledger, key, value, null, true);
       }
     }
   }
@@ -3617,7 +3682,7 @@ function extractNestedSchema(
       const siblings = collectProperties(source);
       const fields: Field[] = [];
       for (const [fn, fs] of Object.entries(source.properties ?? {})) {
-        if (!fs) continue;
+        if (!isDeclaredProperty(fs, schemas)) continue;
         fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
       }
       models.push({
@@ -3639,7 +3704,7 @@ function extractNestedSchema(
     const siblings = collectProperties(schema);
     const fields: Field[] = [];
     for (const [fn, fs] of Object.entries(schema.properties)) {
-      if (!fs) continue;
+      if (!isDeclaredProperty(fs, schemas)) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
     return [
@@ -3668,7 +3733,7 @@ function extractNestedSchema(
     const siblings = collectProperties(schema.items);
     const fields: Field[] = [];
     for (const [fn, fs] of Object.entries(schema.items.properties)) {
-      if (!fs) continue;
+      if (!isDeclaredProperty(fs, schemas)) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
     return [
@@ -5046,7 +5111,7 @@ function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): Sch
   for (const [name, property] of Object.entries(variant.properties ?? {})) {
     const held = properties[name];
     if (!Object.hasOwn(properties, name)) properties[name] = property;
-    else if (held && property && narrowsDeclaration(property, held)) {
+    else if (isDeclaredProperty(held) && isDeclaredProperty(property) && narrowsDeclaration(property, held)) {
       properties[name] = { ...declarationKeywords(held), ...property };
     }
   }
@@ -6504,7 +6569,13 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
 
   // When additionalProperties is an object schema alongside properties,
   // surface it as a catch-all map field so emitters can generate Map<string, T>.
-  if (schema.additionalProperties && typeof schema.additionalProperties === 'object' && schema.properties) {
+  // `additionalProperties: false` allows none and gives no such field, and
+  // neither does a `$ref` that names that `false` (`isDeclaredProperty`; #746).
+  if (
+    isDeclaredProperty(schema.additionalProperties, schemas) &&
+    typeof schema.additionalProperties === 'object' &&
+    schema.properties
+  ) {
     const apKeys = Object.keys(schema.additionalProperties);
     if (apKeys.length > 0) {
       const valueType = schemaToTypeRef(schema.additionalProperties as SchemaObject, 'additionalProperties', name);
@@ -9626,7 +9697,7 @@ function readComponentAllOfMember(
     for (const r of level.required ?? []) noteRequired(reading, r, origin);
   }
   for (const [key, value] of Object.entries(resolved.properties ?? {})) {
-    if (value) declareUnder(reading, key, value, origin);
+    if (isDeclaredProperty(value, schemas)) declareUnder(reading, key, value, origin);
   }
   // A nullable wrapper is its one non-null variant, read as one more member
   // in this member's own capacity — decided per axis (`nullableAxisBranch`),
@@ -10099,7 +10170,7 @@ function getEffectiveProperties(
       return;
     }
     for (const [k, v] of Object.entries(s.properties ?? {})) {
-      if (!v) continue;
+      if (!isDeclaredProperty(v, schemas)) continue;
       const held = props.get(k);
       // A later pin replaces an open declaration; `set` keeps the key's
       // position, so the property order is still the order first declared.
@@ -10936,7 +11007,7 @@ function discriminatedVariantSchemas(
       // named `__proto__` is set rather than taken for the prototype.
       const mergedProperties = new Map<string, SchemaObject>(Object.entries(baseProperties));
       for (const [k, v] of Object.entries(flat.properties)) {
-        if (v) mergedProperties.set(k, v);
+        if (isDeclaredProperty(v, schemas)) mergedProperties.set(k, v);
       }
       const mergedRequired = new Set<string>([...baseRequired, ...(flat.required ?? [])]);
       // The variant's own keywords (read through its allOf wrappers, like its
@@ -11100,7 +11171,7 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
   const collect = (s: SchemaObject): void => {
     if (s.properties) {
       for (const [k, v] of Object.entries(s.properties)) {
-        if (!mergedProperties.has(k) && v) mergedProperties.set(k, v);
+        if (!mergedProperties.has(k) && isDeclaredProperty(v)) mergedProperties.set(k, v);
       }
     }
     if (s.required) {
@@ -11128,7 +11199,7 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
       const schemas: SchemaObject[] = [];
       for (const b of flatBranches) {
         const s = b.properties?.[key];
-        if (s) schemas.push(s);
+        if (isDeclaredProperty(s)) schemas.push(s);
       }
       const merged = mergeBranchPropertySchemas(schemas);
       if (!mergedProperties.has(key)) mergedProperties.set(key, merged);
@@ -11386,7 +11457,8 @@ export function componentTypeRef(key: string): TypeRef {
   // asked by whether the key is one, never by whether its value is truthy
   // (#728: `false` was no primitive here, so before #597, since which it
   // failed the parse, a `$ref` to it was a reference to a model `Anything`
-  // that no pass builds).
+  // that no pass builds). A property written as a `$ref` to `false` is
+  // never typed here: it declares no property (`isDeclaredProperty`; #746).
   const primitive = activePrimitiveComponentKeys.has(key) ? component : undefined;
   if (primitive !== undefined) return schemaToTypeRef(primitive);
   // An alias of an enum component is no model either (#560): the

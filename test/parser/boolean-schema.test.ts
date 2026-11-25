@@ -856,7 +856,9 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
   it('types every position with `true` there as with `{}`, and with `false` as before #597', async () => {
     // `false` is read as not written where a reader first asks whether a schema is written at all (a property,
     // `items`, a media type's or a parameter's `schema`), and as `{}` where it is asked for a type (a variant, a
-    // member, a component and every `$ref` to it).
+    // member, a component and every `$ref` to it that is read for one). A property that is a `$ref` to it is
+    // the `false` it names, no field, as the property written `false` is (#746: it was the field `any?:
+    // unknown`, read as `{}`).
     const lines: string[] = [];
     for (const row of table) {
       const [yes, no] = [await row.of(true), await row.of(false)];
@@ -1040,10 +1042,10 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
         false: Owner { ownerName?: string }; Pet { name?: string, value?: Value, tags?: TagsItem[] }; Value {  } = oneOf(Owner | string); TagsItem { label?: string } (as \`{}\` and as not written)
       a component a field names
         true:  Pet { name?: string, any?: unknown }
-        false: Pet { name?: string, any?: unknown } (as \`{}\`)
+        false: Pet { name?: string } (as neither)
       a component a required field names
         true:  Pet { name?: string, any: unknown }
-        false: Pet { name?: string, any: unknown } (as \`{}\`)
+        false: Pet { name?: string } (as neither)
       a component a response body names
         true:  Pet { name?: string }; getPet(path petId: string) -> unknown
         false: Pet { name?: string }; getPet(path petId: string) -> unknown (as \`{}\`)
@@ -1085,7 +1087,7 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
         false: Cat { kind: "cat", meow?: string }; Pet { name?: string, value?: Animal }; Animal {  } = oneOf(Cat | unknown) (as \`{}\`)
       a component an alias names
         true:  Pet { name?: string, any?: unknown }
-        false: Pet { name?: string, any?: unknown } (as \`{}\`)
+        false: Pet { name?: string } (as neither)
       a component a nullable wrapper names
         true:  Pet { name?: string, any?: nullable<unknown> }
         false: Pet { name?: string, any?: nullable<unknown> } (as \`{}\`)
@@ -1100,7 +1102,7 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
         false: Pet { name?: string, value?: (string | unknown) } (as \`{}\`)
       a component a \`$ref\` with text beside it names
         true:  Pet { name?: string, any?: unknown }
-        false: Pet { name?: string, any?: unknown } (as \`{}\`)
+        false: Pet { name?: string } (as neither)
       a component an alias written as a lone \`allOf\` names
         true:  Pet { name?: string, any?: unknown }
         false: Pet { name?: string, any?: unknown } (as \`{}\`)
@@ -1115,7 +1117,7 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
         false: Pet { name?: string }; listPets(query after: string) -> unknown paged cursor of unknown (as \`{}\`)
       a component a list envelope's \`data\` names
         true:  Pet { name?: string }; ListPetsResponse { data?: unknown, list_metadata?: ListPetsResponseListMetadata }; ListPetsResponseListMetadata { after?: string }; listPets(query after: string) -> ListPetsResponse paged cursor of ListPetsResponse
-        false: Pet { name?: string }; ListPetsResponse { data?: unknown, list_metadata?: ListPetsResponseListMetadata }; ListPetsResponseListMetadata { after?: string }; listPets(query after: string) -> ListPetsResponse paged cursor of ListPetsResponse (as \`{}\`)
+        false: Pet { name?: string }; ListPetsResponse { list_metadata?: ListPetsResponseListMetadata }; ListPetsResponseListMetadata { after?: string }; listPets(query after: string) -> ListPetsResponse paged cursor of ListPetsResponse (as neither)
       a response body
         true:  Pet { name?: string }; getPet(path petId: string) -> unknown
         false: Pet { name?: string }; getPet(path petId: string) -> unknown (as \`{}\` and as not written)
@@ -1191,17 +1193,32 @@ describe.each(VERSIONS)('#728 a boolean where a schema goes, OpenAPI %s', (opena
     `);
   });
 
-  it('reads a `$ref` to a component that is `false` as a `$ref` to `true` is: `unknown`, never a model the IR lacks', async () => {
+  it('reads a `$ref` to a component that is `false` as a `$ref` to `true` is where it is read for a type, `unknown`, and as the `false` it names where it is a property (#746): never a model the IR lacks', async () => {
     // The one reading that is deliberately not the pre-#597 one. Before #597 the reference was `{ kind: 'model',
     // name: 'Anything' }`, a model no pass builds, with no warning: the readers that look the component up asked
     // whether it was truthy (`componentTypeRef`, `mergeAllOfMembers`), and `false` is a component that is there.
     const naming = table.filter(({ position }) => /^a component (?!nothing)/.test(position));
     expect(naming.length).toBeGreaterThanOrEqual(26);
+    // The rows whose `$ref` is a property's schema. The property is the `false` it names, so it is no field, as
+    // `false` written in its place is none (#746: it was the field `any: unknown` the `{}` component gives, and
+    // `oagen diff` between the two spellings of one schema reported a field added).
+    const envelope =
+      'ListPetsResponse { list_metadata?: ListPetsResponseListMetadata }; ListPetsResponseListMetadata { after?: string }; listPets(query after: string) -> ListPetsResponse paged cursor of ListPetsResponse';
+    const asProperty = new Map([
+      ['a component a field names', 'Pet { name?: string }'],
+      ['a component a required field names', 'Pet { name?: string }'],
+      ['a component an alias names', 'Pet { name?: string }'],
+      ['a component a `$ref` with text beside it names', 'Pet { name?: string }'],
+      ["a component a list envelope's `data` names", `Pet { name?: string }; ${envelope}`],
+    ]);
+    expect(naming.filter(({ position }) => asProperty.has(position))).toHaveLength(asProperty.size);
     for (const row of naming) {
       for (const value of [false, 0, '']) {
         const label = `${row.position}: ${JSON.stringify(value)}`;
         const reading = await row.of(value);
-        expect(reading.spec, label).toEqual(row.empty.spec);
+        const declared = asProperty.get(row.position);
+        if (declared === undefined) expect(reading.spec, label).toEqual(row.empty.spec);
+        else expect(render(reading.spec), label).toBe(declared);
         expect(reading.warnings, label).toEqual(row.empty.warnings);
         expect(danglingReferences(reading.spec), label).toEqual([]);
       }

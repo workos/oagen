@@ -76,6 +76,7 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  isDeclaredProperty,
   fieldSettings,
   pinnedDeclarationAdmitsNull,
   pinnedDeclarationValue,
@@ -4809,7 +4810,8 @@ function collectVariantFieldSchemas(
     const resolved = resolveComponentSchemaRef(variant, componentSchemas) ?? variant;
     const variantOwner = variantKey !== undefined ? resolveSchemaName(variantKey) : owner;
     for (const [name, fieldSchema] of Object.entries(resolved.properties ?? {})) {
-      if (fieldSchema) out.set(name, { schema: fieldSchema, owner: variantOwner });
+      if (isDeclaredProperty(fieldSchema, componentSchemas))
+        out.set(name, { schema: fieldSchema, owner: variantOwner });
     }
     collectVariantFieldSchemas(variant, componentSchemas, owner, out, seen);
   }
@@ -5299,7 +5301,7 @@ function typePickedRequestBody(
     const siblings = collectProperties(schema);
     const fields: Field[] = [];
     for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
-      if (!fieldSchema) continue;
+      if (!isDeclaredProperty(fieldSchema, componentSchemas)) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
     inlineModels.push({
@@ -5403,7 +5405,7 @@ function typePickedRequestBody(
       const siblings = collectProperties(source);
       const fields: Field[] = [];
       for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
-        if (!fieldSchema) continue;
+        if (!isDeclaredProperty(fieldSchema, componentSchemas)) continue;
         fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings));
       }
       inlineModels.push({
@@ -5626,7 +5628,7 @@ function flattenDiscriminatedUnionBody(
   for (const variant of variants) {
     const required = new Set(variant.required ?? []);
     for (const [name, propSchema] of Object.entries(variant.properties!)) {
-      if (!propSchema) continue;
+      if (!isDeclaredProperty(propSchema, componentSchemas)) continue;
       let declared = declarations.get(name);
       if (!declared) declarations.set(name, (declared = []));
       declared.push(propSchema as SchemaObject);
