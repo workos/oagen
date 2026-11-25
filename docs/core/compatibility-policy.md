@@ -173,7 +173,7 @@ The `failOn` level determines which unapproved changes cause `oagen verify` to f
 
 Some changes have a recognized upstream root cause that the spec author can fix. When the differ detects one, it attaches a `remediation` string to the classified change. The hint surfaces in both the machine-readable report (`CompatReportChange.remediation`) and the human-readable summary (printed as `hint: ...` underneath the change).
 
-The classification, severity, and fail-threshold semantics are unchanged — `remediation` is purely advisory, telling the spec author how to make the change non-breaking.
+The hint is advisory: it tells the spec author how to make the change non-breaking. It never changes a change's category; where a pattern also changes the severity, the pattern says so below.
 
 ### Detected patterns
 
@@ -181,9 +181,34 @@ The classification, severity, and fail-threshold semantics are unchanged — `re
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Schema fork** | A `return_type_changed` or `field_type_changed` where the new type was newly added in the candidate snapshot _and_ its field set is a non-strict superset of the prior type's field set. | "Schema `NewType` looks like `OldType` with additional fields. Consider adding the new fields to `OldType` instead of forking a new schema." Forking forces a breaking type-name change in typed SDKs; extending the existing schema is additive. |
 
+A schema fork is reported as `soft-risk`, not `breaking`: the new type has every field a caller read on the old one, so only an explicit annotation with the old type's name has to move. A retype to a type that already existed, or to one that drops a field, stays `breaking` and gets no hint.
+
+### How the two types are found
+
+A snapshot records a type as the text its extractor wrote (`CompatTypeRef.name`), and the differ looks the old and the new type up by the name that text carries (`bareTypeName` in `src/compat/type-names.ts`). It reads the name through:
+
+- an optional or nullable spelling, in any order and spacing: `X | undefined`, `X | null`, `null | X`, `X | None`, `Union[X, None]`, `X | nil`, `?X`, `X?`, `*X`, `Optional[X]`, `NotRequired[X]`, `Option<X>`, `Nullable<X>`, `T.nilable(X)`
+- one array suffix: `X[]`
+- one single-argument generic: `Promise<X>`, `List<X>`, `Iterator[X]`
+
+An optional spelling says nothing about the type the value has when it is there, so it is read through wherever the lookup looks: around the whole type, around an array's element (`(X | null)[]`, `X?[]`) and around a generic's argument (`Promise<X | undefined>`, `list[Optional[X]]`). A text is looked up exactly as the same text without its optional spellings is: `ErrorBody | undefined` → `ErrorBodyWithCode | undefined` on an optional class property, `ErrorBody | None` → `ErrorBodyWithCode | None` on a Python model field and `?ErrorBody` → `?ErrorBodyWithCode` on a PHP promoted property are each the retype `ErrorBody` → `ErrorBodyWithCode`.
+
+```
+Compat report:
+  0 breaking, 1 soft-risk, 3 additive
+
+  Soft-risk:
+    [field_type_changed] PetsError.body — Type changed for "PetsError.body" from "ErrorBody | undefined" to "ErrorBodyWithCode | undefined"
+      hint: Schema "ErrorBodyWithCode" looks like "ErrorBody" with additional fields. Consider adding the new fields to "ErrorBody" instead of forking a new schema — forking forces a breaking type-name change in typed SDKs, while extending the existing schema is additive.
+```
+
+A text that names no single type is not looked up, with or without an optional spelling, and a retype there stays `breaking`: a union of several types (`A | B`, `A | B | null`), a generic with several arguments (`Record<string, X>`), a nested array or generic (`X[][]`, `Promise<X[]>`), an object or function type.
+
+The lookup reads the name only; it does not compare what stands around it. A retype that also adds or drops an optional spelling (`ErrorBody` → `ErrorBodyWithCode | null`) is found the same way. A change of the spelling alone (`ErrorBody` → `ErrorBody | null`) names the same type on both sides, so it is an ordinary `field_type_changed` and stays `breaking`.
+
 ### Example: schema fork
 
-A path's response `$ref` is redirected from `MembershipBaseList` to a brand-new `MembershipBaseWithUserList` whose only difference is an added `user` field. The differ reports a `return_type_changed` (breaking) for the affected method, plus the remediation hint pointing the spec author at the additive alternative.
+A path's response `$ref` is redirected from `MembershipBaseList` to a brand-new `MembershipBaseWithUserList` whose only difference is an added `user` field. The differ reports a `return_type_changed` (soft-risk) for the affected method, plus the remediation hint pointing the spec author at the additive alternative.
 
 If the upstream fix can't land in time, `transformSpec` is the local escape hatch — see [`transformSpec` — Pre-IR Spec Overlay](../advanced/transform-spec.md).
 
