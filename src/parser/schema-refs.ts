@@ -145,6 +145,20 @@ const SCHEMA_KEYWORDS: ReadonlyMap<string, 'one' | 'list' | 'map'> = new Map<str
  * object, and a `true`/`false` boolean schema.
  */
 export function schemaAtPointer(root: SchemaObject, tokens: readonly string[]): SchemaObject | undefined {
+  if (tokens.length === 0) return root;
+  const landed = writtenAtPointer(root, tokens);
+  return isRecord(landed) ? (landed as SchemaObject) : undefined;
+}
+
+/**
+ * What the pointer `tokens` (one at least) lead to from `root`, as the
+ * document wrote it: `schemaAtPointer`'s walk, answered with whatever the
+ * last step names where a schema goes — a Schema Object, a JSON Schema
+ * boolean, or anything else a document holds there. `undefined` for a
+ * token that names nothing, and for a step that is not the last and lands
+ * on no object.
+ */
+function writtenAtPointer(root: SchemaObject, tokens: readonly string[]): unknown {
   let current: SchemaObject = root;
   for (let index = 0; index < tokens.length; index++) {
     const keyword = tokens[index];
@@ -161,10 +175,32 @@ export function schemaAtPointer(root: SchemaObject, tokens: readonly string[]): 
       const token = tokens[++index];
       next = token !== undefined && Object.hasOwn(value, token) ? value[token] : undefined;
     }
+    if (index >= tokens.length - 1) return next;
     if (!isRecord(next)) return undefined;
     current = next as SchemaObject;
   }
   return current;
+}
+
+/**
+ * What a `$ref` points at in `schemas`, as the document wrote it:
+ * `schemaRefTarget`'s walk, answered with whatever is written at the place
+ * the `$ref` names — the component under its key, or the value a deeper
+ * pointer lands on, which is a Schema Object, a JSON Schema boolean
+ * (`Never: false`, a property written `false`) or anything else a document
+ * holds where a schema goes. `undefined` when the `$ref` names no place:
+ * it points outside `components/schemas`, at a key the map lacks, or
+ * through a token that names nothing. For the one reader that asks what
+ * is written there before it asks for a schema (`isDeclaredProperty`):
+ * `schemaRefTarget` answers a pointer that lands on a boolean as it
+ * answers one that lands nowhere.
+ */
+export function schemaRefValue(ref: unknown, schemas: Record<string, SchemaObject> | undefined): unknown {
+  const tokens = schemaRefTokens(ref);
+  if (!tokens || !schemas || !Object.hasOwn(schemas, tokens[0])) return undefined;
+  const component: unknown = schemas[tokens[0]];
+  if (tokens.length === 1) return component;
+  return isRecord(component) ? writtenAtPointer(component as SchemaObject, tokens.slice(1)) : undefined;
 }
 
 /** Whether `token` is an array index as RFC 6901 §4 spells one: `0`, or digits with no leading zero. */

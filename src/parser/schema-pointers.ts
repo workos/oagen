@@ -123,6 +123,7 @@ import {
   componentTypeRef,
   isArrayComponentRef,
   isArrayPointerRef,
+  isDeclaredProperty,
   isNullSchema,
   modelReferenceIdentity,
   OWN_MODEL,
@@ -531,6 +532,14 @@ export interface PointerStep {
  * A pointer that goes through several `allOf`s to the member it ends at
  * (`value/allOf/1/allOf/0`) ends at a type only when each of them is read
  * as the member it goes through (`memberNotReadAs`; #675 review).
+ *
+ * A `properties/<name>` step to an entry that declares no property
+ * (`isDeclaredProperty`: written `false`, or as a `$ref` that leads to
+ * `false`) leads to no schema, whichever way the entry is written, since
+ * the model has no such field; and so does an `additionalProperties` step,
+ * beside named properties, to one, which gives the model no catch-all
+ * field (#746: the `$ref` spelling was a schema here, and the site was
+ * typed from the field the model then had).
  */
 export function pointerSteps(
   component: SchemaObject,
@@ -546,6 +555,11 @@ export function pointerSteps(
     if (!next) return { problem: 'no schema at that pointer' };
     switch (keyword) {
       case 'properties':
+        // A property written as a `$ref` that names `false` is the `false`
+        // it names (`isDeclaredProperty`; #746): no schema, as the same
+        // `false` written in its place is none (`schemaAtPointer`).
+        if (!isDeclaredProperty(next, schemas)) return { problem: 'no schema at that pointer' };
+        break;
       case 'items':
         break;
       case 'additionalProperties':
@@ -557,6 +571,11 @@ export function pointerSteps(
         const named = Object.keys(node.properties ?? {}).length > 0;
         if (keyword === 'patternProperties' && named)
           return { problem: `a schema with named properties types no "${keyword}/${name}" values` };
+        // Beside named properties a `$ref` that names `false` gives the
+        // model no catch-all field, as `additionalProperties: false` gives
+        // it none (`isDeclaredProperty`; #746): no schema to read values from.
+        if (keyword === 'additionalProperties' && named && !isDeclaredProperty(next, schemas))
+          return { problem: 'no schema at that pointer' };
         if (represented !== next && !(keyword === 'additionalProperties' && represented === null && !named))
           return {
             problem: `the values are typed from another schema than "${keyword}${name === undefined ? '' : `/${name}`}"`,

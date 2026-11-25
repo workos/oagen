@@ -1159,6 +1159,8 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
         }
         // Beside no member that names a schema that says what an instance is, the `$ref` is read as before.
         lines.push(`${written} alone: ${await ownerOf(openapi, { allOf: [Anything] }, schemas)}`);
+        // As the property's own schema, a `$ref` to `false` is the `false` it names: no field, as `owner: false`
+        // is none (#746: it was the field `owner: unknown`).
         lines.push(`${written} as the field: ${await ownerOf(openapi, Anything, schemas)}`);
       }
       expect(lines.join('\n')).toMatchInlineSnapshot(`
@@ -1175,7 +1177,7 @@ describe('#731 an `allOf` member that is a `$ref` to a component that only annot
         false under a wrapper: nullable<Owner>
         false beside two typing \`$ref\`s: nullable<PetOwner> { name?, label? }
         false alone: unknown
-        false as the field: unknown
+        false as the field: none
         {} after the \`$ref\`: nullable<Owner>
         {} before the \`$ref\`: nullable<Owner>
         {} beside a text and a veto: Owner <description="Any owner.">
