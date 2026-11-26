@@ -1258,7 +1258,10 @@ function extractDirectResource(
       // its bases, and the fields it takes from one unchanged, as the model
       // every other site builds from the merged list does (`buildMergedModel`,
       // `withProvenance`; #755) — each field still typed under the body's
-      // own name, as a component's model types the fields of its bases.
+      // own name, as a component's model types the fields of its bases
+      // (`ListPetsResponseMeta`, and `ListPetsResponse202Meta` for a `202`:
+      // every exact `2xx` status code's body is read here), where the list
+      // types an inherited field as its component does (`AnimalMeta`).
       const [model, ...nested] = extractInlineModel(modelName, rebuilt, componentSchemas);
       inlineModels.push(withProvenance(model!, merged.provenance), ...nested);
       return {

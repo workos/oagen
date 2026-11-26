@@ -9760,9 +9760,9 @@ export interface ModelProvenance {
  * base its field is taken from unchanged (`inheritedBase`). The one answer
  * to which bases a model names and which of its fields are a base's, asked
  * for a component's model (`extractAllOfModel`) and for the model of an
- * `allOf` written inline (`mergeAllOfMembers`, for `buildMergedModel` and a
- * primary response body's model; #755), and written onto either by
- * `withProvenance`.
+ * `allOf` written inline (`mergeAllOfMembers`, for `buildMergedModel` and
+ * for the model `extractDirectResource` builds of an exact `2xx` status
+ * code's body; #755), and written onto either by `withProvenance`.
  */
 export function provenanceOf(
   ledger: ReadonlyMap<string, PropertyDeclarations>,

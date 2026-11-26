@@ -696,7 +696,7 @@ describe('#755 the bases of an inline `allOf`', () => {
         expect(lines).toEqual(openapi === '3.1.0' ? [...shared, ...only31] : shared);
       });
 
-      it('types an inherited field as the base’s own on a merged model, and under the body’s name on the primary response', async () => {
+      it('types an inherited field as the base’s own on a merged model, and under the body’s name on the body of an exact 2xx status code', async () => {
         const merged = { allOf: [R('Meta'), code] };
         const field = await parse(
           document(openapi, petPath(ok), { ...matrixSchemas(openapi), Holder: obj({ pet: merged }) }),
@@ -720,6 +720,276 @@ describe('#755 the bases of an inline `allOf`', () => {
         expect(modelFingerprint({ ...modelOf(body, 'GetPetResponseMeta')!, name: '' })).toBe(
           modelFingerprint({ ...modelOf(body, 'MetaMeta')!, name: '' }),
         );
+      });
+
+      describe('under which name an inherited field’s type is built (review, finding 1)', () => {
+        const Animal = obj({ name: string, meta: obj({ color: string }) }, ['name']);
+        /** `Animal` and one property of the body's own. */
+        const extended = (own: string): Doc => ({ allOf: [R('Animal'), obj({ [own]: string })] });
+        const listPets = (responses: Doc, more: Doc = {}): Doc => ({
+          '/pets': { get: { operationId: 'listPets', responses, ...more } },
+        });
+        const vnd = 'application/vnd.pet+json';
+        /** `Model.meta: Type ← Base` for the model `type` names. */
+        const meta = (spec: ApiSpec, type: TypeRef | undefined): string => {
+          const [name] = modelNames(type).filter((model) => model !== 'Animal' && model !== 'Pet');
+          const field = modelOf(spec, name)?.fields.find((f) => f.name === 'meta');
+          return `${name}.meta: ${show(field?.type)}${field?.inheritedFrom ? ` ← ${show(field.inheritedFrom)}` : ''}`;
+        };
+
+        it('is the body’s own for a `200` and a `202`, and the base’s for a `2XX` and an error body', async () => {
+          // The reviewer's document.
+          const doc = document(
+            openapi,
+            listPets({
+              '200': { description: 'OK', ...json(extended('nickname')) },
+              '202': { description: 'Accepted', ...json(extended('accepted')) },
+              '2XX': { description: 'Any', ...json(extended('ranged')) },
+              '400': { description: 'Bad Request', ...json(extended('code')) },
+            }),
+            { Animal },
+          );
+          for (const [collapseErrorBodies, error] of [
+            [false, 'ListPetsError400'],
+            [true, 'ErrorBodyWithNameWithoutMessage'],
+          ] as const) {
+            const spec = await parse(doc, { collapseErrorBodies });
+            const op = operation(spec, 'listPets');
+            expect([
+              meta(spec, op.response),
+              meta(spec, op.successResponses?.find((r) => r.statusCode === 202)?.type),
+              meta(spec, op.rangeResponses?.[0]?.type),
+              meta(spec, op.errors[0]?.type),
+            ]).toEqual([
+              'ListPetsResponse.meta: ListPetsResponseMeta ← Animal',
+              'ListPetsResponse202.meta: ListPetsResponse202Meta ← Animal',
+              'ListPetsSuccessResponse.meta: AnimalMeta ← Animal',
+              `${error}.meta: AnimalMeta ← Animal`,
+            ]);
+            // Each body's own nested model is the base's shape under another name, and the
+            // models built from the merged list name the base's.
+            expect(spec.models.filter((m) => m.name.endsWith('Meta')).map((m) => m.name)).toEqual([
+              'AnimalMeta',
+              'ListPetsResponseMeta',
+              'ListPetsResponse202Meta',
+            ]);
+            for (const name of ['ListPetsResponseMeta', 'ListPetsResponse202Meta']) {
+              expect(modelFingerprint({ ...modelOf(spec, name)!, name: '' }), name).toBe(
+                modelFingerprint({ ...modelOf(spec, 'AnimalMeta')!, name: '' }),
+              );
+            }
+          }
+        });
+
+        it('is the body’s own exactly where the `allOf` is itself the body of an exact `2xx` status code', async () => {
+          const okPet = { '200': { description: 'OK', ...json(R('Pet')) } };
+          const nullableByType =
+            openapi === '3.1.0'
+              ? { type: ['object', 'null'], ...extended('nickname') }
+              : { nullable: true, ...extended('nickname') };
+          const success = (spec: ApiSpec, code: number) =>
+            operation(spec, 'listPets').successResponses?.find((r) => r.statusCode === code);
+          const rows: ReadonlyArray<
+            readonly [string, { paths: Doc; more?: Doc }, (spec: ApiSpec) => TypeRef | undefined]
+          > = [
+            // Built from the merged shape as one object (`extractDirectResource`): its own name.
+            [
+              'a 201, the only response',
+              { paths: listPets({ '201': { description: 'Made', ...json(extended('nickname')) } }) },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 204 beside a 200 and a 202',
+              {
+                paths: listPets({
+                  ...okPet,
+                  '202': { description: 'Later', ...json(extended('accepted')) },
+                  '204': { description: 'Third', ...json(extended('third')) },
+                }),
+              },
+              (spec) => success(spec, 204)?.type,
+            ],
+            [
+              'a 200 from components/responses',
+              {
+                paths: listPets({ '200': { $ref: '#/components/responses/Listed' } }),
+                more: { components: { responses: { Listed: { description: 'OK', ...json(extended('nickname')) } } } },
+              },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 202 from components/responses',
+              {
+                paths: listPets({ ...okPet, '202': { $ref: '#/components/responses/Later' } }),
+                more: { components: { responses: { Later: { description: 'Later', ...json(extended('accepted')) } } } },
+              },
+              (spec) => success(spec, 202)?.type,
+            ],
+            [
+              'a 200 under a +json media type alone',
+              {
+                paths: listPets({ '200': { description: 'OK', content: { [vnd]: { schema: extended('nickname') } } } }),
+              },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 200, a lone member around the allOf',
+              { paths: listPets({ '200': { description: 'OK', ...json({ allOf: [extended('nickname')] }) } }) },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 200, properties beside the allOf',
+              {
+                paths: listPets({
+                  '200': { description: 'OK', ...json({ allOf: [R('Animal')], properties: { nickname: string } }) },
+                }),
+              },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 200, null by its type list or flag',
+              { paths: listPets({ '200': { description: 'OK', ...json(nullableByType) } }) },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            // Built from the merged list: the base's.
+            [
+              'a 200’s second media type',
+              {
+                paths: listPets({
+                  '200': {
+                    description: 'OK',
+                    content: { 'application/json': { schema: R('Pet') }, [vnd]: { schema: extended('other') } },
+                  },
+                }),
+              },
+              (spec) => operation(spec, 'listPets').responseContents?.find((c) => c.contentType === vnd)?.type,
+            ],
+            [
+              'a 202’s second media type',
+              {
+                paths: listPets({
+                  ...okPet,
+                  '202': {
+                    description: 'Later',
+                    content: { 'application/json': { schema: R('Pet') }, [vnd]: { schema: extended('other') } },
+                  },
+                }),
+              },
+              (spec) => success(spec, 202)?.contents?.find((c) => c.contentType === vnd)?.type,
+            ],
+            [
+              'a 200 that reaches the allOf through a null variant',
+              {
+                paths: listPets({
+                  '200': { description: 'OK', ...json({ oneOf: [extended('nickname'), { type: 'null' }] }) },
+                }),
+              },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 200 that reaches the allOf through a union',
+              { paths: listPets({ '200': { description: 'OK', ...json({ oneOf: [extended('nickname'), string] }) } }) },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 200’s array items',
+              {
+                paths: listPets({
+                  '200': { description: 'OK', ...json({ type: 'array', items: extended('nickname') }) },
+                }),
+              },
+              (spec) => operation(spec, 'listPets').response,
+            ],
+            [
+              'a 302',
+              { paths: listPets({ ...okPet, '302': { description: 'Found', ...json(extended('moved')) } }) },
+              (spec) => success(spec, 302)?.contents?.[0]?.type,
+            ],
+            [
+              'a 3XX',
+              { paths: listPets({ ...okPet, '3XX': { description: 'Moved', ...json(extended('moved')) } }) },
+              (spec) => operation(spec, 'listPets').rangeResponses?.[0]?.type,
+            ],
+            [
+              'a 2XX from components/responses',
+              {
+                paths: listPets({ ...okPet, '2XX': { $ref: '#/components/responses/Any' } }),
+                more: { components: { responses: { Any: { description: 'Any', ...json(extended('ranged')) } } } },
+              },
+              (spec) => operation(spec, 'listPets').rangeResponses?.[0]?.type,
+            ],
+            [
+              'the default',
+              { paths: listPets({ ...okPet, default: { description: 'Else', ...json(extended('other')) } }) },
+              (spec) => operation(spec, 'listPets').defaultResponse?.type,
+            ],
+            [
+              'a 404 from components/responses',
+              {
+                paths: listPets({ ...okPet, '404': { $ref: '#/components/responses/Missing' } }),
+                more: { components: { responses: { Missing: { description: 'Missing', ...json(extended('code')) } } } },
+              },
+              (spec) => operation(spec, 'listPets').errors[0]?.type,
+            ],
+            [
+              'a request body',
+              {
+                paths: {
+                  '/pets': {
+                    post: {
+                      operationId: 'listPets',
+                      requestBody: json(extended('nickname')),
+                      responses: { '204': { description: 'OK' } },
+                    },
+                  },
+                },
+              },
+              (spec) => operation(spec, 'listPets').requestBody,
+            ],
+            [
+              'a callback payload',
+              {
+                paths: listPets(okPet, {
+                  callbacks: {
+                    onChange: {
+                      '{$request.query.url}': {
+                        post: { requestBody: json(extended('changed')), responses: { '200': { description: 'OK' } } },
+                      },
+                    },
+                  },
+                }),
+              },
+              (spec) => operation(spec, 'listPets').callbacks?.[0]?.requestBody,
+            ],
+          ];
+          const lines: string[] = [];
+          for (const [label, { paths, more }, pick] of rows) {
+            const spec = await parse(document(openapi, paths, { Animal, Pet }, more));
+            lines.push(`${label}: ${meta(spec, pick(spec))}`);
+          }
+          expect(lines).toEqual([
+            'a 201, the only response: ListPetsResponse.meta: ListPetsResponseMeta ← Animal',
+            'a 204 beside a 200 and a 202: ListPetsResponse204.meta: ListPetsResponse204Meta ← Animal',
+            'a 200 from components/responses: ListedResponse.meta: ListedResponseMeta ← Animal',
+            'a 202 from components/responses: LaterResponse.meta: LaterResponseMeta ← Animal',
+            'a 200 under a +json media type alone: ListPetsResponse.meta: ListPetsResponseMeta ← Animal',
+            'a 200, a lone member around the allOf: ListPetsResponse.meta: ListPetsResponseMeta ← Animal',
+            'a 200, properties beside the allOf: ListPetsResponse.meta: ListPetsResponseMeta ← Animal',
+            'a 200, null by its type list or flag: ListPetsResponse.meta: ListPetsResponseMeta ← Animal',
+            'a 200’s second media type: ListPetsApplicationVndPetJsonResponse.meta: AnimalMeta ← Animal',
+            'a 202’s second media type: ListPetsApplicationVndPetJsonResponse202.meta: AnimalMeta ← Animal',
+            'a 200 that reaches the allOf through a null variant: ListPetsResponse.meta: AnimalMeta ← Animal',
+            'a 200 that reaches the allOf through a union: ListPetsResponse.meta: AnimalMeta ← Animal',
+            'a 200’s array items: ListPetsItem.meta: AnimalMeta ← Animal',
+            'a 302: ListPetsApplicationJsonResponse.meta: AnimalMeta ← Animal',
+            'a 3XX: ListPetsRedirectResponse.meta: AnimalMeta ← Animal',
+            'a 2XX from components/responses: AnyResponse.meta: AnimalMeta ← Animal',
+            'the default: ListPetsDefaultResponse.meta: AnimalMeta ← Animal',
+            'a 404 from components/responses: MissingResponse.meta: AnimalMeta ← Animal',
+            'a request body: ListPetsRequest.meta: AnimalMeta ← Animal',
+            'a callback payload: ListPetsOnChangePayload.meta: AnimalMeta ← Animal',
+          ]);
+        });
       });
 
       it('leaves a union’s variant that writes `properties` beside its `allOf` the object alone, as before', async () => {

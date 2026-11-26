@@ -1743,11 +1743,23 @@ export interface Field {
    * variants declare is. Unchanged means as the document declares it: the
    * field's `type` is still built under this model's name, so an inline
    * object `Animal.meta` declares is `AnimalMeta` on `Animal` and
-   * `PetMeta` on `Pet` — the same shape — with `inheritedFrom: Animal`;
-   * on a model the inline merge builds it is the base's own `AnimalMeta`,
-   * the merge copying the component's field (`HolderPet.meta`), and on a
-   * primary response body's model it is built under the body's name
-   * (`GetPetResponseMeta`), with `inheritedFrom: Animal` either way.
+   * `PetMeta` on `Pet` — the same shape — with `inheritedFrom: Animal`.
+   * On the model of an inline `allOf` it is built under that model's
+   * name too where the `allOf` is itself the body of an exact `2xx`
+   * status code — the body `Operation.response` or a `successResponses`
+   * entry's `type` is read from, written inline or in a
+   * `components/responses` entry: `listPets` answering `200` with
+   * `allOf: [{ $ref: Animal }, { properties: { nickname } }]` and `202`
+   * with `allOf: [{ $ref: Animal }, { properties: { accepted } }]` has
+   * `ListPetsResponse.meta: ListPetsResponseMeta` and
+   * `ListPetsResponse202.meta: ListPetsResponse202Meta`. On every other
+   * model built from an inline `allOf` it is the base's own `AnimalMeta`,
+   * the merge copying the component's field: a range's (`2XX`, `3XX`) or
+   * `default`'s body, the body of a `3xx` or an error status code, a
+   * second media type's, a `2xx` body that only reaches the `allOf`
+   * through a `null` variant or a union's, array items, a field
+   * (`HolderPet.meta`), a request body, a parameter, a header, a webhook
+   * or callback payload. `inheritedFrom: Animal` either way.
    * A field without it is the model's to write, whether the model adds
    * it or declares it over a base's field of that name — the two are
    * told apart only by the base's `fields`, and a parent class has to

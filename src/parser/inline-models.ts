@@ -2736,8 +2736,8 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * The one decision every site makes of an inline `allOf` — `schemaToTypeRef`
  * when it types the schema, `mintedInlineNameEntries` when it predicts the
  * names, the field extractor and `extractInlineModelDeep` when they build
- * the models, `extractDirectResource` when it reads a primary response body
- * — so a model is built exactly when a reference names it:
+ * the models, `extractDirectResource` when it reads the body of an exact
+ * `2xx` status code — so a model is built exactly when a reference names it:
  *
  *   - `'merged'`: a `$ref` member beside an inline object member
  *     (`isInlineAllOfMember`), or, without a `$ref`, several members one of
