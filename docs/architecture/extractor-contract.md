@@ -35,16 +35,16 @@ interface ApiSurface {
 
 Each sub-type captures a different kind of public symbol:
 
-| Type           | Fields                                                                 | What it captures                                                                  |
-| -------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `ApiClass`     | `name`, `sourceFile?`, `methods`, `properties`, `constructorParams`    | Public classes with their methods and properties                                  |
-| `ApiMethod`    | `name`, `params`, `returnType`, `async`                                | Method signatures (methods is `Record<string, ApiMethod[]>` to support overloads) |
-| `ApiParam`     | `name`, `type`, `optional`                                             | Method and constructor parameters                                                 |
-| `ApiProperty`  | `name`, `type`, `readonly`                                             | Class properties                                                                  |
-| `ApiInterface` | `name`, `sourceFile?`, `fields`, `extends`, `fieldOptionalityUnknown?` | Interface declarations, model classes                                             |
-| `ApiField`     | `name`, `type`, `optional`, `resolvedType?`                            | Interface fields                                                                  |
-| `ApiTypeAlias` | `name`, `sourceFile?`, `value`, `fields?`, `extends?`                  | Type alias declarations                                                           |
-| `ApiEnum`      | `name`, `sourceFile?`, `members`                                       | Enum declarations with member values                                              |
+| Type           | Fields                                                                                        | What it captures                                                                  |
+| -------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `ApiClass`     | `name`, `sourceFile?`, `methods`, `properties`, `constructorParams`                           | Public classes with their methods and properties                                  |
+| `ApiMethod`    | `name`, `params`, `returnType`, `async`                                                       | Method signatures (methods is `Record<string, ApiMethod[]>` to support overloads) |
+| `ApiParam`     | `name`, `type`, `optional`                                                                    | Method and constructor parameters                                                 |
+| `ApiProperty`  | `name`, `type`, `readonly`                                                                    | Class properties                                                                  |
+| `ApiInterface` | `name`, `sourceFile?`, `fields`, `extends`, `fieldOptionalityUnknown?`, `hasUnlistedMembers?` | Interface declarations, model classes                                             |
+| `ApiField`     | `name`, `type`, `optional`, `resolvedType?`                                                   | Interface fields                                                                  |
+| `ApiTypeAlias` | `name`, `sourceFile?`, `value`, `fields?`, `extends?`, `hasUnlistedMembers?`                  | Type alias declarations                                                           |
+| `ApiEnum`      | `name`, `sourceFile?`, `members`                                                              | Enum declarations with member values                                              |
 
 The `exports` field maps file paths to their exported symbol names, capturing the barrel export structure.
 
@@ -56,10 +56,11 @@ The `exports` field maps file paths to their exported symbol names, capturing th
 
 3. **Preserve fidelity** — Method signatures should capture parameter names, types, and optionality as they appear in the live SDK, not as the IR would generate them.
 
-4. **Say what the SDK declares about a type, and nothing it does not** — The compat snapshot keeps three things the surface states, and the differ reads them (see [Compatibility IR → Types and Their Members](../core/compatibility-ir.md#types-and-their-members)):
+4. **Say what the SDK declares about a type, and nothing it does not** — The compat snapshot keeps four things the surface states, and the differ reads them (see [Compatibility IR → Types and Their Members](../core/compatibility-ir.md#types-and-their-members)):
    - `ApiField.optional` is `false` for a field a caller that builds the type must supply, and a required field added to a type a callable takes is reported as breaking. Where the extractor cannot tell which fields may be left out, set `ApiInterface.fieldOptionalityUnknown` on the interface instead of leaving a placeholder `false` to be taken for a declaration.
    - `ApiInterface.extends` lists the supertypes the declaration names, as written; a field or return retyped to a type that names the old one there is reported as soft-risk. Leave it `[]` when the extractor reads none.
    - `ApiTypeAlias.fields` and `extends` are for an alias that names an object shape, when the extractor can resolve its members (the `nodeExtractor` does, with the type checker). Leave both out otherwise: an alias without `fields` is recorded by name, and nothing is concluded about its members.
+   - `hasUnlistedMembers`, on an interface and on an alias with `fields`, says whether a value of the type may carry members `fields` does not list: an index signature (`[key: string]: unknown`), a call or a construct signature. Write `false` only when the extractor looked and the fields are all there is (the `nodeExtractor` asks the type checker); a parameter retyped between two such types is then weighed field by field where the language's parameter types are structural. Leave it out when the extractor does not look: the fields are then not taken for the whole type.
 
 5. **Handle missing infrastructure gracefully** — If the language's type system files are missing (e.g., no `tsconfig.json`, no `.pyi` stubs), throw a descriptive error rather than returning an empty surface.
 

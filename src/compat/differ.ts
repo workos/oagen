@@ -22,6 +22,8 @@ import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
 import { bareTypeName, genericWrapperOf, handsBackItsArgument, typeNamesIn } from './type-names.js';
 import { declaredTypes, declaresSupertype, inputTypes, isObjectAlias, isRecordedByNameOnly } from './type-graph.js';
 import type { DeclaredTypes } from './type-graph.js';
+import { acceptsEveryValue } from './parameter-types.js';
+import type { ParameterTypeAcceptance, ParameterTypeContext } from './parameter-types.js';
 
 export {
   specDerivedNames,
@@ -51,7 +53,10 @@ export interface SnapshotDiffContext {
    * check. The whole one says which of the compared types the SDK's callers
    * build (a method the scope leaves out still takes its options) and which
    * fields the SDK already has, so a field the scope left out of the baseline
-   * is not taken for one the candidate added as required.
+   * is not taken for one the candidate added as required. It also says what
+   * the old type of a compared method's parameter takes: a retyped parameter
+   * is weighed against that type as the SDK declares it, the fields the
+   * scope leaves out included, since callers pass those as well.
    */
   unscopedBaseline?: CompatSnapshot;
 }
@@ -76,9 +81,10 @@ export function diffSnapshots(
   // method now accepts) has no caller yet that a new required field breaks.
   const baselineTypes = declaredTypes(recordedBaseline);
   const candidateTypes = declaredTypes(recordedCandidate);
-  const takenBy = context?.unscopedBaseline
-    ? inputTypes(context.unscopedBaseline)
-    : inputTypes(recordedBaseline, baselineTypes);
+  // The types of the baseline SDK as a whole, where the compared baseline is
+  // a part of it.
+  const wholeBaselineTypes = context?.unscopedBaseline ? declaredTypes(context.unscopedBaseline) : baselineTypes;
+  const takenBy = inputTypes(context?.unscopedBaseline ?? recordedBaseline, wholeBaselineTypes);
   // The fields the SDK has today, where the compared baseline is a part of it.
   const fieldsOutOfScope = context?.unscopedBaseline
     ? new Set(context.unscopedBaseline.symbols.map((sym) => sym.fqName))
@@ -195,6 +201,18 @@ export function diffSnapshots(
   // typeRefs to derive the secondary rename.
   inferTransitiveTypeRenames(typeRenames, baseline, candidate, changes);
   cascadeRenameDowngrades(changes, typeRenames, enumRenames, baseline, candidate, candidateTypes, takenBy);
+
+  // Post-pass: a parameter retyped to a type that still takes every argument
+  // callers pass today. It reads the two type texts and what the snapshots
+  // record about the types they name, and nothing of the renames above: a
+  // parameter's old and new type are not a rename the other passes may use.
+  // The old type is read from the whole baseline: a field the scope leaves
+  // out of the comparison is still one callers pass.
+  creditAcceptedParameterTypes(changes, {
+    structural: (effectivePolicy as Partial<CompatPolicyHints> | null | undefined)?.parameterTypesAreStructural,
+    baselineTypes: wholeBaselineTypes,
+    candidateTypes,
+  });
 
   return {
     changes,
@@ -796,6 +814,60 @@ function declaredSubtypeRemediation(position: 'Return type' | 'Field type', oldT
     `"${newT}" extends "${oldT}", so every value of the new type is still a value of the old one. ` +
     `Code that reads the value continues to work; only code that produces one ` +
     `(a test double, an override) has to supply "${newT}".`
+  );
+}
+
+/**
+ * Downgrade a `parameter_type_narrowed` whose new type accepts every value
+ * of the old one (`acceptsEveryValue`) to soft-risk, with a hint that says
+ * which rule found it.
+ *
+ * The classifier reports any parameter whose type text changed, and cannot
+ * tell which way: `petId: string` → `string | number` takes more than it
+ * did, `string | number` → `string` takes less. Only the second stops a call
+ * site from compiling. The first stays in the report, as a `return_type_changed`
+ * to an equivalent type does: code that names the old type explicitly keeps
+ * compiling but may want the new one.
+ *
+ * Mutates `changes` in place. A retype the snapshots cannot settle keeps its
+ * severity.
+ */
+function creditAcceptedParameterTypes(changes: ClassifiedChange[], context: ParameterTypeContext): void {
+  for (const change of changes) {
+    if (change.category !== 'parameter_type_narrowed' || change.severity !== 'breaking') continue;
+    const accepted = acceptsEveryValue(change.old.type, change.new.type, context);
+    if (accepted === undefined) continue;
+    change.severity = 'soft-risk';
+    change.remediation ??= acceptedParameterTypeRemediation(change.old.type, change.new.type, accepted);
+  }
+}
+
+function acceptedParameterTypeRemediation(oldText: string, newText: string, accepted: ParameterTypeAcceptance): string {
+  if (accepted.rule === 'declared-supertype') {
+    const { oldType, newType } = accepted;
+    return (
+      `Parameter type swap from "${oldType}" to "${newType}" widens to a declared supertype — ` +
+      `"${oldType}" extends "${newType}", so every value callers pass today is still accepted. ` +
+      `Call sites continue to work; only code that overrides or implements the method has to take "${newType}".`
+    );
+  }
+  const swap = `Parameter type swap from "${oldText}" to "${newText}" accepts every argument callers pass today — `;
+  if (accepted.fields.length === 0) {
+    return (
+      `${swap}every member of the old type is still a member of the new one. ` +
+      `Call sites continue to compile; only code that repeats the parameter's type (a wrapper, an override) may want the new one.`
+    );
+  }
+  const kept = accepted.fields
+    .map(
+      ({ oldType, newType }) =>
+        `"${newType}" keeps every field of "${oldType}" and requires none that "${oldType}" did not`,
+    )
+    .join('; ');
+  const names = accepted.fields.map(({ oldType }) => `"${oldType}"`).join(', ');
+  return (
+    `${swap}${kept}. ` +
+    `Call sites continue to compile; only code that names ${names} explicitly may want the new type.`
   );
 }
 

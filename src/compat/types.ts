@@ -65,6 +65,12 @@ export interface ApiInterface {
    *  is ever reported as newly required. Absent when `optional` is as the
    *  SDK declares it. */
   fieldOptionalityUnknown?: true;
+  /** Whether a value of the type may carry members `fields` does not list:
+   *  an index signature (`[key: string]: unknown`), a call or a construct
+   *  signature. `false` when the extractor looked and `fields` is all there
+   *  is. Absent when the extractor does not look, which leaves it open: the
+   *  compat differ then does not take the fields for the whole type. */
+  hasUnlistedMembers?: boolean;
 }
 
 export interface ApiField {
@@ -99,6 +105,9 @@ export interface ApiTypeAlias {
    *  `extends` are (`Base` for `Base & { name: string }`); empty for any
    *  other alias with `fields`. Present exactly when `fields` is. */
   extends?: string[];
+  /** As `ApiInterface.hasUnlistedMembers`, for an alias with `fields`: what
+   *  `Record<string, string>` comes to has an index signature and no field. */
+  hasUnlistedMembers?: boolean;
 }
 
 export interface ApiEnum {

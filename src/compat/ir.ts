@@ -95,6 +95,13 @@ export interface CompatSymbol {
    *  alias recorded by name only, on a class, on an enum, and in snapshots
    *  written before the key existed. */
   extends?: string[];
+  /** On a type symbol whose members the snapshot records: whether a value of
+   *  the type may carry members no `field` symbol lists (an index signature,
+   *  a call or a construct signature). `false` when the extractor looked and
+   *  the fields are all there is. Absent when the extractor does not look,
+   *  and in snapshots written before the key existed: nothing then says the
+   *  fields are the whole type, and the differ does not take them for it. */
+  hasUnlistedMembers?: boolean;
   /** On a type alias: the type text it stands for, as the extractor recorded
    *  it (`ApiTypeAlias.value`). Read to follow a parameter's type to the
    *  types it is built from; a change of it is not reported. Absent in
@@ -157,7 +164,8 @@ import { COMPAT_SCHEMA_VERSION } from './schema.js';
  * into the new classified diff engine without requiring immediate migration.
  *
  * It keeps what the surface states about each type: a field's optionality
- * (`optional`), an interface's or a model class's supertypes (`extends`), a
+ * (`optional`), an interface's or a model class's supertypes (`extends`),
+ * whether its fields are all a value may carry (`hasUnlistedMembers`), a
  * type alias's value (`aliasOf`) and, where the extractor resolved them, the
  * alias's members as `field` symbols under it, as an interface's are.
  */
@@ -244,6 +252,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       stability: 'stable',
       sourceKind: 'generated_resource_constructor',
       ...supertypesEntry(iface.extends),
+      ...unlistedMembersEntry(iface.hasUnlistedMembers),
       ...(iface.sourceFile ? { sourceFile: iface.sourceFile } : {}),
     });
 
@@ -281,6 +290,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       stability: 'stable',
       sourceKind: 'generated_resource_constructor',
       ...(members ? supertypesEntry(alias.extends) : {}),
+      ...(members ? unlistedMembersEntry(alias.hasUnlistedMembers) : {}),
       ...(typeof alias.value === 'string' ? { aliasOf: alias.value } : {}),
       ...(alias.sourceFile ? { sourceFile: alias.sourceFile } : {}),
     });
@@ -362,6 +372,13 @@ function supertypesEntry(supertypes: unknown): { extends: string[] } {
   return {
     extends: Array.isArray(supertypes) ? supertypes.filter((name): name is string => typeof name === 'string') : [],
   };
+}
+
+/** The `hasUnlistedMembers` key of a type whose members are recorded, as the
+ *  surface states it; no key where the surface states nothing (every
+ *  extractor that does not look, every surface file written before). */
+function unlistedMembersEntry(stated: unknown): { hasUnlistedMembers?: boolean } {
+  return typeof stated === 'boolean' ? { hasUnlistedMembers: stated } : {};
 }
 
 /** The members a surface records for a type alias; undefined when it records

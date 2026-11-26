@@ -9,8 +9,14 @@
  * answers; `genericWrapperOf` says which generic it read the name through.
  * `typeNamesIn` reads every name a text mentions, for following a type to the
  * types it is built from, and `supertypeName` reads a declared supertype's
- * entry. All of them read text only: they take no language and no snapshot,
- * so the same text reads the same whichever extractor wrote it.
+ * entry. Five more read a parameter's type, to ask whether its new text
+ * accepts every value of its old one: `unionMembers` takes a union apart,
+ * `objectTypeMembers` an object type written in place and
+ * `singleArgumentGeneric` a generic, `soleTypeName` reads the name of a text
+ * that is one declared type and nothing a caller would have to wrap a value
+ * in, and `everyNameIn` reads every type a text depends on. All of them read
+ * text only: they take no language and no snapshot, so the same text reads
+ * the same whichever extractor wrote it.
  */
 
 /** Union members that stand for "no value": TypeScript's `null` and
@@ -159,6 +165,24 @@ export function handsBackItsArgument(genericName: string): boolean {
   return VALUE_HOLDERS.has(
     name.slice(Math.max(name.lastIndexOf('.'), name.lastIndexOf(':'), name.lastIndexOf('\\')) + 1),
   );
+}
+
+/**
+ * A generic around one argument, taken apart: `Promise<Foo | null>` is
+ * `Promise` around `Foo | null`, `typing.Sequence[Foo]` is `typing.Sequence`
+ * around `Foo`. The argument is whatever stands in the brackets, where
+ * `genericWrapperOf` reads a generic only around a plain name; the generic's
+ * name is as written, as `handsBackItsArgument` takes it.
+ *
+ * Undefined for a text that is not one generic around one argument: a plain
+ * name, a generic with several (`Record<string, Foo>`), a union or an
+ * intersection of generics, an array of one.
+ */
+export function singleArgumentGeneric(typeText: string): { generic: string; argument: string } | undefined {
+  const text = typeText.trim();
+  const argument = (ANGLE_GENERIC.exec(text) ?? SQUARE_GENERIC.exec(text))?.[1];
+  if (argument === undefined || argument.trim() === '' || splitTopLevel(argument, ',')?.length !== 1) return undefined;
+  return { generic: text.slice(0, text.length - argument.length - 2), argument };
 }
 
 /** A name as a type text writes it, alone or under a module path:
@@ -391,6 +415,38 @@ function listedKeys(text: string): Set<string> | undefined {
   return keys;
 }
 
+/**
+ * Every word of a type text that could be a type's name, wherever it stands:
+ * each name path and each of its segments, as `typeNamesIn` reads them, with
+ * nothing left out. The arguments of `Partial<…>` and `Pick<…>` are read, and
+ * so is what stands in quotes (a forward reference, `Optional["Foo"]`) and in
+ * a template literal (`\`pet_\${PetId}\``).
+ *
+ * `typeNamesIn` follows a type to what a value of it is built from, and a
+ * `Partial<Foo>` is built from no whole `Foo`. This answers another
+ * question: which declared types does a text depend on at all? A text that
+ * is the same in two snapshots stands for one type only if each of them does,
+ * and a `Partial<Foo>` changes with `Foo`. It over-approximates further than
+ * `typeNamesIn` (the words of a string literal are words too), which only
+ * ever makes a caller look at more names.
+ */
+export function everyNameIn(typeText: string): string[] {
+  const names = new Set<string>();
+  let i = 0;
+  while (i < typeText.length) {
+    NAME_PATH.lastIndex = i;
+    const path = NAME_PATH.exec(typeText)?.[0];
+    if (path === undefined) {
+      i++;
+      continue;
+    }
+    i += path.length;
+    names.add(path);
+    for (const segment of path.split(NAME_PATH_SEPARATOR)) if (segment !== '') names.add(segment);
+  }
+  return [...names];
+}
+
 /** The index after the `<…>` that opens at `start` (spaces before it
  *  allowed), or undefined when no argument list opens there or it never
  *  closes. */
@@ -437,6 +493,111 @@ function stringLiteralEnd(text: string, start: number): number | undefined {
 export function supertypeName(entry: string): string | undefined {
   const text = entry.trim();
   return SUPERTYPE_NAME.test(text) ? bareTypeName(text) : undefined;
+}
+
+/**
+ * The declared type a text names when nothing stands around the name but an
+ * optional spelling and at most one array suffix: `Foo`, `Foo | undefined`,
+ * `?Foo`, `Optional[Foo]`, `Foo[]`, `(Foo | null)[]`, `\Acme\Foo`.
+ *
+ * `bareTypeName` also reads a name out of a generic's argument
+ * (`Promise<Foo>`, `List<Foo>`). Where a value is accepted by the type it was
+ * declared as, a generic of the subtype is not one of the supertype unless
+ * the generic says so: Python's `list[Sub]` is no `list[Base]`, nor is C#'s
+ * `List<Sub>` a `List<Base>`, since a list is written to as well as read. So
+ * a text under a generic names no type here, as a union of several types, a
+ * dotted path and an object or function type name none in either reader.
+ */
+export function soleTypeName(typeText: string): string | undefined {
+  let text = presentType(typeText.trim());
+  if (text.endsWith('[]')) text = presentType(text.slice(0, -2));
+  return supertypeName(text);
+}
+
+/**
+ * The members of a union a text writes with `|`, each trimmed and once:
+ * `A | B`, `A|B` and `(A | B)` are `A` and `B`. A text that is no union is a
+ * union of one member, itself.
+ *
+ * The text is taken apart and nothing more: `undefined`, `null` and `None`
+ * are members like any other (`presentType` is the reader that sets them
+ * aside), an array, a generic and an object type stay whole (`(A | B)[]`,
+ * `Array<A | B>`, `{ a: A | B }`), and so does a function type, whose `|`
+ * belongs to what it returns (`(pet: Pet) => A | B`). A function among a
+ * union's members is written in parentheses, which go with the union:
+ * `(() => void) | undefined` is `() => void` and `undefined`.
+ *
+ * Returns undefined for a text that does not read as a union at all: one
+ * whose brackets or quotes do not pair up, or with a blank member (`A |`).
+ */
+export function unionMembers(typeText: string): string[] | undefined {
+  const text = typeText.trim();
+  if (text === '') return undefined;
+  if (isFunctionType(text)) return [text];
+  const parts = splitTopLevel(text, '|');
+  if (parts === undefined) return undefined;
+  const members = new Set<string>();
+  for (const part of parts) {
+    const member = part.trim();
+    if (member === '') return undefined;
+    // A parenthesized member is read as what it holds, which is shorter than
+    // the text it came from, so this ends.
+    const group = member.startsWith('(') ? enclosed(member) : undefined;
+    const held = group === undefined ? [member] : unionMembers(group);
+    if (held === undefined) return undefined;
+    for (const name of held) members.add(name);
+  }
+  return [...members];
+}
+
+/** A member's name as an object type writes it bare: an identifier or a
+ *  number. A quoted name is read out of its quotes. */
+const MEMBER_NAME = /^(?:[A-Za-z_$][A-Za-z0-9_$]*|\d+)$/;
+
+/**
+ * The members of an object type written in place, as TypeScript prints one:
+ * `{ id: string; name?: string | undefined; }` has `id`, required, and
+ * `name`, optional. Each member's type is the text after its colon, as it
+ * stands; a `readonly` in front of the name is dropped, and a quoted name is
+ * read without its quotes (`"content-type"`).
+ *
+ * Undefined for a text that is not an object type in braces, and for one
+ * with a member that is not a name and a type, since the members then do not
+ * say all a value may carry: an index signature (`[key: string]: unknown`), a
+ * call or a method signature (`retry(attempt: number): void`), an accessor,
+ * a name written twice, and the `... 12 more ...` a long type is cut down
+ * to. This is a reader for the shape a parameter's type is recorded in, not
+ * a parser of the language.
+ */
+export function objectTypeMembers(typeText: string): Map<string, { type: string; optional: boolean }> | undefined {
+  const text = typeText.trim();
+  const content = text.startsWith('{') ? enclosed(text) : undefined;
+  const parts = content === undefined ? undefined : splitTopLevel(content, ';');
+  if (parts === undefined) return undefined;
+  const members = new Map<string, { type: string; optional: boolean }>();
+  for (const part of parts) {
+    // The `;` after the last member leaves a blank one.
+    if (part.trim() === '') continue;
+    const [head, ...rest] = splitTopLevel(part, ':') ?? [];
+    const type = rest.join(':').trim();
+    if (head === undefined || type === '') return undefined;
+    let name = head.trim();
+    if (name.startsWith('readonly ')) name = name.slice('readonly '.length).trim();
+    const optional = name.endsWith('?');
+    if (optional) name = name.slice(0, -1).trim();
+    const quoted = (name[0] === '"' || name[0] === "'") && stringLiteralEnd(name, 0) === name.length;
+    if (quoted) name = name.slice(1, -1);
+    else if (!MEMBER_NAME.test(name)) return undefined;
+    if (members.has(name)) return undefined;
+    members.set(name, { type, optional });
+  }
+  return members;
+}
+
+/** A text with an arrow outside every bracket pair: TypeScript's `=>`, the
+ *  `->` of Swift, Kotlin and Rust. */
+function isFunctionType(text: string): boolean {
+  return (splitTopLevel(text, '=>')?.length ?? 1) > 1 || (splitTopLevel(text, '->')?.length ?? 1) > 1;
 }
 
 /**
@@ -595,9 +756,10 @@ function enclosed(text: string): string | undefined {
  *
  * `classify.ts` has a splitter of its own for Python annotations, which
  * counts square brackets only; this one reads every language's text, so it
- * counts all four kinds and skips the `>` of an arrow (`=>`, `->`).
+ * counts all four kinds and skips the `>` of an arrow (`=>`, `->`). Split at
+ * the arrow itself, it says whether a text is a function type.
  */
-function splitTopLevel(text: string, separator: '|' | ',' | '&'): string[] | undefined {
+function splitTopLevel(text: string, separator: '|' | ',' | '&' | ';' | ':' | '=>' | '->'): string[] | undefined {
   const parts: string[] = [];
   const expectedClosings: string[] = [];
   let quote: string | undefined;
@@ -613,15 +775,20 @@ function splitTopLevel(text: string, separator: '|' | ',' | '&'): string[] | und
       quote = char;
       continue;
     }
+    // No separator starts with a bracket, so asking for it first changes
+    // nothing for the brackets; an arrow is taken whole, `>` included.
+    if (expectedClosings.length === 0 && text.startsWith(separator, i)) {
+      parts.push(text.slice(start, i));
+      start = i + separator.length;
+      i = start - 1;
+      continue;
+    }
     const closing = CLOSING_BRACKET.get(char);
     if (closing !== undefined) {
       expectedClosings.push(closing);
     } else if (CLOSING_BRACKETS.has(char)) {
       if (char === '>' && (text[i - 1] === '=' || text[i - 1] === '-')) continue;
       if (expectedClosings.pop() !== char) return undefined;
-    } else if (char === separator && expectedClosings.length === 0) {
-      parts.push(text.slice(start, i));
-      start = i + 1;
     }
   }
   if (quote !== undefined || expectedClosings.length > 0) return undefined;

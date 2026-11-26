@@ -59,6 +59,8 @@ A field added to a type is additive for a caller that reads the type and breakin
 
 A field or a return retyped to a type that declares it extends the old one (`DetailedErrorBody extends ErrorBody`) is soft-risk: every value of the new type is still a value of the old.
 
+A parameter is asked the reverse: retyped to a type that takes every argument callers pass today, it is a soft-risk `parameter_type_narrowed`, and breaking otherwise. In TypeScript, whose types are structural, that is a type with every field of the old one and no new required field (`RequestOptions` → an interface that extends it with optional fields), or a union that kept every member (`string` → `string | number`). Where a parameter's type is a class, it is a supertype the old class declares. See [Compatibility Policy → A parameter retyped to a type that takes every old argument](compatibility-policy.md#a-parameter-retyped-to-a-type-that-takes-every-old-argument).
+
 See [Compatibility IR → Types and Their Members](compatibility-ir.md#types-and-their-members) for what each extractor records.
 
 ### Language Policy
