@@ -55,7 +55,7 @@ See [Compatibility IR](compatibility-ir.md) for the full category list.
 
 ### Types Callers Build
 
-A field added to a type is additive for a caller that reads the type and breaking for one that has to build it. The snapshot keeps each field's optionality, each type's supertypes and a type alias's members, and the differ takes a type for one callers build when a callable's or a constructor's parameters lead to it. A required field such a type gains, and an optional one it makes required, is a breaking `field_requiredness_increased`; an optional field, and any field on a type that is only returned, stays an additive `symbol_added`.
+A field added to a type is additive for a caller that reads the type and breaking for one that has to build it. The snapshot keeps each field's optionality, each type's supertypes and a type alias's members, and the differ takes a type for one callers build when a callable's or a constructor's parameters lead to it. A required field such a type gains, and an optional one it makes required, is a breaking `field_requiredness_increased`; an optional field, and any field on a type that is only returned, stays an additive `symbol_added`. So does a field the parameter leaves out: `create(options: Omit<Owner, 'ownerId'>)` takes no `ownerId`, a `Pick` takes only the fields it lists, and a `Partial` requires none.
 
 A field or a return retyped to a type that declares it extends the old one (`DetailedErrorBody extends ErrorBody`) is soft-risk: every value of the new type is still a value of the old.
 

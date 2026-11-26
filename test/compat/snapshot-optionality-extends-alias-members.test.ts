@@ -1596,6 +1596,546 @@ export declare class Client% { create(options: Create%): void; update(options: U
 });
 
 // ---------------------------------------------------------------------------
+// A part of a type: Omit, Pick, Partial (the review of #759)
+// ---------------------------------------------------------------------------
+
+/**
+ * One SDK before and after, and what a caller wrote against the SDK before.
+ * `tsc --strict` on that call against the SDK after is what the report is
+ * held to: it breaks exactly when the report has a breaking line, but for the
+ * rows that say why not (`differs`).
+ */
+interface PartRow {
+  name: string;
+  /** The SDK's declarations; each declared name ends in `%`. */
+  sdk: (side: Side) => string;
+  /** Statements that type-check against the old SDK; `client` is a `Client%`. */
+  call: string;
+  /** The report's lines that are not additions. */
+  reported: string[];
+  /** Why the report and `tsc` disagree on the row. */
+  differs?: string;
+}
+
+const partClient = (params: string, more = '') =>
+  `export declare class Client% { create(${params}): Promise<void>;${more} }\n`;
+const partOwner = (side: Side, added = '; ownerId: string', members = 'name: string') =>
+  `export interface Owner% { ${members}${inNew(side, added)} }\n`;
+const REX = `client.create({ name: 'Rex' });`;
+const requiredNow = (field: string) => `breaking field_requiredness_increased ${field}`;
+const OWNER_ID = requiredNow('Owner%.ownerId');
+const AGE = requiredNow('Owner%.age');
+const ZIP = requiredNow('Address%.zip');
+const KEYS_NOT_SPELLED = 'the parameter names its keys, and the text does not spell them';
+const BESIDE_THE_WHOLE_TYPE = 'a union with the whole type: each member is read as one callers may have to build';
+const WRITTEN_IN_PLACE = 'the keys choose among the members of an object type written in place, which are not read';
+
+/** `Owner%` gains a required `ownerId` (or `added`), and `create` takes `param`. */
+const taking = (
+  name: string,
+  param: string,
+  reported: string[],
+  extra: { call?: string; added?: string; declarations?: string; differs?: string } = {},
+): PartRow => ({
+  name,
+  sdk: (side) => `${partOwner(side, extra.added)}${extra.declarations ?? ''}${partClient(`options: ${param}`)}`,
+  call: extra.call ?? REX,
+  reported,
+  ...(extra.differs === undefined ? {} : { differs: extra.differs }),
+});
+
+/** `Address%` gains a required `zip`; `Owner%` has an `address` of it. */
+const oneLevelDown = (
+  name: string,
+  param: string,
+  call: string,
+  reported: string[],
+  extra: { more?: string; declarations?: string; differs?: string } = {},
+): PartRow => ({
+  name,
+  sdk: (side) =>
+    `export interface Address% { street: string${inNew(side, '; zip: string')} }
+export interface Owner% { name: string; address: Address% }
+${extra.declarations ?? ''}${partClient(`options: ${param}`, extra.more)}`,
+  call,
+  reported,
+  ...(extra.differs === undefined ? {} : { differs: extra.differs }),
+});
+
+/** `Owner%.body` retyped from `ErrorBody%` to `Detailed%`, which extends it and requires more. */
+const bodyRetyped = (name: string, param: string, call: string, severity: string): PartRow => ({
+  name,
+  sdk: (side) =>
+    `export interface ErrorBody% { message: string }
+export interface Detailed% extends ErrorBody% { details: string }
+export interface Owner% { name: string; other?: string; body: ${side === 'new' ? 'Detailed%' : 'ErrorBody%'} }
+${partClient(`options: ${param}`)}`,
+  call,
+  reported: [`${severity} field_type_changed Owner%.body`],
+});
+
+const OMITTED = 'Omit<Owner%, "ownerId">';
+const EXTRA = 'export interface Extra% { extra?: string }\n';
+const PAGE = 'export interface Page%<T> { items: T[]; next?: string }\n';
+const CREATE_OWNER_ALIAS = `export type CreateOwner% = ${OMITTED};\n`;
+const CREATE_OWNER_INTERFACE = `export interface CreateOwner% extends ${OMITTED} { note?: string }\n`;
+const WITHOUT_ALIAS = 'export type Without%<T> = Omit<T, "ownerId">;\n';
+const WITH_ADDRESS = `client.create({ name: 'Rex', address: { street: 'Main' } });`;
+const WITH_BODY = `client.create({ name: 'Rex', body: { message: 'm' } });`;
+
+const PART_ROWS: PartRow[] = [
+  // --- the review's case, and its neighbors ---
+  taking('Omit: the field it lists is added (the review finding)', OMITTED, []),
+  taking('Omit: another required field is added', OMITTED, [AGE], { added: '; age: number' }),
+  taking('the whole type (control)', 'Owner%', [OWNER_ID]),
+
+  // --- how the keys are written ---
+  taking('keys: a union', 'Omit<Owner%, "a" | "ownerId">', []),
+  taking('keys: single quotes', "Omit<Owner%, 'ownerId'>", []),
+  taking('keys: over several lines', "Omit<\n    Owner%,\n    | 'a'\n    | 'ownerId'\n  >", []),
+  taking('keys: both added fields', 'Omit<Owner%, "ownerId" | "age">', [], {
+    added: '; ownerId: string; age: number',
+  }),
+  taking('keys: a member the source writes in quotes', 'Omit<Owner%, "owner-id">', [], {
+    added: '; "owner-id": string',
+  }),
+  taking('keys: a longer key (owner, not ownerId)', 'Omit<Owner%, "owner">', [OWNER_ID]),
+  taking('keys: an alias of one literal', 'Omit<Owner%, Hidden%>', [], {
+    declarations: 'export type Hidden% = "ownerId";\n',
+  }),
+  taking('keys: an alias of a union', 'Omit<Owner%, Hidden%>', [OWNER_ID], {
+    declarations: 'export type Hidden% = "a" | "ownerId";\n',
+    differs: KEYS_NOT_SPELLED,
+  }),
+  taking('keys: keyof another type', 'Omit<Owner%, keyof Other%>', [], {
+    declarations: 'export interface Other% { ownerId: string }\n',
+  }),
+  taking('keys: a literal and a keyof', 'Omit<Owner%, "a" | keyof Other%>', [], {
+    declarations: 'export interface Other% { ownerId: string }\n',
+  }),
+  taking('keys: never', 'Omit<Owner%, never>', [OWNER_ID]),
+
+  // --- the same type reached twice ---
+  taking('twice: Omit and whole, one method', `${OMITTED}, owner: Owner%`, [OWNER_ID], {
+    call: `client.create({ name: 'Rex' }, { name: 'Rex' });`,
+  }),
+  {
+    name: 'twice: Omit in one method, whole in another',
+    sdk: (side) => `${partOwner(side)}${partClient(`options: ${OMITTED}`, ' put(owner: Owner%): Promise<void>;')}`,
+    call: `${REX} client.put({ name: 'Rex' });`,
+    reported: [OWNER_ID],
+  },
+  {
+    name: 'twice: whole in one method, Omit in a later one',
+    sdk: (side) =>
+      `${partOwner(side)}export declare class Client% { put(owner: Owner%): Promise<void>; create(options: ${OMITTED}): Promise<void>; }\n`,
+    call: `client.put({ name: 'Rex' }); ${REX}`,
+    reported: [OWNER_ID],
+  },
+  taking('twice: two Omits, one keeps the field', `${OMITTED}, other: Omit<Owner%, "a">`, [OWNER_ID], {
+    call: `client.create({ name: 'Rex' }, { name: 'Rex' });`,
+  }),
+  taking('twice: two Omits, both leave the field out', `${OMITTED}, other: Omit<Owner%, "a" | "ownerId">`, [], {
+    call: `client.create({ name: 'Rex' }, { name: 'Rex' });`,
+  }),
+  taking('twice: Omit | whole, one parameter', `${OMITTED} | Owner%`, [OWNER_ID], { differs: BESIDE_THE_WHOLE_TYPE }),
+
+  // --- nesting ---
+  taking('nesting: Omit<…>[]', `${OMITTED}[]`, [], { call: `client.create([{ name: 'Rex' }]);` }),
+  taking('nesting: Array<Omit<…>>', `Array<${OMITTED}>`, [], { call: `client.create([{ name: 'Rex' }]);` }),
+  taking('nesting: Readonly<Omit<…>>', `Readonly<${OMITTED}>`, []),
+  taking('nesting: Partial<Omit<…>>', `Partial<${OMITTED}>`, []),
+  taking('nesting: Partial<Omit<…>>, another field added', `Partial<${OMITTED}>`, [], { added: '; age: number' }),
+  taking('nesting: Omit<Partial<…>>', 'Omit<Partial<Owner%>, "a">', []),
+  taking('nesting: Omit<Omit<…>>', 'Omit<Omit<Owner%, "a">, "ownerId">', []),
+  taking('nesting: Omit<Omit<…>>, another field added', 'Omit<Omit<Owner%, "a">, "ownerId">', [AGE], {
+    added: '; age: number',
+  }),
+  taking('nesting: Pick<Omit<…>>', `Pick<${OMITTED}, "name">`, []),
+  taking('nesting: Omit<Owner & Extra>', 'Omit<Owner% & Extra%, "ownerId">', [], { declarations: EXTRA }),
+  taking('nesting: Omit<Owner & Extra>, another field added', 'Omit<Owner% & Extra%, "ownerId">', [AGE], {
+    added: '; age: number',
+    declarations: EXTRA,
+  }),
+  taking('nesting: Omit<Owner | Other>', 'Omit<Owner% | Other%, "ownerId">', [], {
+    declarations: 'export interface Other% { name: string; kind?: string }\n',
+  }),
+  taking('nesting: Omit<…> & { ownerId?: string }', `${OMITTED} & { ownerId?: string }`, []),
+  taking('nesting: Promise<Omit<…>>', `Promise<${OMITTED}>`, [], {
+    call: `client.create(Promise.resolve({ name: 'Rex' }));`,
+  }),
+  taking("nesting: a generic of the SDK's around Omit<…>", `Page%<${OMITTED}>`, [], {
+    call: `client.create({ items: [{ name: 'Rex' }] });`,
+    declarations: PAGE,
+  }),
+  taking("nesting: Omit of a generic of the SDK's", 'Omit<Page%<Owner%>, "next">', [OWNER_ID], {
+    call: `client.create({ items: [{ name: 'Rex' }] });`,
+    declarations: PAGE,
+  }),
+  taking('written in place: Omit keeps the member', 'Omit<{ owner: Owner%; note: string }, "note">', [OWNER_ID], {
+    call: `client.create({ owner: { name: 'Rex' } });`,
+  }),
+  taking('written in place: Omit leaves the member out', 'Omit<{ owner: Owner%; note: string }, "owner">', [OWNER_ID], {
+    call: `client.create({ note: 'n' });`,
+    differs: WRITTEN_IN_PLACE,
+  }),
+  taking('written in place: Pick lists the member', 'Pick<{ owner: Owner%; note: string }, "owner">', [], {
+    call: `client.create({ owner: { name: 'Rex' } });`,
+    differs: WRITTEN_IN_PLACE,
+  }),
+  taking('written in place: Pick does not list the member', 'Pick<{ owner: Owner%; note: string }, "note">', [], {
+    call: `client.create({ note: 'n' });`,
+  }),
+
+  // --- where the parameter's text has the Omit ---
+  {
+    name: 'position: a callback parameter',
+    sdk: (side) => `${partOwner(side)}${partClient(`visit: (owner: ${OMITTED}) => void`)}`,
+    call: `client.create((owner) => void owner.name);`,
+    reported: [],
+  },
+  {
+    name: 'position: a callback result',
+    sdk: (side) => `${partOwner(side)}${partClient(`make: () => ${OMITTED}`)}`,
+    call: `client.create(() => ({ name: 'Rex' }));`,
+    reported: [],
+  },
+  {
+    name: 'position: a callback result, the whole type (control)',
+    sdk: (side) => `${partOwner(side)}${partClient('make: () => Owner%')}`,
+    call: `client.create(() => ({ name: 'Rex' }));`,
+    reported: [OWNER_ID],
+  },
+  {
+    name: 'position: a constructor parameter',
+    sdk: (side) => `${partOwner(side)}export declare class Client% { constructor(options: ${OMITTED}); }\n`,
+    call: `new sdk.Client%({ name: 'Rex' });`,
+    reported: [],
+  },
+  {
+    name: 'position: a field of the parameter type',
+    sdk: (side) =>
+      `${partOwner(side)}export interface Options% { owner: ${OMITTED} }\n${partClient('options: Options%')}`,
+    call: `client.create({ owner: { name: 'Rex' } });`,
+    reported: [],
+  },
+  {
+    name: 'position: a field of the parameter type, another field added',
+    sdk: (side) =>
+      `${partOwner(side, '; age: number')}export interface Options% { owner: ${OMITTED} }\n${partClient('options: Options%')}`,
+    call: `client.create({ owner: { name: 'Rex' } });`,
+    reported: [AGE],
+  },
+
+  // --- inheritance and aliases ---
+  {
+    name: 'inherited: the field is added to the base of the type the Omit names',
+    sdk: (side) =>
+      `export interface Base% { id?: string${inNew(side, '; ownerId: string')} }
+export interface Owner% extends Base% { name: string }
+${partClient(`options: ${OMITTED}`)}`,
+    call: REX,
+    reported: [],
+  },
+  {
+    name: 'inherited: another field is added to the base',
+    sdk: (side) =>
+      `export interface Base% { id?: string${inNew(side, '; age: number')} }
+export interface Owner% extends Base% { name: string }
+${partClient(`options: ${OMITTED}`)}`,
+    call: REX,
+    reported: [requiredNow('Base%.age'), AGE],
+  },
+  taking('alias: type CreateOwner = Omit<…>', 'CreateOwner%', [], { declarations: CREATE_OWNER_ALIAS }),
+  taking('alias: type CreateOwner = Omit<…>, another field added', 'CreateOwner%', [requiredNow('CreateOwner%.age')], {
+    added: '; age: number',
+    declarations: CREATE_OWNER_ALIAS,
+  }),
+  taking('alias: Omit of an alias of the type', 'Omit<OwnerInput%, "ownerId">', [], {
+    declarations: 'export type OwnerInput% = Owner%;\n',
+  }),
+  taking('alias: Omit<…> & { note?: string }', 'CreateOwner%', [], {
+    declarations: `export type CreateOwner% = ${OMITTED} & { note?: string };\n`,
+  }),
+  taking("alias: a generic alias of the SDK's that wraps Omit", 'Without%<Owner%>', [OWNER_ID], {
+    declarations: WITHOUT_ALIAS,
+    differs: 'the parameter names an alias of the SDK with an argument, and what the alias does with it is not read',
+  }),
+  taking("alias: a generic alias of the SDK's that wraps Omit, another field added", 'Without%<Owner%>', [AGE], {
+    added: '; age: number',
+    declarations: WITHOUT_ALIAS,
+  }),
+  taking('interface: extends Omit<…>', 'CreateOwner%', [], { declarations: CREATE_OWNER_INTERFACE }),
+  taking('interface: extends Omit<…>, another field added', 'CreateOwner%', [requiredNow('CreateOwner%.age'), AGE], {
+    added: '; age: number',
+    declarations: CREATE_OWNER_INTERFACE,
+  }),
+  taking('interface: Pick of one that extends Omit<…>', 'Pick<CreateOwner%, "name">', [], {
+    added: '; age: number',
+    declarations: CREATE_OWNER_INTERFACE,
+  }),
+
+  // --- one level down: an Omit leaves out the keys of the type it names, not of a member's type ---
+  oneLevelDown('one level down: Omit keeps the member', OMITTED, WITH_ADDRESS, [ZIP]),
+  oneLevelDown('one level down: Omit leaves the member out', 'Omit<Owner%, "address">', REX, []),
+  oneLevelDown(
+    "one level down: Omit leaves the member out, another method takes the member's type",
+    'Omit<Owner%, "address">',
+    `${REX} client.move({ street: 'Main' });`,
+    [ZIP],
+    { more: ' move(address: Address%): Promise<void>;' },
+  ),
+
+  // --- the mirror: Pick, and Partial ---
+  taking('Pick: a field it does not list is added', 'Pick<Owner%, "name">', []),
+  oneLevelDown('Pick: lists the member', 'Pick<Owner%, "address">', `client.create({ address: { street: 'Main' } });`, [
+    ZIP,
+  ]),
+  oneLevelDown('Pick: does not list the member', 'Pick<Owner%, "name">', REX, []),
+  {
+    name: 'Pick: a member it lists becomes required',
+    sdk: (side) =>
+      `export interface Owner% { name${inNew(side, '', '?')}: string; other: string }\n${partClient('options: Pick<Owner%, "name">')}`,
+    call: `client.create({});`,
+    reported: [requiredNow('Owner%.name')],
+  },
+  {
+    name: 'Pick: a member it does not list becomes required',
+    sdk: (side) =>
+      `export interface Owner% { name: string; other${inNew(side, '', '?')}: string }\n${partClient('options: Pick<Owner%, "name">')}`,
+    call: REX,
+    reported: [],
+  },
+  {
+    name: 'Pick: keys through an alias of a union, a field it does not list is added',
+    sdk: (side) =>
+      `${partOwner(side, undefined, 'name: string; id?: string')}export type Shown% = "name" | "id";\n${partClient('options: Pick<Owner%, Shown%>')}`,
+    call: REX,
+    reported: [],
+  },
+  oneLevelDown('Pick: keys through an alias of a union, lists the member', 'Pick<Owner%, Shown%>', WITH_ADDRESS, [], {
+    declarations: 'export type Shown% = "name" | "address";\n',
+    differs: KEYS_NOT_SPELLED,
+  }),
+  taking('Partial: a required field is added', 'Partial<Owner%>', []),
+  oneLevelDown('Partial: the type of a member', 'Partial<Owner%>', `client.create({ address: { street: 'Main' } });`, [
+    ZIP,
+  ]),
+  {
+    name: 'Partial: a member becomes required',
+    sdk: (side) =>
+      `export interface Owner% { name${inNew(side, '', '?')}: string }\n${partClient('options: Partial<Owner%>')}`,
+    call: `client.create({});`,
+    reported: [],
+  },
+  taking('Partial: beside a Pick', 'Partial<Owner%> & Pick<Owner%, "name">', []),
+  taking('Partial | whole, one parameter', 'Partial<Owner%> | Owner%', [OWNER_ID], { differs: BESIDE_THE_WHOLE_TYPE }),
+  {
+    name: 'Omit: the field it lists becomes required',
+    sdk: (side) =>
+      `export interface Owner% { name: string; ownerId${inNew(side, '', '?')}: string }\n${partClient(`options: ${OMITTED}`)}`,
+    call: REX,
+    reported: [],
+  },
+  {
+    name: 'Omit: a field it keeps becomes required',
+    sdk: (side) =>
+      `export interface Owner% { name: string; age${inNew(side, '', '?')}: number }\n${partClient(`options: ${OMITTED}`)}`,
+    call: REX,
+    reported: [AGE],
+  },
+
+  // --- the other rule that asks who supplies a field: a retype to a declared subtype ---
+  bodyRetyped('retype to a subtype: the field an Omit lists', 'Omit<Owner%, "body">', REX, 'soft-risk'),
+  bodyRetyped('retype to a subtype: a field an Omit keeps', 'Omit<Owner%, "other">', WITH_BODY, 'breaking'),
+  bodyRetyped('retype to a subtype: a field a Pick does not list', 'Pick<Owner%, "name">', REX, 'soft-risk'),
+  bodyRetyped(
+    'retype to a subtype: a field a Pick lists',
+    'Pick<Owner%, "body">',
+    `client.create({ body: { message: 'm' } });`,
+    'breaking',
+  ),
+  bodyRetyped(
+    'retype to a subtype: under a Partial',
+    'Partial<Owner%>',
+    `client.create({ body: { message: 'm' } });`,
+    'breaking',
+  ),
+  bodyRetyped('retype to a subtype: the whole type (control)', 'Owner%', WITH_BODY, 'breaking'),
+  {
+    name: 'retype to a subtype: a type no callable takes (control)',
+    sdk: (side) =>
+      `export interface ErrorBody% { message: string }
+export interface Detailed% extends ErrorBody% { details: string }
+export interface Owner% { name: string; body: ${side === 'new' ? 'Detailed%' : 'ErrorBody%'} }
+export declare class Client% { get(id: string): Promise<Owner%>; }
+`,
+    call: `void client.get('1').then((owner) => owner.body.message);`,
+    reported: ['soft-risk field_type_changed Owner%.body'],
+  },
+  {
+    name: 'retype to an unrelated type: the field an Omit lists',
+    sdk: (side) =>
+      `export interface Owner% { name: string; body: ${side === 'new' ? 'number' : 'string'} }\n${partClient('options: Omit<Owner%, "body">')}`,
+    call: REX,
+    reported: ['breaking field_type_changed Owner%.body'],
+    differs: 'a retype of a field is reported whoever reads or writes it, as before the snapshot told the two apart',
+  },
+];
+
+/**
+ * Every row in one SDK pair: what the report says of each row, and what
+ * `tsc --strict` says of each row's call against the SDK before and after
+ * (a file of calls beside the SDK, which the SDK does not export).
+ */
+async function buildPartTable() {
+  const suffix = (index: number) => `_${index}`;
+  const files = (side: Side): Record<string, string> => ({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ['src'] }),
+    'src/index.ts': PART_ROWS.map((row, index) => row.sdk(side).replaceAll('%', suffix(index))).join('\n'),
+    // One line per row, so a diagnostic's line is its row; the import is line 0.
+    'src/calls.ts': [
+      "import * as sdk from './index.js';",
+      ...PART_ROWS.map(
+        (row, index) =>
+          `{ const client = null! as sdk.Client${suffix(index)}; void client; ${row.call.replaceAll('%', suffix(index))} }`,
+      ),
+    ].join('\n'),
+  });
+  const roots = { old: writeSdk(files('old')), new: writeSdk(files('new')) };
+
+  const compile = (root: string) => {
+    const config = ts.parseJsonConfigFileContent(
+      ts.readConfigFile(join(root, 'tsconfig.json'), ts.sys.readFile).config,
+      ts.sys,
+      root,
+    );
+    const program = ts.createProgram(config.fileNames, config.options);
+    const calls = program.getSourceFile(join(root, 'src/calls.ts'))!;
+    return {
+      sdkDiagnostics: program.getSemanticDiagnostics(program.getSourceFile(join(root, 'src/index.ts'))!).length,
+      refused: new Set(
+        program
+          .getSemanticDiagnostics(calls)
+          .map((diagnostic) => calls.getLineAndCharacterOfPosition(diagnostic.start!).line - 1),
+      ),
+    };
+  };
+  const compiled = { old: compile(roots.old), new: compile(roots.new) };
+
+  const diff = diffSnapshots(
+    apiSurfaceToSnapshot(await nodeExtractor.extract(roots.old)),
+    apiSurfaceToSnapshot(await nodeExtractor.extract(roots.new)),
+  );
+  const reported = lines(diff);
+  return {
+    sdkDiagnostics: compiled.old.sdkDiagnostics + compiled.new.sdkDiagnostics,
+    rows: PART_ROWS.map((row, index) => {
+      const own = reported.filter((line) =>
+        line
+          .split(' ')[2]
+          .split('.')
+          .some((segment) => segment.endsWith(suffix(index))),
+      );
+      return {
+        row,
+        expected: row.reported.map((line) => line.replaceAll('%', suffix(index))).sort(),
+        notAdditions: own.filter((line) => !line.startsWith('additive ')).sort(),
+        reportsBreak: own.some((line) => line.startsWith('breaking ')),
+        compiledBefore: !compiled.old.refused.has(index),
+        breaksAfter: compiled.new.refused.has(index),
+      };
+    }),
+  };
+}
+
+describe('#750 a part of a type a parameter takes: Omit, Pick, Partial (the review of #759)', () => {
+  let table: Awaited<ReturnType<typeof buildPartTable>>;
+  beforeAll(async () => {
+    table = await buildPartTable();
+  }, 60_000);
+
+  it("reads the review's case as the addition it is: the parameter takes the type without that field", async () => {
+    const owners = (added: string) => (side: Side) =>
+      `export interface Owner { name: string${inNew(side, added)} }
+export declare class OwnersClient { create(options: Omit<Owner, "ownerId">): Promise<void>; }
+`;
+    const result = await nodeDiff(owners('; ownerId: string'));
+    expect(result.baseline.symbols.find((sym) => sym.fqName === 'OwnersClient.create')?.parameters?.[0].type.name).toBe(
+      'Omit<Owner, "ownerId">',
+    );
+    expect(result.lines).toEqual(['additive symbol_added Owner.ownerId']);
+    expect(result.exitCode).toBe(0);
+    expect(result.report).toMatchInlineSnapshot(`
+      "Compat report:
+        0 breaking, 0 soft-risk, 1 additive
+
+        Additive: 1 new symbol(s)"
+    `);
+
+    // A required field the Omit does not list is one callers of `create` pass in.
+    const other = await nodeDiff(owners('; age: number'));
+    expect(other.exitCode).toBe(1);
+    expect(other.report).toMatchInlineSnapshot(`
+      "Compat report:
+        1 breaking, 0 soft-risk, 0 additive
+
+        Breaking:
+          [field_requiredness_increased] Owner.age — Required field "age" added to "Owner", which callers of "OwnersClient.create" pass in"
+    `);
+  });
+
+  it('builds the table from SDKs and calls that type-check before the change', () => {
+    expect(table.sdkDiagnostics).toBe(0);
+    expect(table.rows.filter((entry) => !entry.compiledBefore).map((entry) => entry.row.name)).toEqual([]);
+    expect(new Set(PART_ROWS.map((row) => row.name)).size).toBe(PART_ROWS.length);
+    expect(PART_ROWS.length).toBeGreaterThanOrEqual(80);
+  });
+
+  it('reports each row as pinned', () => {
+    for (const { row, expected, notAdditions } of table.rows) expect(notAdditions, row.name).toEqual(expected);
+  });
+
+  it('has a breaking line exactly where tsc refuses the call a caller wrote before, but for the rows that say why not', () => {
+    for (const { row, reportsBreak, breaksAfter } of table.rows) {
+      expect(reportsBreak === breaksAfter ? 'agrees with tsc' : 'differs', row.name).toBe(
+        row.differs === undefined ? 'agrees with tsc' : 'differs',
+      );
+    }
+    // The rows that differ, each way: the report is stricter than tsc, or misses what tsc finds.
+    const differing = table.rows.filter((entry) => entry.row.differs !== undefined);
+    expect(differing.filter((entry) => entry.reportsBreak).map((entry) => entry.row.name)).toEqual([
+      'keys: an alias of a union',
+      'twice: Omit | whole, one parameter',
+      'written in place: Omit leaves the member out',
+      "alias: a generic alias of the SDK's that wraps Omit",
+      'Partial | whole, one parameter',
+      'retype to an unrelated type: the field an Omit lists',
+    ]);
+    expect(differing.filter((entry) => !entry.reportsBreak).map((entry) => entry.row.name)).toEqual([
+      'written in place: Pick lists the member',
+      'Pick: keys through an alias of a union, lists the member',
+    ]);
+  });
+
+  it('reads the same against a baseline written before the snapshot kept these', async () => {
+    const owners = (added: string) => (side: Side) =>
+      nodeSdk(`export interface Owner { name: string${inNew(side, added)} }
+export declare class OwnersClient { create(options: Omit<Owner, "ownerId">): Promise<void>; }
+`);
+    for (const [added, expected] of [
+      ['; ownerId: string', ['additive symbol_added Owner.ownerId']],
+      ['; age: number', ['breaking field_requiredness_increased Owner.age']],
+    ] as const) {
+      const baseline = await snapshotOf(nodeExtractor, owners(added)('old'));
+      const candidate = await snapshotOf(nodeExtractor, owners(added)('new'));
+      expect(lines(diffSnapshots(writtenBefore750(baseline), candidate)), added).toEqual(expected);
+      expect(lines(diffSnapshots(baseline, candidate)), added).toEqual(expected);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // An existing field's optionality
 // ---------------------------------------------------------------------------
 
