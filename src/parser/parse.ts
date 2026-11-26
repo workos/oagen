@@ -92,8 +92,11 @@ export interface ParseOptions {
    * named by shape (`ErrorBody`, `ErrorBodyWithCode`, the enum `ErrorBodyCode`;
    * see `collapseErrorBodies`). A body's shape, and so its name, is its
    * required fields — their names, domain names and types — so an optional
-   * field added to a body or to a nested item moves no model (#506, #516),
-   * and two shapes never ask for one name (#515): `{ message: string | null }`
+   * field added to a body or to a nested item moves no model (#506, #516)
+   * — and the bases it names (#755): two bodies written as inline `allOf`s
+   * fold onto one model only when they name the same components in the
+   * same order, and the shared model names them (`Model.bases`) — and two
+   * shapes never ask for one name (#515): `{ message: string | null }`
    * is `ErrorBodyWithNullableMessage`, `{ code: integer, message }` is
    * `ErrorBodyWithCodeInteger`, `{ status: 404, message }` is
    * `ErrorBodyWithStatus404`, `{ error: integer, error_description }` is
@@ -103,13 +106,18 @@ export interface ParseOptions {
    * requires no field is named from every field under `Optional`
    * (`OptionalErrorBody` for `{ message? }`); what no name can spell — a
    * value pinned inside an array, a discriminator mapping, the component or
-   * named enum a field references, a field named like another field's
+   * named enum a field references, the bases a body names (`allOf: [{ $ref:
+   * PetError }, { properties: { code } }]` beside a plain `{ message, code?
+   * }`), a field named like another field's
    * qualifier (`code_integer` beside `code: integer`), a pinned value that
    * spells a family prefix (`code: 'optional'` beside `{ message? }`) —
-   * leaves the later shape's models as they are, with a warning; a shape
-   * whose name is its field names alone sorts before one a qualifier
-   * spelled, so adding the qualified shape moves no model. A component of the shared name takes each
-   * body it declares every field, domain name and limit of, and leaves a
+   * leaves the later shape's models as they are, with a warning; a body
+   * that names no base sorts before one that names some, and a shape
+   * whose name is its field names alone before one a qualifier
+   * spelled, so adding a body that extends a component, or the qualified
+   * shape, moves no model. A component of the shared name takes each
+   * body it declares every field, domain name and limit of — one that
+   * names bases only where it names the same ones — and leaves a
    * body it would narrow as it is. An optional field's hint is carried
    * whichever bodies give it, and dropped with a warning when two bodies
    * hint it apart. On by default; `false` keeps one model per operation and

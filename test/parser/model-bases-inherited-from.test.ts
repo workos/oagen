@@ -890,7 +890,7 @@ describe('#591', () => {
         expect(modelNamed(spec, 'Pet').fields.map((f) => f.name)).toEqual(['nickname', 'name']);
       });
 
-      it('a model built from an inline allOf — a body, a field — carries neither key', async () => {
+      it('a model built from an inline allOf — a body, a field — names its base and takes name from it, as the component does (#755)', async () => {
         const merged = { allOf: [R('Animal'), { type: 'object', properties: { nickname } }] };
         const paths = {
           ...issuePaths,
@@ -910,11 +910,11 @@ describe('#591', () => {
             m.fields.map((f) => f.name),
             name,
           ).toEqual(['name', 'nickname']);
-          expect(m.bases, name).toBeUndefined();
+          expect(m.bases, name).toEqual([ANIMAL]);
           expect(
             m.fields.map((f) => f.inheritedFrom),
             name,
-          ).toEqual([undefined, undefined]);
+          ).toEqual([ANIMAL, undefined]);
         }
         expect(modelNamed(spec, 'Pet').bases).toEqual([ANIMAL]);
       });

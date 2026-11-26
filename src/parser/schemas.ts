@@ -9480,13 +9480,42 @@ function ownDecision(
  * conjunction of its own, with a guard of its own (`declareVariant`), so
  * a component two variants name declares into each.
  */
-interface ComponentReading {
+interface ComponentReading extends AllOfProvenance {
   ledger: Map<string, PropertyDeclarations>;
+  /** The schema the reading started on (the component's own), so a member that reaches it again — the component naming itself, or an alias of it — is told from one naming another component already read (`followMemberRefChain`). */
+  root?: SchemaObject;
+  seen: Set<SchemaObject>;
+}
+
+/** A fresh `ComponentReading`, into `ledger` when given. */
+function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): ComponentReading {
+  return { ledger, ...newAllOfProvenance(), seen: new Set() };
+}
+
+/**
+ * What a reader of an `allOf` notes of where its declarations come from,
+ * beside the declarations themselves (`declareProperty`, which keeps each
+ * one's origin): the names every always-applying member requires, who
+ * requires each, and the bases the `$ref` members land on. The one record
+ * `Model.bases` and `Field.inheritedFrom` are read from (`provenanceOf`),
+ * whichever reader keeps it — the component reader (`ComponentReading`,
+ * `readComponentAllOf`) for a component's own `allOf`, the inline merge
+ * (`mergeAllOfMembers`) for one written at a field, a body, array items,
+ * map values, a union variant, a parameter, a header, a webhook or
+ * callback payload — and both keep it through the same three notes, made
+ * where each reader lands on a `$ref` member's component (`noteLanding`),
+ * records a declaration (`declareUnder`) and reads a `required` list
+ * (`noteRequired`). So an `allOf` names the same bases, and takes the same
+ * fields from them, as a component and written inline (#755: only the
+ * component reader kept it, and a model built from an inline `allOf`
+ * named no base).
+ */
+export interface AllOfProvenance {
   required: Set<string>;
   /**
    * Who requires each name in `required`: the origin of every
    * always-applying `required` list that names it — a base, by name, or
-   * `null` for the component's own list and an inline member's — read
+   * `null` for the schema's own list and an inline member's — read
    * beside a declaration's origin to tell a field left as its base
    * declares it (`Field.inheritedFrom`) from one the model requires on its
    * own (`inheritedBase`; #591).
@@ -9498,14 +9527,11 @@ interface ComponentReading {
    * (`noteBase`), each once, in the order first met.
    */
   bases: ModelRef[];
-  /** The schema the reading started on (the component's own), so a member that reaches it again — the component naming itself, or an alias of it — is told from one naming another component already read (`followMemberRefChain`). */
-  root?: SchemaObject;
-  seen: Set<SchemaObject>;
 }
 
-/** A fresh `ComponentReading`, into `ledger` when given. */
-function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): ComponentReading {
-  return { ledger, required: new Set(), requiredBy: new Map(), bases: [], seen: new Set() };
+/** A fresh `AllOfProvenance`. */
+export function newAllOfProvenance(): AllOfProvenance {
+  return { required: new Set(), requiredBy: new Map(), bases: [] };
 }
 
 /**
@@ -9517,7 +9543,7 @@ function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): 
  * origin through everything read inside it (`memberOrigin`), as the inline
  * merge keeps an origin whose schema writes an `allOf` or a `$ref`.
  */
-interface ComponentOrigin {
+export interface ComponentOrigin {
   key: string;
   name: string;
   schema: SchemaObject;
@@ -9566,58 +9592,119 @@ interface MemberReadingOptions {
  * `null` for an inline member at the top level: the model's own.
  */
 function memberOrigin(landing: MemberLanding, enclosing: ComponentOrigin | undefined): ComponentOrigin | null {
-  if (enclosing && composesOwnChain(enclosing.schema)) return enclosing;
-  if (landing.key !== undefined && landing.named) {
-    return { key: landing.key, name: resolveSchemaName(landing.key), schema: landing.named };
-  }
-  return enclosing ?? null;
+  return landingOrigin(landing.key, landing.named, enclosing ?? null);
 }
 
 /**
- * Record `origin` among the reading's bases (`Model.bases`), once, when it
+ * `memberOrigin` by its parts — the key of the first component a reference
+ * resolves through (`key`, none for a pointer deeper into a component or
+ * for an inline member), that component's own schema (`named`) and the
+ * origin the reference is read inside (`enclosing`) — for the inline
+ * merge, which follows a chain of references one `$ref` at a time
+ * (`mergeAllOfMembers`): the one decision of which component a
+ * declaration is recorded under, so the two readers of an `allOf` cannot
+ * record one under different origins (#755: the merge decided it with an
+ * expression of its own).
+ */
+export function landingOrigin(
+  key: string | undefined,
+  named: SchemaObject | undefined,
+  enclosing: ComponentOrigin | null,
+): ComponentOrigin | null {
+  if (enclosing && composesOwnChain(enclosing.schema)) return enclosing;
+  if (key !== undefined && named !== undefined) return { key, name: resolveSchemaName(key), schema: named };
+  return enclosing;
+}
+
+/**
+ * Record `origin` among the bases noted (`Model.bases`), once, when it
  * is a model component: a `$ref` to it is typed as a model
- * (`componentTypeRef`, read through the nullability a component carries
- * and the other types its type list names beside its object,
- * `activeMultiTypeModels`; #730: `Owner: { type: ['object', 'string'],
- * properties }` is the base `Owner` of `Cat: { allOf: [{ $ref: Owner }, {
- * properties }] }` as it was, the merge reading its object alone),
- * not as an enum, an array or a primitive, which build no model and
- * contribute nothing to the fields. Called where a `$ref` member lands on
- * a component that is more than a nullable wrapper
- * (`declaresOnlyNullable`), so a base that declares nothing is still
+ * (`namesModelComponent`: under the nullability a component carries and
+ * beside the other types its type list names, #730 — `Owner: { type:
+ * ['object', 'string'], properties }` is the base `Owner` of `Cat: {
+ * allOf: [{ $ref: Owner }, { properties }] }` as it was, the merge
+ * reading its object alone), not as an enum, an array or a primitive,
+ * which build no model and contribute nothing to the fields. Called
+ * where a `$ref` member lands on a component that is more than a nullable
+ * wrapper (`noteLanding`), so a base that declares nothing is still
  * named, and wherever a declaration or a `required` name is recorded under
  * an origin (`declareUnder`, `noteRequired`), so the origin every
- * `inheritedFrom` names is a base.
+ * `inheritedFrom` names is a base. It types nothing: both readers of an
+ * `allOf` ask it at every landing and declaration, the inline merge while
+ * names are rehearsed and while a component is being typed (#755), where
+ * typing the component to learn its kind (`componentTypeRef`, as this did)
+ * would report an array component as referring to itself, and repeat
+ * every warning its items deserve.
  */
-function noteBase(reading: ComponentReading, origin: ComponentOrigin): void {
-  if (reading.bases.some((base) => base.name === origin.name)) return;
-  if (activeMultiTypeModels.has(origin.key)) {
-    reading.bases.push(inheritedRef(origin.name));
-    return;
-  }
-  const ref = componentTypeRef(origin.key);
-  const inner = ref.kind === 'nullable' ? ref.inner : ref;
-  if (inner.kind === 'model') reading.bases.push(inner);
+function noteBase(noted: AllOfProvenance, origin: ComponentOrigin): void {
+  if (noted.bases.some((base) => base.name === origin.name)) return;
+  if (namesModelComponent(origin.key)) noted.bases.push(inheritedRef(origin.name));
+}
+
+/**
+ * Whether a `$ref` to the `components/schemas` entry under `key` is typed
+ * as a model (`componentTypeRef`) — under the nullability the component
+ * carries and beside the other types its type list names (#615, #730) —
+ * read from what `extractSchemas` decided of each key and never by typing
+ * the component: every entry but the four kinds it builds no model for
+ * (`buildsComponentModel`: an array component, a primitive component, an
+ * alias of an enum component and an enum component), in the order
+ * `componentTypeRef` asks them. Outside an extraction every key names a
+ * model, as it does there.
+ */
+function namesModelComponent(key: string): boolean {
+  return !(
+    activeArrayComponentPlans.has(key) ||
+    activePrimitiveComponentKeys.has(key) ||
+    activeEnumAliasKeys.has(key) ||
+    activeEnumComponentKeys.has(key)
+  );
+}
+
+/**
+ * Note the component a `$ref` member lands on as a base (`noteBase`),
+ * where the landing starts an origin of its own (`origin`: the component
+ * the member's declarations are recorded under, `memberOrigin`; `enclosing`:
+ * the one the member was read inside, none at the top level) and the
+ * component is more than a nullable wrapper (`declaresOnlyNullable`), whose
+ * one variant names the base instead. A reference read inside a base's own
+ * chain keeps that base's origin and notes nothing: each model names its
+ * direct bases only. The one landing rule of both readers of an `allOf` —
+ * the component reader (`readComponentAllOfMember`) and the inline merge
+ * (`mergeAllOfMembers`; #755) — made before either looks whether the
+ * component was read already, so a member whose component another
+ * member's chain read is a direct base all the same.
+ */
+export function noteLanding(
+  noted: AllOfProvenance,
+  origin: ComponentOrigin | null,
+  enclosing: ComponentOrigin | null | undefined,
+): void {
+  if (origin === null || origin === (enclosing ?? null)) return;
+  // A component that is no Schema Object — a JSON Schema boolean — builds
+  // no model, and is asked nothing a schema is asked.
+  if (isSchemaObject(origin.schema) && !declaresOnlyNullable(origin.schema)) noteBase(noted, origin);
 }
 
 /** Record `name` as required by `origin`'s list (`required`, `requiredBy`), the base noted (`noteBase`). */
-function noteRequired(reading: ComponentReading, name: string, origin: ComponentOrigin | null): void {
-  reading.required.add(name);
-  let by = reading.requiredBy.get(name);
-  if (!by) reading.requiredBy.set(name, (by = new Set()));
+export function noteRequired(noted: AllOfProvenance, name: string, origin: ComponentOrigin | null): void {
+  noted.required.add(name);
+  let by = noted.requiredBy.get(name);
+  if (!by) noted.requiredBy.set(name, (by = new Set()));
   by.add(origin?.name ?? null);
-  if (origin) noteBase(reading, origin);
+  if (origin) noteBase(noted, origin);
 }
 
-/** Declare `name` as always-applying under `origin` (`declareProperty`), the base noted (`noteBase`). */
-function declareUnder(
-  reading: ComponentReading,
+/** Declare `name` into `ledger` as always-applying under `origin` (`declareProperty`), the base noted (`noteBase`). */
+export function declareUnder(
+  noted: AllOfProvenance,
+  ledger: Map<string, PropertyDeclarations>,
   name: string,
   schema: SchemaObject,
   origin: ComponentOrigin | null,
 ): void {
-  declareProperty(reading.ledger, name, schema, origin, false);
-  if (origin) noteBase(reading, origin);
+  declareProperty(ledger, name, schema, origin, false);
+  if (origin) noteBase(noted, origin);
 }
 
 /**
@@ -9649,11 +9736,69 @@ function declaresOnlyNullable(schema: SchemaObject): boolean {
  * base does (`requiredBy`): a field the model requires on its own, which
  * the base leaves optional, is changed.
  */
-function inheritedBase(entry: PropertyDeclarations, reading: ComponentReading): ModelRef | undefined {
+function inheritedBase(entry: PropertyDeclarations, noted: AllOfProvenance): ModelRef | undefined {
   const origin = entry.unconditional?.origin;
-  if (!origin || !reading.bases.some((base) => base.name === origin.name)) return undefined;
-  if (reading.required.has(entry.name) && !reading.requiredBy.get(entry.name)?.has(origin.name)) return undefined;
+  if (!origin || !noted.bases.some((base) => base.name === origin.name)) return undefined;
+  if (noted.required.has(entry.name) && !noted.requiredBy.get(entry.name)?.has(origin.name)) return undefined;
   return inheritedRef(origin.name);
+}
+
+/**
+ * Where the model built from an `allOf` takes its fields from: the bases
+ * it names (`Model.bases`) and, by property name, the base each field is
+ * taken from unchanged (`Field.inheritedFrom`).
+ */
+export interface ModelProvenance {
+  bases: ModelRef[];
+  inheritedFrom: ReadonlyMap<string, ModelRef>;
+}
+
+/**
+ * The provenance of the model an `allOf` builds, read from what its reader
+ * noted (`AllOfProvenance`) and the declarations it settled (`ledger`):
+ * the bases landed on, in the order first met, and for each property the
+ * base its field is taken from unchanged (`inheritedBase`). The one answer
+ * to which bases a model names and which of its fields are a base's, asked
+ * for a component's model (`extractAllOfModel`) and for the model of an
+ * `allOf` written inline (`mergeAllOfMembers`, for `buildMergedModel` and
+ * for the model `extractDirectResource` builds of an exact `2xx` status
+ * code's body; #755), and written onto either by `withProvenance`.
+ */
+export function provenanceOf(
+  ledger: ReadonlyMap<string, PropertyDeclarations>,
+  noted: AllOfProvenance,
+): ModelProvenance {
+  const inheritedFrom = new Map<string, ModelRef>();
+  for (const entry of ledger.values()) {
+    const base = inheritedBase(entry, noted);
+    if (base) inheritedFrom.set(entry.name, base);
+  }
+  return { bases: noted.bases, inheritedFrom };
+}
+
+/**
+ * `model` naming its bases and each of its fields the base it is taken
+ * from (`provenanceOf`): `bases` right after `fields`, `inheritedFrom`
+ * last on a field, every other key and the order of the fields as they
+ * were, so a reader of neither key sees the model it always saw. `model`
+ * itself where the `allOf` names no base: a field is a base's only on a
+ * model that names the base.
+ */
+export function withProvenance(model: Model, provenance: ModelProvenance): Model {
+  if (provenance.bases.length === 0) return model;
+  const named: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(model)) {
+    if (key !== 'fields') {
+      named[key] = value;
+      continue;
+    }
+    named.fields = model.fields.map((field) => {
+      const base = provenance.inheritedFrom.get(field.name);
+      return base ? { ...field, inheritedFrom: base } : field;
+    });
+    named.bases = provenance.bases;
+  }
+  return named as unknown as Model;
 }
 
 /** A `model` reference to the base `name`, marked as a component's (`markComponentModelRef`) so a pass that renames inline models leaves it as written. */
@@ -9761,7 +9906,7 @@ function readComponentAllOfMember(
   // reordered both); one that reaches the model itself (`reading.root`) —
   // a component naming itself, or an alias of it — is no base of its own.
   const origin = landing.stoppedAt === reading.root ? null : memberOrigin(landing, options.origin);
-  if (origin !== null && origin !== options.origin && !declaresOnlyNullable(origin.schema)) noteBase(reading, origin);
+  noteLanding(reading, origin, options.origin);
   if (!landing.read) return undefined;
   // A member that writes an `allOf` composing it — one that types it, one
   // beside properties of its own, or one with no typing union beside it
@@ -9808,7 +9953,7 @@ function readComponentAllOfMember(
     for (const r of level.required ?? []) noteRequired(reading, r, origin);
   }
   for (const [key, value] of Object.entries(resolved.properties ?? {})) {
-    if (isDeclaredProperty(value, schemas)) declareUnder(reading, key, value, origin);
+    if (isDeclaredProperty(value, schemas)) declareUnder(reading, ledger, key, value, origin);
   }
   // A nullable wrapper is its one non-null variant, read as one more member
   // in this member's own capacity — decided per axis (`nullableAxisBranch`),
@@ -10183,18 +10328,9 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
   const reading = newComponentReading();
   const discriminator = readComponentAllOf(name, schema, schemas, reading);
   const requiredSet = reading.required;
-  const fields = [...reading.ledger.values()].map((entry) => {
-    const field = buildFieldFromSchema(
-      entry.name,
-      declaredComponentProperty(entry),
-      name,
-      requiredSet,
-      schemas,
-      siblings,
-    );
-    const base = inheritedBase(entry, reading);
-    return base ? { ...field, inheritedFrom: base } : field;
-  });
+  const fields = [...reading.ledger.values()].map((entry) =>
+    buildFieldFromSchema(entry.name, declaredComponentProperty(entry), name, requiredSet, schemas, siblings),
+  );
 
   // The text, link, flag and extensions are the wrapper layer's: the
   // component's own, with an annotating member's — one that declares no
@@ -10207,12 +10343,11 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
   // a `$ref` member's flag on the referenced model, as `Field.deprecated`
   // leaves it there on an allOf field.
   const layer = allOfWrapperLayer(schema);
-  return {
+  const model: Model = {
     name,
     description: layer.description,
     ...externalDocsEntry(layer.externalDocs),
     fields,
-    ...(reading.bases.length > 0 ? { bases: reading.bases } : {}),
     ...(discriminator ? { discriminator } : {}),
     ...deprecatedEntry(layer),
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
@@ -10220,6 +10355,10 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     ...constraintsEntry(schema),
     ...schemaExtensionsEntry(layer),
   };
+  // The bases the `$ref` members land on, and the fields taken from one
+  // unchanged (`provenanceOf`), as the model of the same `allOf` written
+  // inline names them (`buildMergedModel`; #755).
+  return withProvenance(model, provenanceOf(reading.ledger, reading));
 }
 
 /**

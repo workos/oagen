@@ -1280,7 +1280,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "two unions of inline objects",
@@ -1290,7 +1290,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, a?: string, b?: string, c?: string, d?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { a?: string, b?: string, c?: string, d?: string }",
-            "model ThroughMerged { id: string, a?: string, b?: string, c?: string, d?: string }",
+            "model ThroughMerged { id: string, a?: string, b?: string, c?: string, d?: string } bases [Base, Pick]",
           ],
           [
             "\`$ref\`s beside inline objects",
@@ -1300,7 +1300,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, c?: string, d?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, c?: string, d?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, c?: string, d?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, c?: string, d?: string } bases [Base, Pick]",
           ],
           [
             "the same union twice",
@@ -1310,7 +1310,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string } bases [Base, Pick]",
           ],
           [
             "\`$ref\`s beside primitives",
@@ -1320,7 +1320,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string } bases [Base, Pick]",
           ],
           [
             "primitives beside \`$ref\`s",
@@ -1330,7 +1330,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "one \`$ref\` beside two",
@@ -1340,7 +1340,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "\`properties\` beside the two",
@@ -1350,7 +1350,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "\`properties\` beside \`$ref\`s and inline objects",
@@ -1360,7 +1360,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, c?: string, d?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { id: string, name?: string, toy?: string, c?: string, d?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, c?: string, d?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, c?: string, d?: string } bases [Base, Pick]",
           ],
           [
             "an empty \`properties\` beside the two",
@@ -1370,7 +1370,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "\`type: object\` beside the two",
@@ -1380,7 +1380,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "\`additionalProperties: false\` beside the two",
@@ -1390,7 +1390,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "a \`required\` list beside the two",
@@ -1400,7 +1400,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, a: string, b?: string, c?: string, d: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { a: string, b?: string, c?: string, d: string }",
-            "model ThroughMerged { id: string, a: string, b?: string, c?: string, d: string }",
+            "model ThroughMerged { id: string, a: string, b?: string, c?: string, d: string } bases [Base, Pick]",
           ],
           [
             "limits, flags, links and \`x-*\` keys beside the two",
@@ -1410,7 +1410,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "a property several variants declare",
@@ -1420,7 +1420,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, a?: (string | boolean), b?: string, c?: string } bases [Base]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { id?: (string | integer), a?: (string | boolean), b?: string, c?: string }",
-            "model ThroughMerged { id: string, a?: (string | boolean), b?: string, c?: string }",
+            "model ThroughMerged { id: string, a?: (string | boolean), b?: string, c?: string } bases [Base]",
           ],
           [
             "\`$ref\`s to components with nested objects",
@@ -1438,7 +1438,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "model HolderPick { meta?: HolderPickMeta, toy?: string, info?: HolderPickInfo, shelterId?: string }",
             "model HolderPickMeta { x?: string }",
             "model HolderPickInfo { y?: string }",
-            "model ThroughMerged { id: string, meta?: ThroughMergedMeta, toy?: string, info?: ThroughMergedInfo, shelterId?: string }",
+            "model ThroughMerged { id: string, meta?: ThroughMergedMeta, toy?: string, info?: ThroughMergedInfo, shelterId?: string } bases [Base, Pick]",
             "model ThroughMergedMeta { x?: string }",
             "model ThroughMergedInfo { y?: string }",
           ],
@@ -1456,7 +1456,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "model HolderPick { meta?: HolderPickMeta, b?: HolderPickB, info?: HolderPickInfo[], d?: string }",
             "model HolderPickMeta { x?: string }",
             "model HolderPickInfo { y?: string }",
-            "model ThroughMerged { id: string, meta?: ThroughMergedMeta, b?: ThroughMergedB, info?: ThroughMergedInfo[], d?: string }",
+            "model ThroughMerged { id: string, meta?: ThroughMergedMeta, b?: ThroughMergedB, info?: ThroughMergedInfo[], d?: string } bases [Base, Pick]",
             "model ThroughMergedMeta { x?: string }",
             "model ThroughMergedInfo { y?: string }",
             "enum PickB [p, q]",
@@ -1472,7 +1472,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, a?: string, b?: string, c?: string, d?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { a?: string, b?: string, c?: string, d?: string }",
-            "model ThroughMerged { id: string, a?: string, b?: string, c?: string, d?: string }",
+            "model ThroughMerged { id: string, a?: string, b?: string, c?: string, d?: string } bases [Base, Pick]",
           ],
           [
             "a \`discriminator\` beside the two, the oneOf pinning its property",
@@ -1482,7 +1482,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"} bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "enum HolderPickKind [cat, dog]",
           ],
           [
@@ -1493,7 +1493,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"} bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "enum HolderPickKind [cat, dog]",
           ],
           [
@@ -1504,7 +1504,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"} bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "enum HolderPickKind [cat, dog]",
           ],
           [
@@ -1519,7 +1519,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "model ComboCat { id: string, ownerId?: string, shelterId?: string, kind: "cat", meow?: string }",
             "model ComboDog { id: string, ownerId?: string, shelterId?: string, kind: "dog", bark?: string }",
             "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "enum HolderPickKind [cat, dog]",
           ],
           [
@@ -1530,7 +1530,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"} bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { ownerId?: string, shelterId?: string, kind?: HolderPickKind, meow?: string, bark?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "enum HolderPickKind [cat, dog]",
           ],
           [
@@ -1543,7 +1543,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "model PickPick { ownerId?: string, shelterId?: string, object: "pick", a?: string }",
             "model ComboPick { id: string, ownerId?: string, shelterId?: string, object: "pick", a?: string }",
             "model HolderPick { object?: "pick", a?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "a \`null\` variant in the oneOf",
@@ -1553,7 +1553,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "a \`null\` variant in the anyOf",
@@ -1563,7 +1563,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "a \`null\` variant in both",
@@ -1573,7 +1573,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "OAS 3.0 \`nullable: true\` beside the two",
@@ -1583,7 +1583,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "a nullable wrapper beside \`$ref\`s",
@@ -1592,8 +1592,8 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: HolderPick",
             "through a component: Combo { id: string, name?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model HolderPick { name?: string, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, name?: string, ownerId?: string, shelterId?: string }",
+            "model HolderPick { name?: string, ownerId?: string, shelterId?: string } bases [Pet]",
+            "model ThroughMerged { id: string, name?: string, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "\`$ref\`s beside a nullable wrapper",
@@ -1602,8 +1602,8 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: HolderPick",
             "through a component: Combo { id: string, name?: string, toy?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model HolderPick { name?: string, toy?: string, ownerId?: string }",
-            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string }",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string } bases [Owner]",
+            "model ThroughMerged { id: string, name?: string, toy?: string, ownerId?: string } bases [Base, Pick]",
           ],
           [
             "a nullable wrapper around a nested object beside \`$ref\`s",
@@ -1616,8 +1616,8 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "model PickMeta { x?: string }",
             "model OtherInfo { y?: string }",
             "model NestMeta { x?: string }",
-            "model HolderPick { meta?: NestMeta, ownerId?: string, shelterId?: string }",
-            "model ThroughMerged { id: string, meta?: PickMeta, ownerId?: string, shelterId?: string }",
+            "model HolderPick { meta?: NestMeta, ownerId?: string, shelterId?: string } bases [Nest]",
+            "model ThroughMerged { id: string, meta?: PickMeta, ownerId?: string, shelterId?: string } bases [Base, Pick]",
           ],
           [
             "stop fields on the anyOf’s variants",
@@ -1627,7 +1627,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, a?: string, b?: string, has_more?: boolean, next_after?: string, next_page?: integer } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { a?: string, b?: string, has_more?: boolean, next_after?: string, next_page?: integer }",
-            "model ThroughMerged { id: string, a?: string, b?: string, has_more?: boolean, next_after?: string, next_page?: integer }",
+            "model ThroughMerged { id: string, a?: string, b?: string, has_more?: boolean, next_after?: string, next_page?: integer } bases [Base, Pick]",
           ],
           [
             "an anyOf of bare limits",
@@ -1636,7 +1636,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (Pet | Toy)",
             "through a component: Combo { id: string, name?: string, toy?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string, name?: string, toy?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string } bases [Base, Pick]",
           ],
           [
             "an empty anyOf",
@@ -1645,7 +1645,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (Pet | Toy)",
             "through a component: Combo { id: string, name?: string, toy?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string, name?: string, toy?: string }",
+            "model ThroughMerged { id: string, name?: string, toy?: string } bases [Base, Pick]",
           ],
           [
             "two unions of bare limits beside \`properties\`",
@@ -1655,7 +1655,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, a?: string, b?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { a?: string, b?: string }",
-            "model ThroughMerged { id: string, a?: string, b?: string }",
+            "model ThroughMerged { id: string, a?: string, b?: string } bases [Base, Pick]",
           ],
           [
             "two unions of primitives",
@@ -1664,7 +1664,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (string | integer)",
             "through a component: Combo { id: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string }",
+            "model ThroughMerged { id: string } bases [Base, Pick]",
             "warnings: 2",
           ],
           [
@@ -1674,7 +1674,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (string | integer)",
             "through a component: Combo { id: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string }",
+            "model ThroughMerged { id: string } bases [Base, Pick]",
             "warnings: 2",
           ],
           [
@@ -1684,7 +1684,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (string | string)",
             "through a component: Combo { id: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string }",
+            "model ThroughMerged { id: string } bases [Base, Pick]",
             "warnings: 2",
           ],
           [
@@ -1694,7 +1694,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (string[])",
             "through a component: Combo { id: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string }",
+            "model ThroughMerged { id: string } bases [Base, Pick]",
             "warnings: 2",
           ],
           [
@@ -1705,7 +1705,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
             "model HolderPick { name?: string, ownerId?: string }",
-            "model ThroughMerged { id: string, name?: string, ownerId?: string }",
+            "model ThroughMerged { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
           ],
           [
             "two nullable wrappers",
@@ -1714,8 +1714,8 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: nullable<HolderPick>",
             "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model HolderPick { name?: string, ownerId?: string }",
-            "model ThroughMerged { id: string, name?: string, ownerId?: string }",
+            "model HolderPick { name?: string, ownerId?: string } bases [Pet, Owner]",
+            "model ThroughMerged { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
           ],
           [
             "one \`$ref\` each beside OAS 3.0 \`nullable: true\`",
@@ -1724,8 +1724,8 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: nullable<HolderPick>",
             "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
-            "model HolderPick { name?: string, ownerId?: string }",
-            "model ThroughMerged { id: string, name?: string, ownerId?: string }",
+            "model HolderPick { name?: string, ownerId?: string } bases [Pet, Owner]",
+            "model ThroughMerged { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
           ],
           [
             "two unions of string consts",
@@ -1734,7 +1734,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: HolderPick",
             "through a component: Combo { id: string } bases [Base]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string }",
+            "model ThroughMerged { id: string } bases [Base]",
             "enum HolderPick [a, b]",
             "warnings: 2",
           ],
@@ -1745,7 +1745,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: HolderPick",
             "through a component: Combo { id: string, ownerId?: string, shelterId?: string } bases [Base]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string }",
+            "model ThroughMerged { id: string, ownerId?: string, shelterId?: string } bases [Base]",
             "enum HolderPick [a, b]",
             "warnings: 2",
           ],
@@ -1756,7 +1756,7 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
             "field: (string | integer)",
             "through a component: Combo { id: string } bases [Base]",
             "through an inline allOf: ThroughMerged",
-            "model ThroughMerged { id: string }",
+            "model ThroughMerged { id: string } bases [Base]",
             "warnings: 1",
           ],
         ]
@@ -1879,8 +1879,22 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
               "name": "Through",
             },
             {
+              "bases": [
+                {
+                  "kind": "model",
+                  "name": "Base",
+                },
+                {
+                  "kind": "model",
+                  "name": "Pick",
+                },
+              ],
               "fields": [
                 {
+                  "inheritedFrom": {
+                    "kind": "model",
+                    "name": "Base",
+                  },
                   "name": "id",
                   "required": true,
                   "type": {
@@ -2095,8 +2109,22 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
               "name": "HolderPick",
             },
             {
+              "bases": [
+                {
+                  "kind": "model",
+                  "name": "Base",
+                },
+                {
+                  "kind": "model",
+                  "name": "Pick",
+                },
+              ],
               "fields": [
                 {
+                  "inheritedFrom": {
+                    "kind": "model",
+                    "name": "Base",
+                  },
                   "name": "id",
                   "required": true,
                   "type": {
@@ -2252,8 +2280,18 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
               "name": "Through",
             },
             {
+              "bases": [
+                {
+                  "kind": "model",
+                  "name": "Base",
+                },
+              ],
               "fields": [
                 {
+                  "inheritedFrom": {
+                    "kind": "model",
+                    "name": "Base",
+                  },
                   "name": "id",
                   "required": true,
                   "type": {

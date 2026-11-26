@@ -31,7 +31,16 @@
  * only in their error code, their prose or their `x-` extensions fold onto
  * one model. An optional field is not shape (#506, #516): a body gains one
  * without leaving its group, and the group's model carries every optional
- * field any member declares. Nor is `deprecated` — the body's own or a
+ * field any member declares. The bases a body names are (#755): a body
+ * written as an inline `allOf` of `$ref` members names their components as
+ * its model's `bases` (`Model.bases`), and two bodies fold onto one model
+ * only when they name the same ones in the same order — a nested error
+ * body's read with it — so the shared model names those bases, each of its
+ * fields the base every member takes it from (`Field.inheritedFrom`), and
+ * is no base's that some body it stands for is not: `allOf: [{ $ref:
+ * PetError }, { properties: { code } }]` and a plain `{ message, code? }`
+ * are two models, where they were one `ErrorBody` that no emitter could
+ * write as a `PetError`. Nor is `deprecated` — the body's own or a
  * field's — shape (#441, #629): a body's name never depends on a flag, as
  * an inline copy's never depends on its own (`flagAdmits`), so a flag flip
  * moves no body; the shared model, and each of its fields, is deprecated
@@ -107,9 +116,10 @@
  * gains a field the component lacks moves alone. A name anything else holds
  * — a component of another shape, an enum, a shared body whose shape
  * differs in what no name can spell (a value pinned inside an array, a
- * discriminator mapping, the component or named enum a field references, a
- * field named like another field's qualifier, a pinned value that spells a
- * family prefix) — leaves the group's models exactly as the parser
+ * discriminator mapping, the component or named enum a field references,
+ * the bases a body names, a field named like another field's qualifier, a
+ * pinned value that spells a family prefix) — leaves the group's models
+ * exactly as the parser
  * materialized them, with every error-only model they reach or are reached
  * from, and says so in a warning that prints both shapes with their types;
  * the fold then runs again without them, since a freed name may now suit
@@ -127,12 +137,21 @@
  * of it, exactly as with no enum of the name (the warning named the enum,
  * `which enum "ErrorBodyWithCode" already holds`, where the body had been
  * measured against the component), and the enum component's to a shared
- * enum. The groups are ordered by shape, never by operation: fewer
- * named fields first, a shape whose name is its field names alone before
- * one a qualifier spelled (`qualified`), then the key, so the same shape
- * keeps a contested name whichever operation declared it, and adding
- * `{ message, code: integer }` beside `{ message, code_integer }` (both
- * `ErrorBodyWithCodeInteger`) leaves the latter's model as it is.
+ * enum. The groups are ordered by shape, never by operation: a body that
+ * names no base before one that names some, itself or in an error body
+ * nested under it (#755), then fewer named fields first, a shape whose
+ * name is its field names alone before one a qualifier spelled
+ * (`qualified`), then the key, so the same shape keeps a contested name
+ * whichever operation declared it, adding `{ message, code: integer }`
+ * beside `{ message, code_integer }` (both `ErrorBodyWithCodeInteger`)
+ * leaves the latter's model as it is, and adding a body that extends a
+ * component beside plain ones of its fields leaves `ErrorBody` theirs: the
+ * one that names `PetError` keeps the model the parser gave it
+ * (`GetPetError400`), with its base, and the warning prints it as `extends
+ * PetError { message: string, code?: string }`. A component schema that
+ * holds the shared name takes a body that names bases only where it names
+ * the same ones in the same order (`ModelKeys.holds`); a body that names
+ * none folds onto it as it always did, whatever the component is built on.
  *
  * A string field a group pins to two or more values becomes an enum shared by
  * every error body that has a field of that name — `ErrorBodyCode` for
@@ -360,7 +379,22 @@ function fold(
   // another field's qualifier (`code_integer` beside `code: integer`, both
   // `ErrorBodyWithCodeInteger`) keeps its model when the qualified shape is
   // added.
+  // Whether a group's bodies name a base, themselves or in an error body
+  // nested under them, which the key reads as their own (`ModelKeys`).
+  const extending = new Map<string, boolean>();
+  for (const [key, [representative]] of groups) {
+    const reached = [...closure([representative.name], byName)].filter((name) => errorOnly.has(name));
+    extending.set(
+      key,
+      reached.some((name) => basesOf(byName.get(name)!).length > 0),
+    );
+  }
   const orderedGroups = [...groups.entries()].sort(([keyA, a], [keyB, b]) => {
+    // A body that names no base before one that names some (#755): the
+    // name says nothing of a base, so the two ask for one name, and adding
+    // a body that extends a component moves no other body's model.
+    const based = Number(extending.get(keyA)) - Number(extending.get(keyB));
+    if (based !== 0) return based;
     const fields = namedFields(a[0]).length - namedFields(b[0]).length;
     if (fields !== 0) return fields;
     const plain = Number(qualified(a[0], naming)) - Number(qualified(b[0], naming));
@@ -398,12 +432,17 @@ function fold(
   // enum's to a shared enum: `holders` names the enum, as for any enum's
   // name, and `modelHolders` the component a body is told it met.
   const modelHolders = new Map<string, string>();
-  for (const name of options.componentNames) {
+  // A component is told with the bases it names only to a body that names
+  // some (`based`; #755): they are then part of what tells the two apart.
+  const componentHolder = (name: string, based = false): string => {
     const component = byName.get(name);
-    const shape = component === undefined ? '' : ` ${shapeOf(component)}`;
-    const holder = `${component?.deprecated ? 'deprecated ' : ''}component schema "${name}"${shape}`;
+    const shape = component === undefined ? '' : ` ${shapeOf(component, based)}`;
+    return `${component?.deprecated ? 'deprecated ' : ''}component schema "${name}"${shape}`;
+  };
+  for (const name of options.componentNames) {
+    const holder = componentHolder(name);
     holders.set(name, holder);
-    if (component !== undefined) modelHolders.set(name, holder);
+    if (byName.has(name)) modelHolders.set(name, holder);
   }
   for (const e of existingEnums) holders.set(e.name, `enum "${e.name}"`);
   const canonical = new Map<string, string>(); // group key → shared name
@@ -444,8 +483,9 @@ function fold(
       return;
     }
     // A body is told of the model component it is measured against, where
-    // an enum component holds the name as well (`modelHolders`).
-    const holder = modelHolders.get(name) ?? taken;
+    // an enum component holds the name as well (`modelHolders`), with the
+    // bases the component names when the body names some.
+    const holder = modelHolders.has(name) ? componentHolder(name, basesOf(members[0]).length > 0) : taken;
     // A component schema of this shape is the shared body of every member
     // it can stand for; a member it cannot — one with a field, a domain
     // name, a limit or a pinned value the component does not admit, one
@@ -456,7 +496,7 @@ function fold(
     // model of another shape takes none of the members.
     const component = byName.get(name);
     if (component && !errorOnly.has(name)) {
-      const sameKey = keys.of(name) === key;
+      const sameKey = keys.holds(name, members[0]);
       const left = sameKey ? members.filter((member) => !componentAccepts(component, member, keys)) : members;
       if (left.length === 0) {
         // A deprecated body a live component takes, and a deprecated field
@@ -756,8 +796,9 @@ const byFieldName = (a: Field, b: Field): number => (a.name < b.name ? -1 : a.na
  * The shape of an error-only model, independent of its name, its optional
  * fields, its documentation, its flags and limits (its own `deprecated`
  * and its fields' included, #629), its `x-` extensions and the values its
- * string fields are pinned to. Memoized per model; a cycle among error
- * bodies reads as the name on the cycle.
+ * string fields are pinned to — with the bases it names (`of`; #755).
+ * Memoized per model; a cycle among error bodies reads as the name on the
+ * cycle.
  */
 class ModelKeys {
   private readonly keys = new Map<string, string>();
@@ -768,7 +809,35 @@ class ModelKeys {
     private readonly byName: ReadonlyMap<string, Model>,
   ) {}
 
+  /**
+   * The key a body folds by: its shape (`shape`) and the bases it names,
+   * in order (#755) — two bodies fold onto one model only when they name
+   * the same ones, so the shared model is each base exactly where every
+   * body it stands for is. A body that names none has the key it always
+   * had, its shape alone.
+   */
   of(name: string): string {
+    const bases = basesOf(this.byName.get(name)!);
+    return `${this.shape(name)}${bases.length > 0 ? `<${JSON.stringify(bases)}` : ''}`;
+  }
+
+  /**
+   * Whether the component `name`, which holds the shared name of `member`'s
+   * group, has the group's key (`claim`). A body that names bases is the
+   * component only where the component names the same ones, in order
+   * (#755): folded onto any other, the body would stop being its bases, or
+   * become one it never named. A body that names none is read against the
+   * component's shape alone, as it always was, whatever the component is
+   * built on: the component's own bases are its model's, as its optional
+   * fields are.
+   */
+  holds(name: string, member: Model): boolean {
+    const key = this.of(member.name);
+    return basesOf(member).length > 0 ? this.of(name) === key : this.shape(name) === key;
+  }
+
+  /** A model's key apart from the bases it names (`of`). */
+  private shape(name: string): string {
     const cached = this.keys.get(name);
     if (cached !== undefined) return cached;
     if (this.visiting.has(name)) return `cycle:${name}`;
@@ -1129,14 +1198,26 @@ function typeNoStricter(component: TypeRef, member: TypeRef, keys: ModelKeys): b
  * `(deprecated)` after a deprecated field's name
  * (`{ message (deprecated): string }`), so a warning says which side
  * deprecates a field (#629); the model's own flag is said by the holder.
+ * The bases it names lead (`extends PetError, Retryable { … }`; #755),
+ * since two bodies that differ there alone ask for one name; `based:
+ * false` leaves them out, for a component told to a body that names none,
+ * which is measured against the component's fields alone
+ * (`ModelKeys.holds`).
  */
-function shapeOf(model: Model): string {
-  if (model.fields.length === 0) return '{ }';
+function shapeOf(model: Model, based = true): string {
+  const bases = based ? basesOf(model) : [];
+  const built = bases.length > 0 ? `extends ${bases.join(', ')} ` : '';
+  if (model.fields.length === 0) return `${built}{ }`;
   const fields = model.fields.map(
     (field) =>
       `${field.name}${field.required ? '' : '?'}${field.deprecated ? ' (deprecated)' : ''}${field.domainName === undefined ? '' : ` as ${field.domainName}`}: ${describeType(field.type)}`,
   );
-  return `{ ${fields.join(', ')} }`;
+  return `${built}{ ${fields.join(', ')} }`;
+}
+
+/** The names of the bases a model names (`Model.bases`), in order; none for a model that names none. */
+function basesOf(model: Model): string[] {
+  return (model.bases ?? []).flatMap((base) => (base.kind === 'model' ? [base.name] : []));
 }
 
 /** A type as a warning prints it: `string`, `string (date-time)`, `"gone"`, `Note`, `string | null`, `(Note | Tag)[]`, `map<string>`. */
@@ -1426,7 +1507,9 @@ function nestedName(parentName: string, parent: Model, field: Field, item: Model
  * model is deprecated only when every member is (`sharedModelDeprecated`):
  * a deprecated member, or a member's deprecated field, folds onto a live
  * one with a warning, as a deprecated inline copy folds onto its live twin
- * (#441, #629).
+ * (#441, #629). The model names the bases its members name — the same
+ * ones, in one order, for every member, since they are part of the key —
+ * and a field the base every member takes it from (#755).
  *
  * The model's own `description` and `externalDocs` are the members' — the
  * text and link each body's schema gave its model, an `allOf` body's
@@ -1484,9 +1567,20 @@ function buildSharedModel(
       const examples = agree('examples');
       if (examples !== undefined) shared.examples = examples;
     }
+    // The field is a base's where every member takes it from that base
+    // (#755), whatever the fold made of its type: an enum shared under
+    // another name still lists the base's values, and where it has come to
+    // list more the field is no longer the base's declaration, which
+    // `settleBases` reads on the models as they end — the base is then
+    // none, as it is for a component whose field a fold changed.
+    const inheritedFrom = agree('inheritedFrom');
+    if (inheritedFrom !== undefined) shared.inheritedFrom = inheritedFrom;
     return shared;
   });
   const model: Model = { name, fields };
+  // The bases every member names, which the key holds the same and in one
+  // order for the whole group (`ModelKeys.of`; #755).
+  if (representative.bases && representative.bases.length > 0) model.bases = representative.bases;
   const agree = <K extends keyof Model>(key: K): Model[K] | undefined =>
     members.every((member) => stableJson(member[key]) === stableJson(representative[key]))
       ? representative[key]

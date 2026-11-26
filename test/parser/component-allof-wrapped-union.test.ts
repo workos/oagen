@@ -782,7 +782,7 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
       [
         "Pet extends Animal { id!: string } by kind to bird: Bird, fish: Fish",
         "Puppy extends Pet { id!: string, age?: integer }",
-        "OwnerMerged { id!: string, note?: string }",
+        "OwnerMerged extends Pet { id!: string, note?: string }",
       ]
     `);
     for (const property of ['plain', 'wrapped', 'closed']) {
@@ -863,13 +863,13 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
         }
       }
       expect(lines.join('\n')).toMatchInlineSnapshot(`
-        "a field: PetPet { id!: string, kind?: enum PetPetKind, meows?: boolean, barks?: boolean }
-        array items: Pets { id!: string, kind?: enum PetsKind, meows?: boolean, barks?: boolean }
-        map values: Pets { id!: string, kind?: enum PetsKind, meows?: boolean, barks?: boolean }
-        a \`oneOf\` variant: PetPet { id!: string, kind?: enum PetPetKind, meows?: boolean, barks?: boolean }
-        the \`200\` body: GetPetResponse { id!: string, kind?: enum GetPetResponseKind, meows?: boolean, barks?: boolean }
-        a request body: GetPetRequest { id!: string, kind?: enum GetPetRequestKind, meows?: boolean, barks?: boolean }
-        a webhook body: PetChangedPayload { id!: string, kind?: enum PetChangedPayloadKind, meows?: boolean, barks?: boolean }"
+        "a field: PetPet extends Animal { id!: string, kind?: enum PetPetKind, meows?: boolean, barks?: boolean }
+        array items: Pets extends Animal { id!: string, kind?: enum PetsKind, meows?: boolean, barks?: boolean }
+        map values: Pets extends Animal { id!: string, kind?: enum PetsKind, meows?: boolean, barks?: boolean }
+        a \`oneOf\` variant: PetPet extends Animal { id!: string, kind?: enum PetPetKind, meows?: boolean, barks?: boolean }
+        the \`200\` body: GetPetResponse extends Animal { id!: string, kind?: enum GetPetResponseKind, meows?: boolean, barks?: boolean }
+        a request body: GetPetRequest extends Animal { id!: string, kind?: enum GetPetRequestKind, meows?: boolean, barks?: boolean }
+        a webhook body: PetChangedPayload extends Animal { id!: string, kind?: enum PetChangedPayloadKind, meows?: boolean, barks?: boolean }"
       `);
       expect(warnings()).toEqual([]);
     },
@@ -1667,18 +1667,18 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
         }
       }
       expect(lines.join('\n')).toMatchInlineSnapshot(`
-        "Paging: { oneOf }, the keyword wrapper in a closed wrapper: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
-        Paging: { oneOf }, the keyword wrapper as the member: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
-        Paging: { oneOf }, the keyword beside the \`allOf\`: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
-        Paging: { oneOf }, the keyword on a nullable wrapper: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
-        Paging: { oneOf }, the keyword two wrappers up: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
-        Paging: { oneOf }, no keyword: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
-        Paging: { allOf: [{ oneOf }] }, the keyword wrapper in a closed wrapper: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
-        Paging: { allOf: [{ oneOf }] }, the keyword wrapper as the member: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
-        Paging: { allOf: [{ oneOf }] }, the keyword beside the \`allOf\`: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
-        Paging: { allOf: [{ oneOf }] }, the keyword on a nullable wrapper: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
-        Paging: { allOf: [{ oneOf }] }, the keyword two wrappers up: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
-        Paging: { allOf: [{ oneOf }] }, no keyword: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }"
+        "Paging: { oneOf }, the keyword wrapper in a closed wrapper: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword wrapper as the member: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword beside the \`allOf\`: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword on a nullable wrapper: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword two wrappers up: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, no keyword: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword wrapper in a closed wrapper: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword wrapper as the member: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword beside the \`allOf\`: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword on a nullable wrapper: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword two wrappers up: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, no keyword: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }"
       `);
     });
   });

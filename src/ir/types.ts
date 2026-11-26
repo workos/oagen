@@ -1497,11 +1497,25 @@ export interface Model {
   deprecated?: boolean;
   fields: Field[];
   /**
-   * The components a composed component's `allOf` names, one `{ kind:
-   * 'model' }` reference per `$ref` member, in document order, each once:
+   * The components the `allOf` a model is built from names, one `{ kind:
+   * 'model' }` reference per `$ref` member, in document order, each once
+   * — for a component composed with `allOf` and, by the same rules, for
+   * an `allOf` written inline (#755): a field, a request body, a response
+   * body of every kind (primary, a further success code's, a secondary
+   * media type's, error, `default`, range), array items, map values, a
+   * union's variant, a parameter's or a header's schema, a webhook or
+   * callback payload, an `allOf` nested in another.
    * `Pet: { allOf: [{ $ref: Animal }], properties: { nickname } }` has
    * `bases: [Animal]`, `allOf: [{ $ref: Animal }, { $ref: Owned }]` has
-   * `[Animal, Owned]`. Each model names only its direct bases: with
+   * `[Animal, Owned]`; and `getPet`'s `400` body `allOf: [{ $ref:
+   * PetError }, { $ref: Retryable }, { type: 'object', properties: { code }
+   * }]` is `GetPetError400` with `bases: [PetError, Retryable]`, `message`
+   * carrying `inheritedFrom: PetError` and `retryAfter` `inheritedFrom:
+   * Retryable`, as the component `BadRequestError` written with that
+   * `allOf` is — so an emitter may write `interface GetPetError400 extends
+   * PetError, Retryable { code?: string }`, or a class that extends the
+   * first base and implements the others, where an error class written
+   * for the inline body was no `PetError`. Each model names only its direct bases: with
    * `Animal: { allOf: [{ $ref: Living }], … }`, `Animal.bases` is
    * `[Living]` and `Pet.bases` stays `[Animal]`, since `Animal` already
    * covers `Living`. A member names the component its reference resolves
@@ -1590,8 +1604,16 @@ export interface Model {
    * 'string' } }` over variants that pin `kind` drops it; a named union
    * with no variant is no base. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher
-   * included); never on a model built from an inline `allOf` — a request
-   * or response body, a field — nor on a dispatcher's variant models.
+   * included) and on one built from an inline `allOf` (#755); never on a
+   * dispatcher's variant models. An inline schema that shares the name and
+   * shape of a model the document declares, or of another inline schema,
+   * has no model of its own: the model kept names its own bases, as it
+   * keeps its own text. The error-body fold (`collapseErrorBodies`) reads
+   * the bases as shape: two error bodies fold onto one shared model only
+   * when they name the same bases in the same order, and the shared model
+   * names them — `allOf: [{ $ref: PetError }, { properties: { code } }]`
+   * beside a plain `{ message, code? }` is `GetPetError400`, with its base,
+   * beside `ErrorBody`.
    * `fields` stays complete, the inherited fields included, in the order
    * the members are read, so an emitter that reads neither this key nor
    * `Field.inheritedFrom` sees the model it always saw; one that reads
@@ -1722,6 +1744,22 @@ export interface Field {
    * field's `type` is still built under this model's name, so an inline
    * object `Animal.meta` declares is `AnimalMeta` on `Animal` and
    * `PetMeta` on `Pet` — the same shape — with `inheritedFrom: Animal`.
+   * On the model of an inline `allOf` it is built under that model's
+   * name too where the `allOf` is itself the body of an exact `2xx`
+   * status code — the body `Operation.response` or a `successResponses`
+   * entry's `type` is read from, written inline or in a
+   * `components/responses` entry: `listPets` answering `200` with
+   * `allOf: [{ $ref: Animal }, { properties: { nickname } }]` and `202`
+   * with `allOf: [{ $ref: Animal }, { properties: { accepted } }]` has
+   * `ListPetsResponse.meta: ListPetsResponseMeta` and
+   * `ListPetsResponse202.meta: ListPetsResponse202Meta`. On every other
+   * model built from an inline `allOf` it is the base's own `AnimalMeta`,
+   * the merge copying the component's field: a range's (`2XX`, `3XX`) or
+   * `default`'s body, the body of a `3xx` or an error status code, a
+   * second media type's, a `2xx` body that only reaches the `allOf`
+   * through a `null` variant or a union's, array items, a field
+   * (`HolderPet.meta`), a request body, a parameter, a header, a webhook
+   * or callback payload. `inheritedFrom: Animal` either way.
    * A field without it is the model's to write, whether the model adds
    * it or declares it over a base's field of that name — the two are
    * told apart only by the base's `fields`, and a parent class has to

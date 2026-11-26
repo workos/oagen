@@ -11,7 +11,7 @@ import type {
 } from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularizeTrailingWord } from '../utils/naming.js';
-import type { SchemaObject } from './schemas.js';
+import type { ComponentOrigin, ModelProvenance, SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   buildsComponentModel,
@@ -20,12 +20,18 @@ import {
   admits,
   componentSchemaOf,
   componentUnionDispatches,
-  composesOwnChain,
   axisDiscriminatorOf,
   carryTypeListMarks,
   handedPastRef,
   documentComponentSchemas,
   declaredComponentProperty,
+  declareUnder,
+  landingOrigin,
+  newAllOfProvenance,
+  noteLanding,
+  noteRequired,
+  provenanceOf,
+  withProvenance,
   nonObjectVariantContexts,
   unionAxesOf,
   unionTypesSchema,
@@ -460,11 +466,11 @@ const FIELD_TEXT_KEYS = [
   'examples',
   'extensions',
 ] as const satisfies readonly (keyof Field)[];
-/** Field properties that only document a field (`FIELD_TEXT_KEYS`, its extensions included) or say where it comes from (`inheritedFrom`, the base a component's field is taken from; #591); two shapes that differ in these alone are one shape. */
+/** Field properties that only document a field (`FIELD_TEXT_KEYS`, its extensions included) or say where it comes from (`inheritedFrom`, the base a field is taken from; #591, and #755 for the model of an inline `allOf`); two shapes that differ in these alone are one shape. */
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', ...FIELD_TEXT_KEYS, 'inheritedFrom']);
 /** Model properties that only document a model — its description, link and extensions — the part of `MODEL_IDENTITY_KEYS` a fold that makes a kept model live reads from the live copy (`takeModelDocumentation`). */
 const MODEL_DOC_KEYS = ['description', 'externalDocs', 'extensions'] as const satisfies readonly (keyof Model)[];
-/** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), its provenance (`bases`, the components a composed component is built on; #591), and the fields (fingerprinted on their own). */
+/** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), its provenance (`bases`, the components the `allOf` a model is built from names — a component's own, #591, or one written inline, #755), and the fields (fingerprinted on their own). So two inline schemas of one name and one shape share a model whichever names a base, as an inline schema shares a component's: the definition kept keeps its own `bases`, as it keeps its own text. */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_KEYS, 'bases', 'fields']);
 
 /**
@@ -2412,7 +2418,7 @@ function differingNestedModels(a: Model, aModels: readonly Model[], b: Model, bM
 export interface MergedProperty {
   name: string;
   schema: SchemaObject;
-  origin: { name: string; schema: SchemaObject } | null;
+  origin: ComponentOrigin | null;
   /** `true` when only `oneOf`/`anyOf` variants declare it: it holds on a branch, not on every instance. */
   conditional?: true;
 }
@@ -2423,10 +2429,19 @@ export interface MergedAllOf {
   properties: MergedProperty[];
   /** The wrapper's `required` and every always-applying member's, in order; a variant's is not read. */
   required: string[];
-  /** The `$ref` members a component schema answered, each once, in order (a member's component chain included). */
+  /** The `$ref` members a component schema answered, each once, in order (a member's component chain included); the bases are `provenance.bases`. */
   resolvedRefs: string[];
   /** The `$ref` members no component schema answers, each once, in order; they contribute nothing. */
   unresolvedRefs: string[];
+  /**
+   * The bases the merged model names and the base each property's field is
+   * taken from unchanged (`Model.bases`, `Field.inheritedFrom`), by the
+   * rules a component's own `allOf` follows (`provenanceOf`): the
+   * components the `$ref` members land on, a member's direct base only —
+   * `resolvedRefs` lists every `$ref` followed, a base's own chain
+   * included — and none for an enum, array or primitive component (#755).
+   */
+  provenance: ModelProvenance;
   /** The wrapper layer's text (`allOfWrapperLayer`): the wrapper's own, else the first annotating member's — a member that declares no type (#555 review); a typing member's stays on that member, a `$ref` member's on its component. */
   description: string | undefined;
   /** The wrapper layer's link, read like its description. */
@@ -2721,8 +2736,8 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * The one decision every site makes of an inline `allOf` — `schemaToTypeRef`
  * when it types the schema, `mintedInlineNameEntries` when it predicts the
  * names, the field extractor and `extractInlineModelDeep` when they build
- * the models, `extractDirectResource` when it reads a primary response body
- * — so a model is built exactly when a reference names it:
+ * the models, `extractDirectResource` when it reads the body of an exact
+ * `2xx` status code — so a model is built exactly when a reference names it:
  *
  *   - `'merged'`: a `$ref` member beside an inline object member
  *     (`isInlineAllOfMember`), or, without a `$ref`, several members one of
@@ -5536,13 +5551,27 @@ function readVariant(
  * read in the same capacity is not read again, and a variant's walk ends
  * where it meets a schema again, which is what stops a component that
  * extends itself. `required` lists each name once.
+ *
+ * Where each declaration comes from is noted as the component reader notes
+ * it, through the same functions (`AllOfProvenance`: `landingOrigin` for
+ * the component a declaration is recorded under, `noteLanding` where a
+ * `$ref` member lands, `declareUnder`, `noteRequired`), and read by the
+ * one function that reads it for a component (`provenanceOf`): the bases
+ * the model of this `allOf` names and the base each field is taken from
+ * unchanged (`provenance`), so the model an inline `allOf` builds names
+ * its bases exactly as the same `allOf` written as a component does
+ * (#755: the merge kept each property's origin for typing alone, and its
+ * models named no base).
  */
 export function mergeAllOfMembers(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): MergedAllOf {
   const declared = new Map<string, PropertyDeclarations>();
-  const required: string[] = [];
+  // Where the declarations come from, noted as the component reader notes
+  // it (`AllOfProvenance`): every `required` name with who lists it, and
+  // the bases the `$ref` members land on (#755).
+  const noted = newAllOfProvenance();
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
   // The schemas read so far, by capacity: `inline` (an always-applying
@@ -5606,10 +5635,12 @@ export function mergeAllOfMembers(
       // which nothing built, where `BaseMeta` exists). A pointer deeper into
       // a component (#539) names a schema and no model of its own, so it
       // declares as a member written inline does: under the origin at hand.
-      const owner =
-        (origin && composesOwnChain(origin.schema)) || key === undefined
-          ? origin
-          : { name: resolveSchemaName(key), schema: target };
+      // The component reader's own decision (`landingOrigin`), and a landing
+      // that starts an origin is a base of the merged model as it is of a
+      // component's (`noteLanding`; #755), whether or not the component was
+      // read already.
+      const owner = landingOrigin(key, target, origin);
+      noteLanding(noted, owner, origin);
       // Nothing written beside the `$ref` is read — not a bare alias's
       // `required`, `properties`, `allOf` or union (#618 review, #622) —
       // as the component reader reads none (`componentAllOfMembers`). What
@@ -5639,9 +5670,9 @@ export function mergeAllOfMembers(
     // pointer's schema.
     wrapperDiscriminator = handedPastRef(wrapperDiscriminator, s, viaComponent);
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (isDeclaredProperty(value, componentSchemas)) declareProperty(declared, key, value, origin, false);
+      if (isDeclaredProperty(value, componentSchemas)) declareUnder(noted, declared, key, value, origin);
     }
-    if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
+    if (s.required) for (const r of s.required) noteRequired(noted, r, origin);
     // A member that is itself an `allOf` is part of the `allOf` it sits in,
     // so what that `allOf` hands its members for a union among them goes on
     // to the member's own, as the component reader hands it on
@@ -5711,9 +5742,10 @@ export function mergeAllOfMembers(
   const layer = allOfWrapperLayer(schema);
   return {
     properties,
-    required,
+    required: [...noted.required],
     resolvedRefs,
     unresolvedRefs,
+    provenance: provenanceOf(declared, noted),
     description: layer.description,
     externalDocs: readExternalDocs(layer.externalDocs),
     constraints: extractConstraints(schema),
@@ -6304,7 +6336,10 @@ export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
  * with its component as naming context and the component's own sibling set,
  * so it carries the same TypeRef as in the component's model (`BaseMeta`,
  * `BaseChild`, ...); the merged model's own properties are typed under its
- * name with the full merged property set as siblings.
+ * name with the full merged property set as siblings. The model names the
+ * bases the `$ref` members land on, and each field the base it is taken
+ * from unchanged, as a component's own `allOf` model does
+ * (`merged.provenance`, `withProvenance`; #755: it named neither).
  */
 function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: Record<string, SchemaObject>): Model {
   const requiredSet = new Set(merged.required);
@@ -6327,7 +6362,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     recordInheritedModelRefs(field.type, origin.name, p.name);
     return field;
   });
-  return {
+  const model: Model = {
     name,
     description: merged.description,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
@@ -6336,6 +6371,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
     ...(merged.extensions ? { extensions: merged.extensions } : {}),
   };
+  return withProvenance(model, merged.provenance);
 }
 
 /**
