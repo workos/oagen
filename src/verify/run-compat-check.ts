@@ -82,7 +82,16 @@ export async function runCompatCheck(
   const langId = lang as LanguageId;
   const policy = policyOverrides ? mergePolicy(getDefaultPolicy(langId), policyOverrides) : getDefaultPolicy(langId);
 
-  const diff = diffSnapshots(baseSnap, candSnap, policy);
+  // The scoped baseline is what is compared. Which types the SDK's callers
+  // build, and which fields it already has, is read from the whole of it: a
+  // field the scope leaves out of the baseline (one the SDK spells otherwise
+  // than the spec does) is not one the candidate added as required.
+  const diff = diffSnapshots(
+    baseSnap,
+    candSnap,
+    policy,
+    scopedToSpec ? { unscopedBaseline: apiSurfaceToSnapshot(baseline) } : undefined,
+  );
   const passed = diff.changes.every((c) => c.severity !== 'breaking');
 
   return { passed, diff, scopedToSpec, scopedSymbolCount };

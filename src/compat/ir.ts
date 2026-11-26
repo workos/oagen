@@ -76,6 +76,30 @@ export interface CompatSymbol {
    *  extractor does not capture staticness; the classifier only compares
    *  it when both snapshots define it, so older snapshots never diff. */
   isStatic?: boolean;
+  /** On a `field`: whether a caller that builds the owning type may leave the
+   *  field out (`false` for a required field). Absent on every other kind,
+   *  when the extractor cannot tell (see `ApiInterface.fieldOptionalityUnknown`)
+   *  and in snapshots written before the key existed; the differ reads it
+   *  only where it is defined, so older snapshots never diff on it. */
+  optional?: boolean;
+  /** On a `field`: the member's type as the extractor's checker resolves it,
+   *  where that is another text than `typeRef.name`, which stays as every
+   *  baseline holds it (`ApiField.resolvedType`). The classifier compares two
+   *  fields by it when both snapshots record the field's optionality, that
+   *  is, when both were written since it existed; an older snapshot is
+   *  compared by `typeRef.name`, as before. */
+  resolvedType?: string;
+  /** On a type symbol whose members the snapshot records (an interface, a
+   *  model class, a type alias of an object type): the supertypes its
+   *  declaration names, as written. `[]` when it names none. Absent on a type
+   *  alias recorded by name only, on a class, on an enum, and in snapshots
+   *  written before the key existed. */
+  extends?: string[];
+  /** On a type alias: the type text it stands for, as the extractor recorded
+   *  it (`ApiTypeAlias.value`). Read to follow a parameter's type to the
+   *  types it is built from; a change of it is not reported. Absent in
+   *  snapshots written before the key existed. */
+  aliasOf?: string;
   /** Relative path to the source file where this symbol is defined. */
   sourceFile?: string;
 }
@@ -122,7 +146,7 @@ export interface CompatTypeRef {
 // Bridge: ApiSurface → CompatSnapshot
 // ---------------------------------------------------------------------------
 
-import type { ApiSurface, ApiParam } from './types.js';
+import type { ApiSurface, ApiField, ApiParam } from './types.js';
 import { getDefaultPolicy } from './policy.js';
 import { COMPAT_SCHEMA_VERSION } from './schema.js';
 
@@ -131,6 +155,11 @@ import { COMPAT_SCHEMA_VERSION } from './schema.js';
  *
  * This bridge allows existing extractors (which produce ApiSurface) to feed
  * into the new classified diff engine without requiring immediate migration.
+ *
+ * It keeps what the surface states about each type: a field's optionality
+ * (`optional`), an interface's or a model class's supertypes (`extends`), a
+ * type alias's value (`aliasOf`) and, where the extractor resolved them, the
+ * alias's members as `field` symbols under it, as an interface's are.
  */
 export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
   const language = (surface.language || 'node') as LanguageId;
@@ -214,22 +243,12 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       visibility: 'public',
       stability: 'stable',
       sourceKind: 'generated_resource_constructor',
+      ...supertypesEntry(iface.extends),
       ...(iface.sourceFile ? { sourceFile: iface.sourceFile } : {}),
     });
 
     for (const [fieldName, field] of Object.entries(iface.fields)) {
-      symbols.push({
-        id: `field:${ifaceName}.${fieldName}`,
-        kind: 'field',
-        fqName: `${ifaceName}.${fieldName}`,
-        ownerFqName: ifaceName,
-        displayName: `${ifaceName}.${fieldName}`,
-        visibility: 'public',
-        stability: 'stable',
-        sourceKind: 'generated_resource_constructor',
-        typeRef: { name: field.type },
-        ...(iface.sourceFile ? { sourceFile: iface.sourceFile } : {}),
-      });
+      symbols.push(fieldSymbol(ifaceName, fieldName, field, iface.sourceFile, iface.fieldOptionalityUnknown !== true));
     }
 
     // Constructor if interface has one
@@ -248,8 +267,11 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
     }
   }
 
-  // Convert type aliases
+  // Convert type aliases. An alias of an object type carries its members as
+  // field symbols, as an interface does; any other alias is recorded by name,
+  // with the text it stands for.
   for (const [aliasName, alias] of Object.entries(surface.typeAliases)) {
+    const members = aliasMembers(alias.fields);
     symbols.push({
       id: `alias:${aliasName}`,
       kind: 'alias',
@@ -258,8 +280,14 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       visibility: 'public',
       stability: 'stable',
       sourceKind: 'generated_resource_constructor',
+      ...(members ? supertypesEntry(alias.extends) : {}),
+      ...(typeof alias.value === 'string' ? { aliasOf: alias.value } : {}),
       ...(alias.sourceFile ? { sourceFile: alias.sourceFile } : {}),
     });
+
+    for (const [fieldName, field] of Object.entries(members ?? {})) {
+      symbols.push(fieldSymbol(aliasName, fieldName, field, alias.sourceFile, true));
+    }
   }
 
   // Convert enums
@@ -297,6 +325,54 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
     policies: getDefaultPolicy(language),
     symbols,
   };
+}
+
+/**
+ * A member of an interface, a model class or an object-type alias. `optional`
+ * is written as the surface states it, and left out where the surface states
+ * a placeholder (`optionalityKnown` false) or nothing a snapshot can carry.
+ */
+function fieldSymbol(
+  ownerName: string,
+  fieldName: string,
+  field: ApiField,
+  sourceFile: string | undefined,
+  optionalityKnown: boolean,
+): CompatSymbol {
+  return {
+    id: `field:${ownerName}.${fieldName}`,
+    kind: 'field',
+    fqName: `${ownerName}.${fieldName}`,
+    ownerFqName: ownerName,
+    displayName: `${ownerName}.${fieldName}`,
+    visibility: 'public',
+    stability: 'stable',
+    sourceKind: 'generated_resource_constructor',
+    typeRef: { name: field.type },
+    ...(optionalityKnown && typeof field.optional === 'boolean' ? { optional: field.optional } : {}),
+    ...(typeof field.resolvedType === 'string' ? { resolvedType: field.resolvedType } : {}),
+    ...(sourceFile ? { sourceFile } : {}),
+  };
+}
+
+/** The `extends` key of a type whose members are recorded: the supertypes the
+ *  surface names, `[]` when it names none (a surface from a hand-built or
+ *  older file may lack the list). */
+function supertypesEntry(supertypes: unknown): { extends: string[] } {
+  return {
+    extends: Array.isArray(supertypes) ? supertypes.filter((name): name is string => typeof name === 'string') : [],
+  };
+}
+
+/** The members a surface records for a type alias; undefined when it records
+ *  none (every extractor but one that resolves an alias's shape, every
+ *  surface file written before aliases carried members) or something that is
+ *  not a typed field per member, which is read as no record at all. */
+function aliasMembers(fields: unknown): Record<string, ApiField> | undefined {
+  if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) return undefined;
+  const isField = (value: unknown): boolean =>
+    typeof value === 'object' && value !== null && typeof (value as { type?: unknown }).type === 'string';
+  return Object.values(fields).every(isField) ? (fields as Record<string, ApiField>) : undefined;
 }
 
 /** Convert a legacy ApiParam to a CompatParameter. */

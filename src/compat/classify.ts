@@ -325,22 +325,21 @@ export function classifySymbolChanges(
   }
 
   // Field/property type changes
-  if (
-    baseline.typeRef &&
-    candidate.typeRef &&
-    normalizeType(baseline.typeRef.name, language) !== normalizeType(candidate.typeRef.name, language)
-  ) {
-    changes.push(
-      makeChange({
-        category: 'field_type_changed',
-        symbol: baseline.fqName,
-        old: { type: baseline.typeRef.name },
-        new: { type: candidate.typeRef.name },
-        message: `Type changed for "${baseline.displayName}" from "${baseline.typeRef.name}" to "${candidate.typeRef.name}"`,
-        policy,
-        specRef,
-      }),
-    );
+  if (baseline.typeRef && candidate.typeRef) {
+    const [oldType, newType] = comparedTypeTexts(baseline, candidate);
+    if (normalizeType(oldType, language) !== normalizeType(newType, language)) {
+      changes.push(
+        makeChange({
+          category: 'field_type_changed',
+          symbol: baseline.fqName,
+          old: { type: oldType },
+          new: { type: newType },
+          message: `Type changed for "${baseline.displayName}" from "${oldType}" to "${newType}"`,
+          policy,
+          specRef,
+        }),
+      );
+    }
   }
 
   // Enum member value changes
@@ -364,6 +363,27 @@ export function classifySymbolChanges(
   }
 
   return changes;
+}
+
+/**
+ * The two type texts a field or property is compared by.
+ *
+ * `typeRef.name` is the text an extractor has always written, and for a
+ * TypeScript interface it is decided by where the member's `?` stands, not by
+ * what the member is: an optional member keeps or loses a `| undefined` with
+ * its spelling (see `ApiField.resolvedType`). A snapshot written since
+ * carries the checker's reading beside it where the two differ, and a type
+ * alias's member is written by that reading alone. So when both snapshots
+ * record the field's optionality, which only one written since does, the two
+ * are compared by the resolved text: two spellings of one member are no
+ * change, and a change one spelling hid is one. A snapshot that records no
+ * optionality for the field is compared by `typeRef.name`, as it always was.
+ */
+function comparedTypeTexts(baseline: CompatSymbol, candidate: CompatSymbol): [string, string] {
+  const resolved = baseline.optional !== undefined && candidate.optional !== undefined;
+  const text = (symbol: CompatSymbol): string =>
+    resolved && typeof symbol.resolvedType === 'string' ? symbol.resolvedType : symbol.typeRef!.name;
+  return [text(baseline), text(candidate)];
 }
 
 /**
@@ -637,6 +657,45 @@ export function classifyAddedSymbol(symbol: CompatSymbol): ClassifiedChange {
     old: { symbol: '(absent)' },
     new: { symbol: symbol.fqName },
     message: `Symbol "${symbol.displayName}" was added`,
+  };
+}
+
+/**
+ * Classify a field callers must now supply: one a type they build gained as
+ * required (no `baseline`), or one that was optional there and is required
+ * now. The counterpart of `parameter_requiredness_increased` for the members
+ * of the types a callable takes: an options object's fields are its
+ * parameters in all but name.
+ *
+ * The caller decides that the owning type is one callers build (see
+ * `inputTypes`) and that the field is required now; `takenBy` is the
+ * callable or constructor whose parameters lead to the type.
+ */
+export function classifyFieldRequirednessIncrease(
+  candidate: CompatSymbol,
+  baseline: CompatSymbol | undefined,
+  takenBy: string,
+): ClassifiedChange {
+  const category: CompatChangeCategory = 'field_requiredness_increased';
+  const owner = candidate.ownerFqName ?? '';
+  const field = candidate.fqName.startsWith(`${owner}.`) ? candidate.fqName.slice(owner.length + 1) : candidate.fqName;
+  const old: Record<string, string> = baseline ? { field, required: 'false' } : { field: '(absent)' };
+  return {
+    category,
+    severity: defaultSeverityForCategory(category),
+    symbol: candidate.fqName,
+    conceptualChangeId: buildConceptualChangeId(
+      category,
+      candidate.fqName,
+      old,
+      candidate.schemaName ?? baseline?.schemaName,
+    ),
+    provenance: 'unknown',
+    old,
+    new: { field, required: 'true', takenBy },
+    message: baseline
+      ? `Field "${field}" became required on "${owner}", which callers of "${takenBy}" pass in`
+      : `Required field "${field}" added to "${owner}", which callers of "${takenBy}" pass in`,
   };
 }
 

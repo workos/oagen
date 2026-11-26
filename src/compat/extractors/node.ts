@@ -17,6 +17,7 @@ import type {
 import type { CompatSnapshot } from '../ir.js';
 import { apiSurfaceToSnapshot } from '../ir.js';
 import { nodeHints } from '../language-hints.js';
+import { withoutRepeatedIntersectionMembers } from '../type-names.js';
 import { sortRecord, overloadsOf } from './shared.js';
 
 export const nodeExtractor: Extractor = {
@@ -75,9 +76,9 @@ export const nodeExtractor: Extractor = {
       if (ts.isClassDeclaration(decl)) {
         classes[resolved.name] = { ...extractClass(resolved, checker), sourceFile };
       } else if (ts.isInterfaceDeclaration(decl)) {
-        interfaces[resolved.name] = { ...extractInterface(resolved, checker), sourceFile };
+        interfaces[resolved.name] = { ...extractInterface(resolved, checker, parsedConfig.options), sourceFile };
       } else if (ts.isTypeAliasDeclaration(decl)) {
-        typeAliases[resolved.name] = { ...extractTypeAlias(resolved, checker), sourceFile };
+        typeAliases[resolved.name] = { ...extractTypeAlias(resolved, checker, parsedConfig.options), sourceFile };
       } else if (ts.isEnumDeclaration(decl)) {
         enums[resolved.name] = { ...extractEnum(resolved, checker), sourceFile };
       }
@@ -376,7 +377,7 @@ function extractParameterInfo(
   return { name: fallback, isDestructured: false };
 }
 
-function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface {
+function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker, options: ts.CompilerOptions): ApiInterface {
   const type = checker.getDeclaredTypeOfSymbol(sym);
   const fields: Record<string, ApiField> = {};
   const extendsNames: string[] = [];
@@ -399,14 +400,25 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
     const propType = checker.getTypeOfSymbolAtLocation(prop, declarations![0]);
     const propDecl = prop.getDeclarations()?.[0];
     const isOptional = propDecl && ts.isPropertySignature(propDecl) ? !!propDecl.questionToken : false;
+    // The type text is decided by the `?` of the member's property signature,
+    // as it always has been: every baseline holds it so, and a text read any
+    // other way would diff against them. So a member that is optional without
+    // one (a method signature `retry?(): void`, a member inherited through
+    // `Partial<Base>`) keeps its `| undefined`, and `a?: string | undefined`
+    // loses its own under exactOptionalPropertyTypes.
     let typeStr = checker.typeToString(propType);
     if (isOptional) {
       typeStr = stripUndefined(typeStr);
     }
+    // What the member is, whatever its spelling: its optionality, which a `?`
+    // on a property signature always sets, and its type, recorded beside the
+    // text above where the two differ.
+    const member = resolvedMember(prop, declarations![0], checker, options);
     fields[prop.name] = {
       name: prop.name,
       type: typeStr,
-      optional: isOptional,
+      optional: member.optional,
+      ...(member.type !== typeStr ? { resolvedType: member.type } : {}),
     };
   }
 
@@ -441,12 +453,158 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
   };
 }
 
-function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker): ApiTypeAlias {
+function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker, options: ts.CompilerOptions): ApiTypeAlias {
   const type = checker.getDeclaredTypeOfSymbol(sym);
   return {
     name: sym.name,
     value: checker.typeToString(type, undefined, ts.TypeFormatFlags.InTypeAlias | ts.TypeFormatFlags.NoTruncation),
+    ...objectAliasMembers(sym, type, checker, options),
   };
+}
+
+/**
+ * The members and supertypes of an alias that names an object shape of its
+ * own, read as an interface's are:
+ *
+ *  - an object type: `type Options = { name: string }`;
+ *  - what a mapped type comes to: `Omit<Pet, 'id'>`, `Partial<Options>`,
+ *    `Record<'a' | 'b', string>`, `{ [K in Keys]?: string }`, an
+ *    instantiation of a generic object alias (`Page<Pet>`);
+ *  - an intersection of object types: `Base & { name: string }`,
+ *    `Omit<Pet, 'id'> & Extra`.
+ *
+ * The fields are every member the checker resolves for the alias, the members
+ * of an intersection's named types included, as an interface's fields include
+ * the ones it inherits. Each is read off the resolved member and off none of
+ * its declarations (see `resolvedMember`), so two aliases that accept the
+ * same values record the same fields however each is written. The supertypes
+ * are the references an intersection is written with, as an interface's
+ * `extends` are.
+ *
+ * Nothing for any other alias, which the surface records by name and value:
+ *
+ *  - another declared type under a second name (`type Old = New`), whose
+ *    members are that type's own;
+ *  - an instantiation of an interface or a class (`Promise<Pet>`, `Pet[]`,
+ *    `Map<string, Pet>`), a tuple, a function or constructor type;
+ *  - a union, a primitive, a literal, a type parameter, a conditional type
+ *    that is not resolved, and an intersection with any of these
+ *    (`A & (B | C)`, `string & { brand: true }`, `T & { name: string }`).
+ */
+function objectAliasMembers(
+  sym: ts.Symbol,
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  options: ts.CompilerOptions,
+): Pick<ApiTypeAlias, 'fields' | 'extends'> {
+  const declaration = sym.getDeclarations()?.find(ts.isTypeAliasDeclaration);
+  if (!declaration) return {};
+  const value = withoutParentheses(declaration.type);
+  if (ts.isTypeReferenceNode(value) && !value.typeArguments) return {};
+  if (!(type.isIntersection() ? type.types.every(isObjectShape) : isOwnObjectShape(type))) return {};
+
+  const fields: Record<string, ApiField> = {};
+  for (const prop of type.getProperties()) {
+    if (isNamedPublicMember(prop)) fields[prop.name] = resolvedMember(prop, declaration, checker, options);
+  }
+  const written = ts.isIntersectionTypeNode(value) ? value.types.map(withoutParentheses) : [];
+  return {
+    fields: sortRecord(fields),
+    extends: written
+      .filter(ts.isTypeReferenceNode)
+      .map((member) => member.getText())
+      .sort(),
+  };
+}
+
+/**
+ * A member of a resolved type, an alias's or an interface's: its optionality
+ * and its type text as the checker resolves them, never as one of its
+ * declarations writes them. An alias's field is this; an interface's field
+ * keeps the text baselines hold and carries this one beside it. A
+ * member can have several declarations that disagree (the parts of an
+ * intersection: `{ a?: string } & { a: string | undefined }` is a required
+ * `a`), or one that says something else than the member does (a mapped type:
+ * every member of `Partial<Base>` is optional, none of `Required<Base>` is).
+ *
+ * The type text is the checker's, less the `undefined` that optionality
+ * itself adds. Without `exactOptionalPropertyTypes` an optional member's type
+ * always admits `undefined`, written or not (`a?: string` and
+ * `a?: string | undefined` are one type), so it is left out, as it is from an
+ * interface's optional property. With the option the checker adds none, and
+ * an `undefined` in the text is one the SDK wrote: `a?: string | undefined`
+ * accepts a value `a?: string` does not, and the two are recorded apart. A
+ * required member's text is never touched: `a: string | undefined` is not
+ * `a: string`.
+ *
+ * A member two parts of an intersection declare with one inline type
+ * resolves to that type intersected with itself, which is that type
+ * (`withoutRepeatedIntersectionMembers`).
+ */
+function resolvedMember(
+  prop: ts.Symbol,
+  location: ts.Node,
+  checker: ts.TypeChecker,
+  options: ts.CompilerOptions,
+): ApiField {
+  const optional = isOptionalMember(prop);
+  const typeStr = withoutRepeatedIntersectionMembers(
+    checker.typeToString(checker.getTypeOfSymbolAtLocation(prop, location)),
+  );
+  return {
+    name: prop.name,
+    type: optional && options.exactOptionalPropertyTypes !== true ? stripUndefined(typeStr) : typeStr,
+    optional,
+  };
+}
+
+function withoutParentheses(node: ts.TypeNode): ts.TypeNode {
+  return ts.isParenthesizedTypeNode(node) ? withoutParentheses(node.type) : node;
+}
+
+/**
+ * A member a caller reads or writes by name: not one keyed by a symbol
+ * (`[Symbol.iterator]`, which the checker names with a number that is not
+ * stable from one program to the next), and not a `#private`, `private` or
+ * `protected` member of a class an intersection takes in.
+ */
+function isNamedPublicMember(prop: ts.Symbol): boolean {
+  const escapedName = prop.escapedName as string;
+  if (escapedName.startsWith('__@') || escapedName.startsWith('__#')) return false;
+  return !prop.getDeclarations()?.some((declaration) => {
+    const modifiers = ts.canHaveModifiers(declaration) ? ts.getModifiers(declaration) : undefined;
+    return modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword,
+    );
+  });
+}
+
+/** An object type of any kind that is not called or constructed: an
+ *  interface, a class, an object literal type, a mapped type's result. Not a
+ *  union, a primitive, a type parameter or a function. */
+function isObjectShape(type: ts.Type): boolean {
+  return (
+    (type.getFlags() & ts.TypeFlags.Object) !== 0 &&
+    type.getCallSignatures().length === 0 &&
+    type.getConstructSignatures().length === 0
+  );
+}
+
+/** An object shape no declaration names: an object literal type or a mapped
+ *  type's result, and not an interface, a class, an array or a tuple, each of
+ *  which is a declared type (or an instantiation of one). */
+function isOwnObjectShape(type: ts.Type): boolean {
+  const objectFlags = isObjectShape(type) ? (type as ts.ObjectType).objectFlags : 0;
+  return (
+    (objectFlags & (ts.ObjectFlags.Anonymous | ts.ObjectFlags.Mapped)) !== 0 &&
+    (objectFlags & (ts.ObjectFlags.ClassOrInterface | ts.ObjectFlags.Reference | ts.ObjectFlags.Tuple)) === 0
+  );
+}
+
+/** Whether a caller may leave the member out, as the checker resolved it: a
+ *  `?` on any kind of member, and what a mapped type made optional. */
+function isOptionalMember(prop: ts.Symbol): boolean {
+  return (prop.getFlags() & ts.SymbolFlags.Optional) !== 0;
 }
 
 function extractEnum(sym: ts.Symbol, checker: ts.TypeChecker): ApiEnum {

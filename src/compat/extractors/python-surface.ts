@@ -73,6 +73,26 @@ function isModelClass(cls: PythonClass, allClasses: Map<string, PythonClass>, mo
   return false;
 }
 
+/**
+ * Check if a class is a `TypedDict`, directly or through a class that is.
+ *
+ * A key of a `TypedDict` has no default, so `optional: field.hasDefault` is
+ * `false` for every one of them, while which keys may be left out is written
+ * elsewhere: `NotRequired[...]` and `Required[...]` around a key's type, and
+ * `total=False` on the class, which the parser does not read. The surface
+ * therefore marks a `TypedDict`'s optionality as unknown
+ * (`ApiInterface.fieldOptionalityUnknown`).
+ */
+function isTypedDict(cls: PythonClass, allClasses: Map<string, PythonClass>, seen = new Set<string>()): boolean {
+  if (hasBase(cls, DICT_BASES)) return true;
+  if (seen.has(cls.name)) return false;
+  seen.add(cls.name);
+  return cls.bases.some((base) => {
+    const parent = allClasses.get(base);
+    return parent !== undefined && isTypedDict(parent, allClasses, seen);
+  });
+}
+
 /** Check if a class is an exception class. */
 function isExceptionClass(
   cls: PythonClass,
@@ -275,6 +295,7 @@ export function buildSurface(
           sourceFile: cls.sourceFile,
           fields: sortRecord(fields),
           extends: [],
+          fieldOptionalityUnknown: true,
         };
         collector.add(cls.sourceFile, cls.name);
         continue;
@@ -405,6 +426,7 @@ export function buildSurface(
           sourceFile: cls.sourceFile,
           fields: sortRecord(fields),
           extends: [],
+          ...(isTypedDict(cls, allClassesByName) ? { fieldOptionalityUnknown: true as const } : {}),
         };
         collector.add(cls.sourceFile, cls.name);
       }

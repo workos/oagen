@@ -114,6 +114,8 @@ export function buildSurface(
         sourceFile: cls.sourceFile,
         fields: sortRecord(fields),
         extends: [],
+        // A method is not a field a caller supplies.
+        fieldOptionalityUnknown: true,
       };
       collector.add(cls.sourceFile, cls.name);
     } else if (isResourceClass(cls, resourceBases)) {
@@ -133,6 +135,8 @@ export function buildSurface(
         fields, // Intentionally NOT sorted — order matches RESOURCE_ATTRIBUTES
         extends: cls.extends ? [cls.extends] : [],
         ...(cls.hasCustomConstructor ? { hasCustomConstructor: true } : {}),
+        // An attribute name says nothing about which attributes are required.
+        fieldOptionalityUnknown: true,
       };
       collector.add(cls.sourceFile, cls.name);
     } else if (isValueObjectClass(cls) && !isExceptionClass(cls, exceptionBases)) {
@@ -142,12 +146,18 @@ export function buildSurface(
       // contribute identity. Without this branch the class would fall through
       // to the service-class path below and lose its field info.
       const fields: Record<string, ApiField> = {};
+      // A promoted property is a constructor parameter: one with a default
+      // may be left out of `new Foo(...)`, one without must be passed. A
+      // property declared in the class body says nothing about the
+      // constructor, so a class with one has no known optionality at all.
+      let optionalityKnown = true;
       for (const prop of cls.properties) {
         if (prop.visibility !== 'public') continue;
+        if (prop.optional === undefined) optionalityKnown = false;
         fields[prop.name] = {
           name: prop.name,
           type: prop.type,
-          optional: false,
+          optional: prop.optional ?? false,
         };
       }
       interfaces[cls.name] = {
@@ -155,6 +165,7 @@ export function buildSurface(
         sourceFile: cls.sourceFile,
         fields, // Intentionally NOT sorted — preserves declaration order.
         extends: cls.extends ? [cls.extends] : [],
+        ...(optionalityKnown ? {} : { fieldOptionalityUnknown: true as const }),
       };
       collector.add(cls.sourceFile, cls.name);
     } else if (isEnumClass(cls)) {

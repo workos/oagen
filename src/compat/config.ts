@@ -28,6 +28,7 @@ export type BreakingChangeCategory =
   | 'overload_removed'
   | 'union_wrapper_migration_without_compat_alias'
   | 'field_type_changed'
+  | 'field_requiredness_increased'
   | 'return_type_changed'
   | 'enum_member_value_changed'
   | 'staticness_changed';
@@ -140,6 +141,7 @@ const BREAKING_CATEGORIES: ReadonlySet<BreakingChangeCategory> = new Set<Breakin
   'overload_removed',
   'union_wrapper_migration_without_compat_alias',
   'field_type_changed',
+  'field_requiredness_increased',
   'return_type_changed',
   'enum_member_value_changed',
   'staticness_changed',
