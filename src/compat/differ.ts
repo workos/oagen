@@ -118,7 +118,9 @@ export function diffSnapshots(
   }
 
   // A field callers must now supply: required in the candidate, on a type
-  // the baseline's callers build. Returns the callable that takes the type.
+  // the baseline's callers build, in a part of it that keeps the field and
+  // leaves it required (an `Omit<Owner, 'ownerId'>` takes no `ownerId`, a
+  // `Partial<Owner>` requires none). Returns the callable that takes the type.
   // Asked of a field the baseline lacks and of one it records as optional;
   // a snapshot that does not record a field's optionality (an older one, an
   // extractor that cannot tell) never has `optional: false` or `true`, so it
@@ -129,7 +131,7 @@ export function diffSnapshots(
   const requiredOfCallers = (field: CompatSymbol, owner: string | undefined): string | undefined => {
     if (field.kind !== 'field' || field.optional !== false || owner === undefined) return undefined;
     const compared = baselineTypes.get(owner);
-    return compared !== undefined && !isRecordedByNameOnly(compared) ? takenBy.get(owner) : undefined;
+    return compared !== undefined && !isRecordedByNameOnly(compared) ? takenBy.requiredMember(field) : undefined;
   };
 
   // Compare each baseline symbol against candidate
@@ -620,14 +622,15 @@ function cascadeRenameDowngrades(
   baseline: CompatSnapshot,
   candidate: CompatSnapshot,
   candidateTypes: DeclaredTypes,
-  takenBy: ReadonlyMap<string, string>,
+  takenBy: ReturnType<typeof inputTypes>,
 ): void {
-  // The type that owns each baseline field, to tell a field callers read
-  // from one they write (see the `field_type_changed` branch).
-  const ownerOfField = new Map<string, string>();
+  // The baseline fields callers write, to tell them from the ones they only
+  // read (see the `field_type_changed` branch): a field of a type a callable
+  // takes, in a part of it that keeps the field.
+  const writtenFields = new Set<string>();
   for (const sym of baseline.symbols) {
-    if ((sym.kind === 'field' || sym.kind === 'property') && sym.ownerFqName)
-      ownerOfField.set(sym.fqName, sym.ownerFqName);
+    if ((sym.kind === 'field' || sym.kind === 'property') && takenBy.member(sym) !== undefined)
+      writtenFields.add(sym.fqName);
   }
 
   // Lazy-built field-set maps for the structural-equivalence fallback used
@@ -773,13 +776,13 @@ function cascadeRenameDowngrades(
             `every field on "${oldT}" still exists on "${newT}".`;
         }
       } else if (
-        !takenBy.has(ownerOfField.get(change.symbol) ?? '') &&
+        !writtenFields.has(change.symbol) &&
         narrowsToDeclaredSubtype(change.old.type, change.new.type, oldT, newT)
       ) {
-        // A field of a type callers build is one they write: the subtype may
-        // ask for more than the value they pass today, so that retype keeps
-        // its severity. Anywhere else the field is read, and a subtype's
-        // value is still one of the old type.
+        // A field callers supply when they build its type is one they
+        // write: the subtype may ask for more than the value they pass
+        // today, so that retype keeps its severity. Anywhere else the field
+        // is read, and a subtype's value is still one of the old type.
         change.severity = 'soft-risk';
         change.remediation ??= declaredSubtypeRemediation('Field type', oldT, newT);
       }

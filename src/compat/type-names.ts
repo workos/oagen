@@ -175,16 +175,48 @@ const SUPERTYPE_NAME = /^\\?[A-Za-z_$][A-Za-z0-9_$]*(?:\\[A-Za-z_$][A-Za-z0-9_$]
  *  `&'a Foo, &'b Bar`). */
 const NOT_A_STRING_LITERAL = /[<>()[\]{}&,]/;
 
-/** TypeScript's wrappers that take the required members off their argument:
- *  a `Partial<Foo>` needs none of them, a `Pick<Foo, 'a'>` only the ones it
- *  lists. A value of either is not built from a whole `Foo`. */
-const WRAPPERS_OF_A_PART = new Set(['Partial', 'Pick']);
+/**
+ * TypeScript's wrappers that take a part of their first argument: an
+ * `Omit<Foo, 'a'>` is a `Foo` without the members it lists, a
+ * `Pick<Foo, 'a'>` a `Foo` with only the ones it lists, and a `Partial<Foo>`
+ * a `Foo` none of whose members has to be there. Read by their names, as
+ * TypeScript defines them (see `typesTakenIn`).
+ */
+const WRAPPERS_OF_A_PART = new Set(['Partial', 'Pick', 'Omit']);
 
 /**
- * Every name a type text mentions, for following a type to the types a value
- * of it is built from: the members of a union or an intersection, an array's
- * element, each argument of a generic, the types of an inline object's
- * properties and of a function's parameters and result.
+ * The part of a declared type a text takes: which of the type's members a
+ * value written for the text carries.
+ */
+export interface TypePart {
+  /** The member names the part is told by: the ones it leaves out or, with
+   *  `only`, the only ones it keeps. */
+  readonly keys: ReadonlySet<string>;
+  readonly only: boolean;
+  /** Whether a value may leave out every member it keeps (`Partial`). */
+  readonly optional: boolean;
+}
+
+/** A type taken whole: every member, each as required as the type declares. */
+export const WHOLE_TYPE: TypePart = { keys: new Set(), only: false, optional: false };
+
+/** Whether a value of this part of a type carries the type's member of this
+ *  name at all, required or not. */
+export function keepsMember(part: TypePart, member: string): boolean {
+  return part.keys.has(member) === part.only;
+}
+
+/** A name a type text mentions, and the part of that type the text takes. */
+export interface TakenType {
+  name: string;
+  part: TypePart;
+}
+
+/**
+ * Every name a type text mentions, each with the part of that type a value of
+ * the text is built from: the members of a union or an intersection, an
+ * array's element, each argument of a generic, the types of an inline
+ * object's properties and of a function's parameters and result.
  *
  * `bareTypeName` answers which one declared type a text names, and refuses a
  * text that names several. This reads them all, the one `bareTypeName` reads
@@ -192,18 +224,58 @@ const WRAPPERS_OF_A_PART = new Set(['Partial', 'Pick']);
  * `\Acme\Foo`) and each of its segments (`models`, `Foo`), since the declared
  * type may be recorded under either.
  *
+ * A name is taken whole (`WHOLE_TYPE`) unless it stands under one of
+ * `WRAPPERS_OF_A_PART`, which gives the part to each type its first argument
+ * names at the top: alone, as a member of a union or an intersection, in
+ * parentheses, or under another of the three. `Omit<Foo, 'a' | 'b'>` takes
+ * `Foo` without `a` and `b`, `Pick<Foo & Bar, 'a'>` only the `a` of each,
+ * `Partial<Omit<Foo, 'a'>>` every member of `Foo` but `a`, none of them
+ * required. The keys are the string literals the text spells out, a union of
+ * them in any quotes and spacing. Where it spells none (`Omit<Foo, Keys>`,
+ * `Omit<Foo, keyof Bar>`), the part is not known and nothing is made up for
+ * it: an `Omit` is then read as any other generic, whole, and a `Pick` is not
+ * read at all, as neither was before the keys were read.
+ *
+ * What else a wrapper's first argument holds (an object type written in
+ * place, another generic, an array) has no declared type's members for the
+ * part to choose among. Under `Omit` and `Partial` it is read as any other
+ * text, each name whole; under `Pick`, whose keys choose among members the
+ * text spells out in place, it is not read. So is an argument with a function
+ * type anywhere in it, all of it: where a function's result ends is not told
+ * apart from where a union's member does.
+ *
+ * `part` is the part the text itself is taken in, for a text one type stands
+ * for (a supertype's entry, what a type alias stands for) where that type is
+ * taken in part: it applies as a wrapper's does.
+ *
  * It over-approximates on purpose. A property name, a parameter name and a
  * keyword are names too (`{ body: Foo }` gives `body` and `Foo`), and the
- * caller keeps the ones that are declared types. Two things are left out:
- *
- *  - a string literal, whole (`Omit<Foo, "id">` gives `Omit` and `Foo`), which
- *    is also why a quoted forward reference (`Optional["Foo"]`) is not
- *    followed, as `bareTypeName` does not look one up;
- *  - the arguments of `Partial<…>` and `Pick<…>` (`WRAPPERS_OF_A_PART`):
- *    `Partial<Foo> | Bar` gives `Bar`.
+ * caller keeps the ones that are declared types. A string literal is left
+ * out, whole, which is also why a quoted forward reference (`Optional["Foo"]`)
+ * is not followed, as `bareTypeName` does not look one up.
+ */
+export function typesTakenIn(typeText: string, part: TypePart = WHOLE_TYPE): TakenType[] {
+  const taken: TakenType[] = [];
+  if (part === WHOLE_TYPE) takeWhole(typeText, taken);
+  else takePart(typeText, part, true, taken);
+  return taken;
+}
+
+/**
+ * Every name a type text takes whole (`typesTakenIn`): the names a value of
+ * the text is built from with all their members. `Promise<Foo[]> | Bar` gives
+ * `Promise`, `Foo` and `Bar`; `Omit<Foo, 'a'> | Bar` and `Partial<Foo> | Bar`
+ * give `Bar`, since each takes a part of `Foo`.
  */
 export function typeNamesIn(typeText: string): string[] {
-  const names = new Set<string>();
+  return typesTakenIn(typeText)
+    .filter(({ part }) => part === WHOLE_TYPE)
+    .map(({ name }) => name);
+}
+
+/** Reads a text each name of which is taken whole, but for what stands under
+ *  a wrapper of a part. */
+function takeWhole(typeText: string, taken: TakenType[]): void {
   let i = 0;
   while (i < typeText.length) {
     const char = typeText[i];
@@ -218,17 +290,105 @@ export function typeNamesIn(typeText: string): string[] {
       continue;
     }
     i += path.length;
-    if (WRAPPERS_OF_A_PART.has(path)) {
-      const end = typeArgumentsEnd(typeText, i);
-      if (end !== undefined) {
+    const end = WRAPPERS_OF_A_PART.has(path) ? typeArgumentsEnd(typeText, i) : undefined;
+    if (end !== undefined) {
+      const argument = wrapperArgument(path, typeText.slice(typeText.indexOf('<', i) + 1, end - 1), WHOLE_TYPE);
+      if (argument) takePart(argument.text, argument.part, path !== 'Pick', taken);
+      // Arguments that say no part: an `Omit` is a generic like any other.
+      if (argument || path !== 'Omit') {
         i = end;
         continue;
       }
     }
-    names.add(path);
-    for (const segment of path.split(NAME_PATH_SEPARATOR)) if (segment !== '') names.add(segment);
+    takeName(path, WHOLE_TYPE, taken);
   }
-  return [...names];
+}
+
+/**
+ * Reads a text that is taken in part: the part goes to each name at the top
+ * of the text, and what stands there that is no name is read whole when
+ * `elseWhole` says so (see `typesTakenIn`).
+ */
+function takePart(text: string, part: TypePart, elseWhole: boolean, taken: TakenType[]): void {
+  const trimmed = text.trim();
+  // A function type's `|` and `&` belong to what it returns, so a text with
+  // one in it is not taken apart.
+  for (const separator of trimmed.includes('=>') ? [] : (['|', '&'] as const)) {
+    const members = splitTopLevel(trimmed, separator);
+    if (members === undefined || members.length === 1) continue;
+    // Each member is shorter than the text, so this ends.
+    for (const member of members) takePart(member, part, elseWhole, taken);
+    return;
+  }
+  const group = trimmed.startsWith('(') ? enclosed(trimmed) : undefined;
+  if (group !== undefined) return takePart(group, part, elseWhole, taken);
+
+  NAME_PATH.lastIndex = 0;
+  const path = NAME_PATH.exec(trimmed)?.[0];
+  if (path !== undefined && path === trimmed) return takeName(path, part, taken);
+  if (path !== undefined && WRAPPERS_OF_A_PART.has(path) && typeArgumentsEnd(trimmed, path.length) === trimmed.length) {
+    const argument = wrapperArgument(path, trimmed.slice(trimmed.indexOf('<') + 1, -1), part);
+    if (argument) return takePart(argument.text, argument.part, elseWhole && path !== 'Pick', taken);
+  }
+  if (elseWhole) takeWhole(trimmed, taken);
+}
+
+/** Records a name path and each of its segments, once per part. */
+function takeName(path: string, part: TypePart, taken: TakenType[]): void {
+  for (const name of [path, ...path.split(NAME_PATH_SEPARATOR)]) {
+    if (name !== '' && !taken.some((other) => other.name === name && other.part === part)) taken.push({ name, part });
+  }
+}
+
+/**
+ * What a wrapper of a part takes, given the text between its angle brackets:
+ * its first argument, and the part of it a value carries when the wrapper
+ * itself is taken in `part`. Undefined when the arguments do not say: a
+ * `Partial` of anything but one argument, an `Omit` or a `Pick` of anything
+ * but two, or whose second spells no keys (`listedKeys`).
+ */
+function wrapperArgument(
+  wrapper: string,
+  content: string,
+  part: TypePart,
+): { text: string; part: TypePart } | undefined {
+  const args = splitTopLevel(content, ',');
+  if (args === undefined) return undefined;
+  if (wrapper === 'Partial')
+    return args.length === 1 ? { text: args[0], part: { ...part, optional: true } } : undefined;
+  const keys = args.length === 2 ? listedKeys(args[1]) : undefined;
+  if (keys === undefined) return undefined;
+  const only = wrapper === 'Pick';
+  // The members left are the ones both keep: the part's, less the ones an
+  // `Omit` lists or the ones a `Pick` does not.
+  if (part.only)
+    return { text: args[0], part: { ...part, keys: new Set([...part.keys].filter((key) => keys.has(key) === only)) } };
+  const left = only ? [...keys].filter((key) => !part.keys.has(key)) : [...part.keys, ...keys];
+  return { text: args[0], part: { ...part, only, keys: new Set(left) } };
+}
+
+/**
+ * The keys a wrapper's second argument spells out: one string literal or a
+ * union of them (`'a'`, `"a" | "b"`, each on a line of its own behind a
+ * leading `|`). Undefined for anything else, a name that stands for the keys
+ * (`Keys`, `keyof Bar`) and a literal with an escape or a placeholder in it
+ * included: what the text does not spell is not guessed.
+ */
+function listedKeys(text: string): Set<string> | undefined {
+  const members = splitTopLevel(text, '|');
+  if (members === undefined) return undefined;
+  const keys = new Set<string>();
+  for (const [i, member] of members.entries()) {
+    const literal = member.trim();
+    if (literal === '' && i === 0 && members.length > 1) continue;
+    const quote = literal[0];
+    if (literal.length < 2 || (quote !== '"' && quote !== "'" && quote !== '`') || !literal.endsWith(quote))
+      return undefined;
+    const key = literal.slice(1, -1);
+    if (key.includes(quote) || key.includes('\\') || (quote === '`' && key.includes('${'))) return undefined;
+    keys.add(key);
+  }
+  return keys;
 }
 
 /** The index after the `<…>` that opens at `start` (spaces before it

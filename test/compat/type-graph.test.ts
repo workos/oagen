@@ -12,10 +12,14 @@ import {
   bareTypeName,
   genericWrapperOf,
   handsBackItsArgument,
+  keepsMember,
   supertypeName,
   typeNamesIn,
+  typesTakenIn,
+  WHOLE_TYPE,
   withoutRepeatedIntersectionMembers,
 } from '../../src/compat/type-names.js';
+import type { TakenType, TypePart } from '../../src/compat/type-names.js';
 
 /**
  * #750: what a snapshot says about its declared types, and the three readers
@@ -98,8 +102,11 @@ describe('#750 typeNamesIn', () => {
   });
 
   it('skips a string literal whole', () => {
-    expect(names("Omit<Foo, 'id' | 'name'>")).toEqual(['Foo', 'Omit']);
-    expect(names('Omit<Foo, "id">')).toEqual(['Foo', 'Omit']);
+    expect(names("Exclude<Foo, 'id' | 'name'>")).toEqual(['Exclude', 'Foo']);
+    expect(names('Extract<Foo, "id">')).toEqual(['Extract', 'Foo']);
+    // The keys of an `Omit` are read: it takes a part of `Foo`, not `Foo` whole.
+    expect(names("Omit<Foo, 'id' | 'name'>")).toEqual([]);
+    expect(names('Omit<Foo, "id">')).toEqual([]);
     expect(names("'Foo' | 'Bar'")).toEqual([]);
     expect(names('Literal["Foo", "Bar"]')).toEqual(['Literal']);
     // A quoted forward reference is not followed, as `bareTypeName` does not look one up.
@@ -119,16 +126,18 @@ describe('#750 typeNamesIn', () => {
     expect(names('`pets`')).toEqual([]);
   });
 
-  it('does not read the arguments of Partial and Pick', () => {
+  it('gives the names taken whole: not a type a Partial, a Pick or an Omit takes a part of', () => {
     expect(names('Partial<Foo>')).toEqual([]);
     expect(names("Pick<Foo, 'id'>")).toEqual([]);
+    expect(names("Omit<Foo, 'id'>")).toEqual([]);
     expect(names('Partial<Foo> | Bar')).toEqual(['Bar']);
-    expect(names('Partial<Record<string, Foo>> & Bar')).toEqual(['Bar']);
     expect(names('Partial <Foo>')).toEqual([]);
     expect(names('Promise<Partial<Foo>>')).toEqual(['Promise']);
-    expect(names('Partial<(a: Foo) => Bar> | Baz')).toEqual(['Baz']);
-    // The other utility types keep the required members of their argument.
-    expect(names("Omit<Foo, 'id'>")).toEqual(['Foo', 'Omit']);
+    // What a `Partial` holds that is no declared type's name is read as any
+    // other text: a value of it is built from whole `Foo`s.
+    expect(names('Partial<Record<string, Foo>> & Bar')).toEqual(['Bar', 'Foo', 'Record', 'string']);
+    expect(names('Partial<(a: Foo) => Bar> | Baz')).toEqual(['Bar', 'Baz', 'Foo', 'a']);
+    // The other utility types keep every member of their argument.
     expect(names('Required<Foo>')).toEqual(['Foo', 'Required']);
     expect(names('Readonly<Foo>')).toEqual(['Foo', 'Readonly']);
     // A type that is merely named so, and an argument list that never closes.
@@ -189,6 +198,183 @@ describe('#750 typeNamesIn', () => {
     }
     expect(typeNamesIn('')).toEqual([]);
     expect(typeNamesIn('123')).toEqual([]);
+  });
+});
+
+/** A taken type as one word: `Foo` whole, `Foo without(a,b)`, `Foo only(a)`,
+ *  `Foo optional`, `Foo optional without(a)`. */
+const partOf = ({ name, part }: TakenType): string => {
+  if (part === WHOLE_TYPE) return name;
+  const keys = [...part.keys].sort().join(',');
+  const members = part.only ? ` only(${keys})` : part.keys.size > 0 ? ` without(${keys})` : '';
+  return `${name}${part.optional ? ' optional' : ''}${members}`;
+};
+const taken = (text: string, part?: TypePart) => typesTakenIn(text, part).map(partOf);
+const without = (...keys: string[]): TypePart => ({ keys: new Set(keys), only: false, optional: false });
+
+describe('#750 typesTakenIn (#759 review: the part of a type an Omit, a Pick or a Partial takes)', () => {
+  it.each<[string, string[]]>([
+    // the three wrappers
+    ['Omit<Foo, "a">', ['Foo without(a)']],
+    ['Pick<Foo, "a">', ['Foo only(a)']],
+    ['Partial<Foo>', ['Foo optional']],
+    // the keys: a union, in any quotes and spacing
+    ["Omit<Foo, 'a' | 'b'>", ['Foo without(a,b)']],
+    ['Omit<Foo, "a" | "a">', ['Foo without(a)']],
+    ['Omit<Foo, `a`>', ['Foo without(a)']],
+    ['Omit < Foo , "a" >', ['Foo without(a)']],
+    ["Omit<\n  Foo,\n  | 'a'\n  | 'b'\n>", ['Foo without(a,b)']],
+    ['Omit<Foo, "owner-id" | "a b">', ['Foo without(a b,owner-id)']],
+    ['Partial <Foo>', ['Foo optional']],
+    // one inside another: the members both keep, none required under a Partial
+    ['Partial<Omit<Foo, "a">>', ['Foo optional without(a)']],
+    ['Omit<Partial<Foo>, "a">', ['Foo optional without(a)']],
+    ['Omit<Omit<Foo, "a">, "b">', ['Foo without(a,b)']],
+    ['Pick<Omit<Foo, "a">, "a" | "b">', ['Foo only(b)']],
+    ['Omit<Pick<Foo, "a" | "b">, "a">', ['Foo only(b)']],
+    ['Pick<Pick<Foo, "a" | "b">, "b" | "c">', ['Foo only(b)']],
+    ['Partial<Pick<Foo, "a">>', ['Foo optional only(a)']],
+    ['Pick<Partial<Foo>, "a">', ['Foo optional only(a)']],
+    ['Partial<Partial<Foo>>', ['Foo optional']],
+    // each type the first argument names at the top
+    ['Omit<Foo & Bar, "a">', ['Foo without(a)', 'Bar without(a)']],
+    ['Omit<Foo | Bar, "a">', ['Foo without(a)', 'Bar without(a)']],
+    ['Omit<(Foo | Bar) & Baz, "a">', ['Foo without(a)', 'Bar without(a)', 'Baz without(a)']],
+    ['Omit<| Foo | Bar, "a">', ['Foo without(a)', 'Bar without(a)']],
+    ['Omit<(Foo), "a">', ['Foo without(a)']],
+    ['Omit<models.Foo, "a">', ['models.Foo without(a)', 'models without(a)', 'Foo without(a)']],
+    // wherever the wrapper stands
+    ['Promise<Omit<Foo, "a">>', ['Promise', 'Foo without(a)']],
+    ['Readonly<Omit<Foo, "a">>', ['Readonly', 'Foo without(a)']],
+    ['Omit<Foo, "a">[]', ['Foo without(a)']],
+    ['{ owner: Omit<Foo, "a"> }', ['owner', 'Foo without(a)']],
+    ['(owner: Omit<Foo, "a">) => void', ['owner', 'Foo without(a)', 'void']],
+    ['Omit<Foo, "a"> & { a?: Bar }', ['Foo without(a)', 'a', 'Bar']],
+    // a type taken twice is given twice, each time with its part
+    ['Omit<Foo, "a"> | Foo', ['Foo without(a)', 'Foo']],
+    ['Foo | Omit<Foo, "a">', ['Foo', 'Foo without(a)']],
+    ['Omit<Foo, "a"> | Omit<Foo, "b">', ['Foo without(a)', 'Foo without(b)']],
+    ['Partial<Foo> | Foo', ['Foo optional', 'Foo']],
+    ['Partial<Foo> & Pick<Foo, "a">', ['Foo optional', 'Foo only(a)']],
+  ])('%j → %j', (text, expected) => {
+    expect(taken(text)).toEqual(expected);
+  });
+
+  it('reads whole what a first argument holds that is no declared type by name, but under a Pick', () => {
+    // Nothing names the type whose members the keys choose among.
+    expect(taken('Omit<Page<Foo>, "a">')).toEqual(['Page', 'Foo']);
+    expect(taken('Omit<{ foo: Foo }, "a">')).toEqual(['foo', 'Foo']);
+    expect(taken('Omit<Foo[], "a">')).toEqual(['Foo']);
+    expect(taken('Omit<Foo & Page<Bar>, "a">')).toEqual(['Foo without(a)', 'Page', 'Bar']);
+    expect(taken('Partial<Record<string, Foo>>')).toEqual(['Record', 'string', 'Foo']);
+    expect(taken('Partial<{ foo: Foo }>')).toEqual(['foo', 'Foo']);
+    // A `Pick` keeps only what its keys list, and which of these that is the text does not say.
+    expect(taken('Pick<{ foo: Foo }, "foo">')).toEqual([]);
+    expect(taken('Pick<Page<Foo>, "a">')).toEqual([]);
+    expect(taken('Pick<Foo & { bar: Bar }, "a">')).toEqual(['Foo only(a)']);
+    // An argument with a function type in it is not taken apart at all.
+    expect(taken('Partial<(a: Foo) => Bar | Baz>')).toEqual(['a', 'Foo', 'Bar', 'Baz']);
+    expect(taken('Omit<Foo & { done: () => void }, "a">')).toEqual(['Foo', 'done', 'void']);
+    expect(taken('Pick<Foo & { done: () => void }, "a">')).toEqual([]);
+  });
+
+  it('makes up no part where the text spells no keys: an Omit is read whole, a Pick not at all', () => {
+    for (const keys of [
+      'Keys',
+      'keyof Bar',
+      '"a" | Keys',
+      'never',
+      '1',
+      '("a" | "b")',
+      '`a${string}`',
+      '"a\\"b"',
+      '',
+    ]) {
+      const omitted = typesTakenIn(`Omit<Foo, ${keys}>`);
+      expect(
+        omitted.map(({ name }) => name),
+        keys,
+      ).toEqual(expect.arrayContaining(['Omit', 'Foo']));
+      expect(
+        omitted.every(({ part }) => part === WHOLE_TYPE),
+        keys,
+      ).toBe(true);
+      expect(taken(`Pick<Foo, ${keys}>`), keys).toEqual([]);
+    }
+    // The wrong number of arguments says no part either.
+    expect(taken('Omit<Foo>')).toEqual(['Omit', 'Foo']);
+    expect(taken('Omit<Foo, "a", "b">')).toEqual(['Omit', 'Foo']);
+    expect(taken('Pick<Foo>')).toEqual([]);
+    expect(taken('Partial<Foo, Bar>')).toEqual([]);
+    expect(taken('Partial<>')).toEqual([]);
+    // One that spells none, under one that does.
+    expect(taken('Partial<Omit<Foo, Keys>>')).toEqual(['Omit', 'Foo', 'Keys']);
+    expect(taken('Omit<Omit<Foo, Keys>, "a">')).toEqual(['Omit', 'Foo', 'Keys']);
+    expect(taken('Omit<Pick<Foo, Keys>, "a">')).toEqual([]);
+    expect(taken('Pick<Omit<Foo, Keys>, "a">')).toEqual([]);
+  });
+
+  it('reads only the three wrappers, by name and with their angle brackets', () => {
+    expect(taken('Omitted<Foo, "a">')).toEqual(['Omitted', 'Foo']);
+    expect(taken('ns.Omit<Foo, "a">')).toEqual(['ns.Omit', 'ns', 'Omit', 'Foo']);
+    expect(taken('Omit')).toEqual(['Omit']);
+    expect(taken('Omit<Foo, "a"')).toEqual(['Omit', 'Foo']);
+    expect(taken('Omit[Foo, "a"]')).toEqual(['Omit', 'Foo']);
+    expect(taken('Required<Foo>')).toEqual(['Required', 'Foo']);
+    expect(taken('Exclude<Foo, "a">')).toEqual(['Exclude', 'Foo']);
+  });
+
+  it('takes a text in the part its own type is taken in', () => {
+    // A supertype's entry, or what an alias stands for, of a type taken without `a`.
+    expect(taken('Base', without('a'))).toEqual(['Base without(a)']);
+    expect(taken('A | B', without('a'))).toEqual(['A without(a)', 'B without(a)']);
+    expect(taken('A & (B | C)', without('a'))).toEqual(['A without(a)', 'B without(a)', 'C without(a)']);
+    expect(taken('Omit<Base, "b">', without('a'))).toEqual(['Base without(a,b)']);
+    expect(taken('Pick<Base, "a" | "c">', without('a'))).toEqual(['Base only(c)']);
+    expect(taken('Partial<Base>', without('a'))).toEqual(['Base optional without(a)']);
+    // The part is of the type's own members, not of what those are built from.
+    expect(taken('Base[]', without('a'))).toEqual(['Base']);
+    expect(taken('Promise<Base>', without('a'))).toEqual(['Promise', 'Base']);
+    expect(taken('{ base: Base }', without('a'))).toEqual(['base', 'Base']);
+    expect(taken('Omit<Base, Keys>', without('a'))).toEqual(['Omit', 'Base', 'Keys']);
+    expect(taken('Pick<Base, Keys>', without('a'))).toEqual([]);
+    expect(taken('', without('a'))).toEqual([]);
+  });
+
+  it('says which members a part keeps', () => {
+    const [{ part: omitted }] = typesTakenIn('Omit<Foo, "a">');
+    const [{ part: picked }] = typesTakenIn('Pick<Foo, "a">');
+    const [{ part: partial }] = typesTakenIn('Partial<Foo>');
+    expect([keepsMember(omitted, 'a'), keepsMember(omitted, 'b')]).toEqual([false, true]);
+    expect([keepsMember(picked, 'a'), keepsMember(picked, 'b')]).toEqual([true, false]);
+    expect([keepsMember(partial, 'a'), partial.optional, omitted.optional]).toEqual([true, true, false]);
+    expect([keepsMember(WHOLE_TYPE, 'a'), WHOLE_TYPE.optional]).toEqual([true, false]);
+    // A key is a whole name.
+    expect(keepsMember(typesTakenIn('Omit<Foo, "owner">')[0].part, 'ownerId')).toBe(true);
+  });
+
+  it('reads a text with none of the wrappers as before: every name, whole', () => {
+    for (const text of [
+      'Foo',
+      'Foo[] | Bar',
+      'Record<string, Promise<Foo | null>>',
+      '{ body: Foo; done: (error: Failure) => void; }',
+      'Optional["Foo"]',
+      "Option<&'a Foo>",
+      'crate::models::Foo',
+      'list[models.Foo] | None',
+      'Required<Foo> & Readonly<Bar>',
+    ]) {
+      const all = typesTakenIn(text);
+      expect(
+        all.every(({ part }) => part === WHOLE_TYPE),
+        text,
+      ).toBe(true);
+      expect(
+        all.map(({ name }) => name),
+        text,
+      ).toEqual(typeNamesIn(text));
+    }
   });
 });
 
@@ -571,7 +757,7 @@ describe('#750 inputTypes', () => {
     expect([...taken.keys()].sort()).toEqual(['A', 'B', 'Node']);
   });
 
-  it('does not go through Partial or Pick', () => {
+  it('reaches a type a Partial, a Pick or an Omit takes a part of, and says which members', () => {
     const taken = inputTypes(
       snapshot(
         callable('PetsClient.update', 'Partial<Pet>', "Pick<Owner, 'email'>", "Omit<Tag, 'id'>"),
@@ -580,7 +766,145 @@ describe('#750 inputTypes', () => {
         type('Tag', { extends: [] }),
       ),
     );
-    expect([...taken.keys()]).toEqual(['Tag']);
+    expect([...taken.keys()]).toEqual(['Pet', 'Owner', 'Tag']);
+    const supplied = (owner: string, name: string) => [
+      taken.member(field(owner, name, 'string')) ?? null,
+      taken.requiredMember(field(owner, name, 'string')) ?? null,
+    ];
+    // A `Partial` takes every member and requires none.
+    expect(supplied('Pet', 'name')).toEqual(['PetsClient.update', null]);
+    // A `Pick` takes the members it lists, an `Omit` the ones it does not.
+    expect(supplied('Owner', 'email')).toEqual(['PetsClient.update', 'PetsClient.update']);
+    expect(supplied('Owner', 'ownerId')).toEqual([null, null]);
+    expect(supplied('Tag', 'id')).toEqual([null, null]);
+    expect(supplied('Tag', 'label')).toEqual(['PetsClient.update', 'PetsClient.update']);
+  });
+
+  it('counts a member as supplied when one way to the type keeps it', () => {
+    const owner = [type('Owner', { extends: [] })];
+    const required = (...callables: CompatSymbol[]) =>
+      inputTypes(snapshot(...callables, ...owner)).requiredMember(field('Owner', 'ownerId', 'string'));
+    const omitted = 'Omit<Owner, "ownerId">';
+    expect(required(callable('C.create', omitted))).toBeUndefined();
+    // the same type, whole: in the same callable, a later one, an earlier one
+    expect(required(callable('C.create', omitted, 'Owner'))).toBe('C.create');
+    expect(required(callable('C.create', omitted), callable('C.put', 'Owner'))).toBe('C.put');
+    expect(required(callable('C.put', 'Owner'), callable('C.create', omitted))).toBe('C.put');
+    expect(required(callable('C.create', `${omitted} | Owner`))).toBe('C.create');
+    // another part that keeps the field
+    expect(required(callable('C.create', omitted, 'Omit<Owner, "a">'))).toBe('C.create');
+    expect(required(callable('C.create', omitted, 'Pick<Owner, "ownerId">'))).toBe('C.create');
+    // parts that do not: a second Omit of it, a Pick of something else, a Partial
+    expect(required(callable('C.create', omitted, 'Omit<Owner, "ownerId" | "a">'))).toBeUndefined();
+    expect(required(callable('C.create', omitted, 'Pick<Owner, "name">'))).toBeUndefined();
+    expect(required(callable('C.create', omitted, 'Partial<Owner>'))).toBeUndefined();
+    // ... which is still one callers may supply
+    expect(
+      inputTypes(snapshot(callable('C.create', omitted, 'Partial<Owner>'), ...owner)).member(
+        field('Owner', 'ownerId', 'string'),
+      ),
+    ).toBe('C.create');
+  });
+
+  it('goes on through the members a part keeps, and no others', () => {
+    const through = (parameter: string) =>
+      [
+        ...inputTypes(
+          snapshot(
+            callable('C.create', parameter),
+            type('Owner', { extends: [] }),
+            field('Owner', 'name', 'string'),
+            field('Owner', 'address', 'Address'),
+            field('Owner', 'pets', 'Pet[]'),
+            type('Address', { extends: [] }),
+            field('Address', 'country', 'Country'),
+            type('Country', { extends: [] }),
+            type('Pet', { extends: [] }),
+          ),
+        ).keys(),
+      ].sort();
+    expect(through('Owner')).toEqual(['Address', 'Country', 'Owner', 'Pet']);
+    expect(through('Omit<Owner, "ownerId">')).toEqual(['Address', 'Country', 'Owner', 'Pet']);
+    expect(through('Omit<Owner, "address">')).toEqual(['Owner', 'Pet']);
+    expect(through('Omit<Owner, "address" | "pets">')).toEqual(['Owner']);
+    expect(through('Pick<Owner, "address">')).toEqual(['Address', 'Country', 'Owner']);
+    expect(through('Pick<Owner, "name">')).toEqual(['Owner']);
+    // A member a caller may leave out is still one whose type they build when they do not.
+    expect(through('Partial<Owner>')).toEqual(['Address', 'Country', 'Owner', 'Pet']);
+    // A member's own type is taken whole, whatever part its owner is taken in.
+    expect(through('Pick<Owner, "address"> | Omit<Owner, "address">')).toEqual(['Address', 'Country', 'Owner', 'Pet']);
+  });
+
+  it('takes a supertype, and what an alias stands for, in the part the type is taken in', () => {
+    const taken = inputTypes(
+      snapshot(
+        callable('C.create', 'Omit<Child, "ownerId">'),
+        callable('C.update', 'Pick<Named, "name">'),
+        callable('C.link', 'Omit<Input, "ownerId">'),
+        type('Child', { extends: ['Base'] }),
+        type('Base', { extends: [] }),
+        // an interface that extends an Omit, and an alias written with one
+        type('Named', { extends: ['Omit<Owner, "ownerId">'] }),
+        type('Owner', { extends: [] }),
+        type('Input', { aliasOf: 'Linked' }),
+        type('Linked', { extends: ['Omit<Target, "id">'], aliasOf: 'Omit<Target, "id"> & { note?: string; }' }),
+        type('Target', { extends: [] }),
+      ),
+    );
+    const required = (owner: string, name: string) => taken.requiredMember(field(owner, name, 'string')) ?? null;
+    // `Omit<Child, 'ownerId'>` leaves out the `ownerId` Child inherits as well.
+    expect([required('Child', 'ownerId'), required('Base', 'ownerId')]).toEqual([null, null]);
+    expect([required('Child', 'name'), required('Base', 'name')]).toEqual(['C.create', 'C.create']);
+    // `Pick<Named, 'name'>`, where Named extends `Omit<Owner, 'ownerId'>`.
+    expect([required('Owner', 'name'), required('Owner', 'ownerId'), required('Owner', 'age')]).toEqual([
+      'C.update',
+      null,
+      null,
+    ]);
+    // Through an alias of a name, to a type whose `extends` and `aliasOf` both name the Omit.
+    expect([required('Linked', 'ownerId'), required('Linked', 'note')]).toEqual([null, 'C.link']);
+    expect([required('Target', 'id'), required('Target', 'ownerId'), required('Target', 'label')]).toEqual([
+      null,
+      null,
+      'C.link',
+    ]);
+  });
+
+  it('reads a member by its own name, in quotes or not, from any snapshot of the SDK', () => {
+    const taken = inputTypes(
+      snapshot(callable('C.create', 'Omit<Owner, "owner-id" | "ownerId">'), type('Owner', { extends: [] })),
+    );
+    // None of these symbols is in the snapshot: the fields are the ones a candidate added.
+    expect(taken.requiredMember(field('Owner', 'owner-id', 'string'))).toBeUndefined();
+    expect(taken.requiredMember(field('Owner', '"owner-id"', 'string'))).toBeUndefined();
+    expect(taken.requiredMember(field('Owner', "'owner-id'", 'string'))).toBeUndefined();
+    expect(taken.requiredMember(field('Owner', 'ownerId', 'string'))).toBeUndefined();
+    // A key is a whole name, and a name is the member's own, not its owner's.
+    expect(taken.requiredMember(field('Owner', 'owner', 'string'))).toBe('C.create');
+    expect(taken.requiredMember(field('Owner', 'ownerIdentity', 'string'))).toBe('C.create');
+    expect(taken.requiredMember(field('Other', 'name', 'string'))).toBeUndefined();
+    // A symbol that names no owner, or is not what a snapshot holds, is supplied by no one.
+    expect(taken.member(symbol('field', 'Owner.name'))).toBeUndefined();
+    for (const odd of [null, 1, {}, []]) {
+      const member = { ...field('Owner', 'name', 'string'), fqName: odd as never };
+      expect(() => taken.member(member), JSON.stringify(odd)).not.toThrow();
+      expect(() => taken.requiredMember({ ...member, ownerFqName: odd as never }), JSON.stringify(odd)).not.toThrow();
+    }
+  });
+
+  it('ends on types that reach each other in parts', () => {
+    const taken = inputTypes(
+      snapshot(
+        callable('C.put', 'Omit<A, "a">'),
+        type('A', { extends: ['Omit<B, "b">'], aliasOf: 'Pick<A, "x" | "y"> & Partial<B>' }),
+        field('A', 'self', 'Omit<A, "self">'),
+        field('A', 'other', 'Pick<B, "x">[]'),
+        type('B', { extends: ['Omit<A, "c">', 'Partial<B>'] }),
+        field('B', 'x', 'Partial<A> | Omit<B, "x">'),
+      ),
+    );
+    expect([...taken.keys()].sort()).toEqual(['A', 'B']);
+    expect(taken.member(field('A', 'a', 'string'))).toBe('C.put');
   });
 
   it('reaches nothing in a snapshot written before the keys existed, beyond what its fields say', () => {
